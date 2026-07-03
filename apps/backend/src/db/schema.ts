@@ -1,0 +1,41 @@
+export const schema = `
+CREATE TABLE IF NOT EXISTS task_intents (
+  id TEXT PRIMARY KEY,
+  raw_input TEXT NOT NULL,
+  parsed_description TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'queued', 'awaiting_approval', 'executing', 'completed', 'failed', 'rejected')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_steps (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task_intents(id) ON DELETE RESTRICT,
+  step_number INTEGER NOT NULL,
+  action_type TEXT NOT NULL CHECK (action_type IN ('analysis', 'read_file', 'file_write', 'file_edit', 'shell_command', 'unknown')),
+  action_payload TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending_approval', 'approved', 'rejected', 'executing', 'completed', 'failed')),
+  requires_approval INTEGER NOT NULL CHECK (requires_approval IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(task_id, step_number)
+);
+
+CREATE TABLE IF NOT EXISTS evidence (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task_intents(id) ON DELETE RESTRICT,
+  step_id TEXT NOT NULL REFERENCES execution_steps(id) ON DELETE RESTRICT,
+  stdout TEXT NOT NULL,
+  stderr TEXT NOT NULL,
+  exit_code INTEGER NOT NULL,
+  diff TEXT NOT NULL,
+  validation_passed INTEGER NOT NULL CHECK (validation_passed IN (0, 1)),
+  validation_summary TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_steps_task_id ON execution_steps(task_id, step_number);
+CREATE INDEX IF NOT EXISTS idx_evidence_task_id ON evidence(task_id, created_at);
+`;
+

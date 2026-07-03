@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+data/*.sqlite
+data/*.sqlite-*
+data/audit.jsonl
+.env
+.DS_Store
