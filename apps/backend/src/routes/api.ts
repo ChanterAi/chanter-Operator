@@ -13,6 +13,7 @@ export function createApiRouter(service: OperatorService): Router {
   const router = Router();
 
   router.get("/health", (_request, response) => {
+    const integrity = service.checkIntegrity();
     response.json({
       status: "ok",
       runner: "mock",
@@ -20,6 +21,24 @@ export function createApiRouter(service: OperatorService): Router {
       execution: "contained_simulation",
       real_execution_enabled: false,
       network_execution_enabled: false,
+      integrity: {
+        healthy: integrity.healthy,
+        database: {
+          tasks: integrity.database.taskCount,
+          steps: integrity.database.stepCount,
+          evidence: integrity.database.evidenceCount,
+          issues: integrity.database.issues.length,
+        },
+        audit: {
+          totalLines: integrity.audit.totalLines,
+          validEvents: integrity.audit.validEvents,
+          parseErrors: integrity.audit.parseErrors,
+          missingFieldErrors: integrity.audit.missingFieldErrors,
+          invalidTypeErrors: integrity.audit.invalidTypeErrors,
+          crossRefIssues: integrity.audit.crossRefIssues.length,
+        },
+        checkedAt: integrity.timestamp,
+      },
     });
   });
 

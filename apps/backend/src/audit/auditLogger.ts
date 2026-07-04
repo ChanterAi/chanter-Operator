@@ -19,6 +19,11 @@ export class AuditLogger {
     }
   }
 
+  /** Read-only access to the audit file path for diagnostics. */
+  get path(): string {
+    return this.auditPath;
+  }
+
   append(
     event_type: AuditEventType,
     task_id: string,

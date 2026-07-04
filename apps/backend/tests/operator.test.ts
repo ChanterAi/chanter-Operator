@@ -7,6 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { AuditLogger, AuditStorageError } from "../src/audit/auditLogger.js";
 import { createDatabase } from "../src/db/database.js";
+import { scanAuditLog } from "../src/integrity/auditScanner.js";
+import { runIntegrityCheck } from "../src/integrity/integrityChecker.js";
+import type { IntegrityReport } from "../src/integrity/integrityChecker.js";
 import { MockRunner } from "../src/runners/mockRunner.js";
 import { OperatorService } from "../src/services/operatorService.js";
 import type { ActionType } from "../src/types.js";
@@ -340,3 +343,286 @@ describe("CHANTER Operator P0 workflow", () => {
     expect(runnerSource).not.toMatch(/require\s*\(\s*['"]fs['"]|require\s*\(\s*['"]child_process['"]|require\s*\(\s*['"]net['"]|require\s*\(\s*['"]http['"]|import.*from\s*['"]fs['"]|import.*from\s*['"]child_process['"]|import.*from\s*['"]net['"]|import.*from\s*['"]http['"]/);
   });
 });
+
+// ── P0.4 Integrity Checks ───────────────────────────────────────────
+
+describe("P0.4 persistence and audit integrity", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p04-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  function makeService(): OperatorService {
+    return new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  }
+
+  // ── 1. Healthy database + audit log passes ───────────────────────
+
+  it("reports healthy integrity for a clean database and audit log", () => {
+    const svc = makeService();
+    svc.createTask({ rawInput: "Healthy creation", actionType: "analysis" });
+
+    const report = svc.checkIntegrity();
+    expect(report.healthy).toBe(true);
+    expect(report.database.issues).toHaveLength(0);
+    expect(report.database.taskCount).toBe(1);
+    expect(report.database.stepCount).toBe(1);
+    expect(report.database.evidenceCount).toBe(1);
+    expect(report.audit.validEvents).toBeGreaterThan(0);
+    expect(report.audit.parseErrors).toBe(0);
+    expect(report.audit.missingFieldErrors).toBe(0);
+    expect(report.audit.invalidTypeErrors).toBe(0);
+  });
+
+  // ── 2. Malformed audit JSONL line is reported ────────────────────
+
+  it("reports a parse error for malformed audit JSONL", () => {
+    writeFileSync(auditPath, '{"id":"a1","event_type":"task_created","task_id":"t1","data":{},"created_at":"2026-01-01T00:00:00Z"}\nnot valid json\n', "utf8");
+
+    const svc = makeService();
+    const report = svc.checkIntegrity();
+
+    expect(report.healthy).toBe(false);
+    expect(report.audit.parseErrors).toBe(1);
+    expect(report.audit.totalLines).toBe(2);
+    expect(report.audit.validEvents).toBe(1);
+  });
+
+  // ── 3. Audit event missing required fields ────────────────────────
+
+  it("reports missing required fields in audit events", () => {
+    writeFileSync(auditPath, '{"event_type":"task_created","data":{},"created_at":"2026-01-01T00:00:00Z"}\n', "utf8");
+
+    const svc = makeService();
+    const report = svc.checkIntegrity();
+
+    expect(report.healthy).toBe(false);
+    expect(report.audit.missingFieldErrors).toBe(1);
+  });
+
+  it("reports invalid event_type in audit events", () => {
+    writeFileSync(auditPath, '{"id":"a1","event_type":"sudo_command","task_id":"t1","data":{},"created_at":"2026-01-01T00:00:00Z"}\n', "utf8");
+
+    const svc = makeService();
+    const report = svc.checkIntegrity();
+
+    expect(report.healthy).toBe(false);
+    expect(report.audit.invalidTypeErrors).toBe(1);
+  });
+
+  // ── 4. Step referencing missing task ──────────────────────────────
+
+  it("reports orphaned steps referencing missing tasks", () => {
+    // Create a service for the real database
+    const svc = makeService();
+
+    // Bypass FKs only in test — production constraints remain intact
+    database.exec("PRAGMA foreign_keys = OFF;");
+    database.exec(`
+      INSERT INTO task_intents (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at)
+      VALUES ('real-task', 'real', 'real', 'completed', 0, 'CHANTER Operator', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+      INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
+      VALUES ('orphan-step', 'missing-task', 1, 'analysis', '{}', 'completed', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    `);
+    database.exec("PRAGMA foreign_keys = ON;");
+
+    const report = svc.checkIntegrity();
+    expect(report.healthy).toBe(false);
+    const orphanIssue = report.database.issues.find((i) => i.kind === "step_orphan");
+    expect(orphanIssue).toBeDefined();
+    expect(orphanIssue!.detail).toContain("missing-task");
+  });
+
+  // ── 5. Evidence referencing missing task/step ─────────────────────
+
+  it("reports evidence referencing missing task", () => {
+    const svc = makeService();
+    // Bypass FKs only in test — production constraints remain intact
+    database.exec("PRAGMA foreign_keys = OFF;");
+    database.exec(`
+      INSERT INTO task_intents (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at)
+      VALUES ('real-task', 'real', 'real', 'completed', 0, 'CHANTER Operator', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+      INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
+      VALUES ('real-step', 'real-task', 1, 'analysis', '{}', 'completed', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+      INSERT INTO evidence (id, task_id, step_id, stdout, stderr, exit_code, diff, validation_passed, validation_summary, created_at)
+      VALUES ('orphan-evid', 'missing-task', 'real-step', '', '', 0, '', 1, 'ok', '2026-01-01T00:00:00Z');
+    `);
+    database.exec("PRAGMA foreign_keys = ON;");
+
+    const report = svc.checkIntegrity();
+    expect(report.healthy).toBe(false);
+    const orphanEvid = report.database.issues.find((i) => i.kind === "evidence_orphan_task");
+    expect(orphanEvid).toBeDefined();
+    expect(orphanEvid!.detail).toContain("missing-task");
+  });
+
+  it("reports evidence referencing missing step", () => {
+    const svc = makeService();
+    // Bypass FKs only in test — production constraints remain intact
+    database.exec("PRAGMA foreign_keys = OFF;");
+    database.exec(`
+      INSERT INTO task_intents (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at)
+      VALUES ('real-task', 'real', 'real', 'completed', 0, 'CHANTER Operator', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+      INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
+      VALUES ('real-step', 'real-task', 1, 'analysis', '{}', 'completed', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+
+      INSERT INTO evidence (id, task_id, step_id, stdout, stderr, exit_code, diff, validation_passed, validation_summary, created_at)
+      VALUES ('orphan-evid2', 'real-task', 'missing-step', '', '', 0, '', 1, 'ok', '2026-01-01T00:00:00Z');
+    `);
+    database.exec("PRAGMA foreign_keys = ON;");
+
+    const report = svc.checkIntegrity();
+    expect(report.healthy).toBe(false);
+    const orphanEvid = report.database.issues.find((i) => i.kind === "evidence_orphan_step");
+    expect(orphanEvid).toBeDefined();
+    expect(orphanEvid!.detail).toContain("missing-step");
+  });
+
+  // ── 6. Health endpoint returns integrity summary ──────────────────
+
+  it("health endpoint includes integrity summary for a clean state", async () => {
+    const svc = makeService();
+    svc.createTask({ rawInput: "Integrity health check", actionType: "analysis" });
+
+    const response = await request(createApp(svc)).get("/api/health");
+    expect(response.status).toBe(200);
+    expect(response.body.integrity).toBeDefined();
+    expect(response.body.integrity.healthy).toBe(true);
+    expect(response.body.integrity.database.tasks).toBe(1);
+    expect(response.body.integrity.database.steps).toBe(1);
+    expect(response.body.integrity.database.evidence).toBe(1);
+    expect(response.body.integrity.database.issues).toBe(0);
+    expect(response.body.integrity.audit.parseErrors).toBe(0);
+    expect(response.body.integrity.audit.missingFieldErrors).toBe(0);
+    expect(response.body.integrity.audit.invalidTypeErrors).toBe(0);
+    expect(response.body.integrity.audit.crossRefIssues).toBe(0);
+    expect(response.body.integrity.checkedAt).toBeDefined();
+  });
+
+  it("health endpoint reports unhealthy when audit is corrupt", async () => {
+    const svc = makeService();
+    svc.createTask({ rawInput: "Good task", actionType: "analysis" });
+    // Append a malformed line to the audit log
+    writeFileSync(auditPath, readFileSync(auditPath, "utf8").trimEnd() + "\nnot json\n", "utf8");
+
+    const response = await request(createApp(svc)).get("/api/health");
+    expect(response.status).toBe(200);
+    expect(response.body.integrity.healthy).toBe(false);
+    expect(response.body.integrity.audit.parseErrors).toBe(1);
+  });
+
+  // ── 7. No automatic destructive repair ────────────────────────────
+
+  it("does not modify the audit log during integrity checks", () => {
+    const svc = makeService();
+    svc.createTask({ rawInput: "Preserve audit", actionType: "analysis" });
+
+    const auditBefore = readFileSync(auditPath, "utf8");
+    svc.checkIntegrity();
+    svc.checkIntegrity(); // Run twice to ensure idempotency
+    const auditAfter = readFileSync(auditPath, "utf8");
+
+    expect(auditBefore).toBe(auditAfter);
+  });
+
+  it("does not delete malformed audit lines during integrity check", () => {
+    writeFileSync(auditPath, '{"id":"a1","event_type":"task_created","task_id":"t1","data":{},"created_at":"2026-01-01T00:00:00Z"}\nbad line\n', "utf8");
+
+    const svc = makeService();
+    svc.checkIntegrity();
+
+    const auditAfter = readFileSync(auditPath, "utf8");
+    expect(auditAfter).toContain("bad line");
+    expect(auditAfter).toContain("task_created");
+  });
+
+  it("does not modify the database during integrity checks", () => {
+    const svc = makeService();
+    svc.createTask({ rawInput: "Preserve DB", actionType: "analysis" });
+
+    const tasksBefore = svc.listTasks();
+    svc.checkIntegrity();
+    const tasksAfter = svc.listTasks();
+
+    expect(tasksAfter).toEqual(tasksBefore);
+  });
+
+  it("integrity check does not throw for an empty database with no audit file", () => {
+    const svc = makeService();
+    // No tasks created, no audit file exists
+    const report = svc.checkIntegrity();
+
+    expect(report.healthy).toBe(true);
+    expect(report.database.taskCount).toBe(0);
+    expect(report.database.stepCount).toBe(0);
+    expect(report.database.evidenceCount).toBe(0);
+    expect(report.audit.totalLines).toBe(0);
+    expect(report.audit.validEvents).toBe(0);
+  });
+
+  // ── Consistent state checks ───────────────────────────────────────
+
+  it("reports invalid task status if DB constraint is bypassed", () => {
+    // Use a separate temp DB without CHECK constraint on status for this test
+    const rawDb = createDatabase(":memory:");
+    // PRAGMA ignore_check_constraints is not universally supported; use raw exec to
+    // create tables without CHECK so the integrity checker can detect the bad status.
+    rawDb.exec("PRAGMA foreign_keys = OFF;");
+    rawDb.exec(`
+      DROP TABLE IF EXISTS task_intents;
+      CREATE TABLE task_intents (
+        id TEXT PRIMARY KEY,
+        raw_input TEXT NOT NULL,
+        parsed_description TEXT NOT NULL,
+        status TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 0,
+        product_lane TEXT NOT NULL DEFAULT 'CHANTER Operator',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    rawDb.prepare("INSERT INTO task_intents VALUES (?,?,?,?,?,?,?,?)").run(
+      "bad-task", "broken", "broken", "invalid_status", 0, "CHANTER Operator",
+      "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+    );
+    rawDb.exec("PRAGMA foreign_keys = ON;");
+
+    const report = runIntegrityCheck(rawDb, auditPath);
+    expect(report.healthy).toBe(false);
+    const statusIssue = report.database.issues.find((i) => i.kind === "invalid_task_status");
+    expect(statusIssue).toBeDefined();
+    expect(statusIssue!.detail).toContain("invalid_status");
+    rawDb.close();
+  });
+
+  // ── Safety guard: production constraints remain enforced ──────────
+
+  it("rejects orphan inserts when foreign keys are enabled", () => {
+    const svc = makeService();
+    expect(() => {
+      database.exec(`
+        INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
+        VALUES ('orphan-step-prod', 'nonexistent-task', 1, 'analysis', '{}', 'pending_approval', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+      `);
+    }).toThrow();
+    const report = svc.checkIntegrity();
+    expect(report.database.stepCount).toBe(0);
+  });});

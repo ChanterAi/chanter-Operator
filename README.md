@@ -1,3 +1,34 @@
+
+## What changed in P0.4
+
+- Added `src/integrity/auditScanner.ts` — read-only audit JSONL scanner that reports parse errors, missing fields, and invalid event types without modifying the file
+- Added `src/integrity/integrityChecker.ts` — read-only integrity checker that cross-references the database and audit log, reports orphaned steps/evidence, invalid status values, and audit/DB consistency gaps
+- Added `checkIntegrity()` method to `OperatorService`, never modifies data
+- Extended `GET /api/health` with an `integrity` summary: healthy flag, record counts, issue counts for both database and audit
+- Added `path` getter to `AuditLogger` for diagnostics access
+- Added 15 new backend tests (44 total): healthy state passes, malformed JSONL detected, missing fields detected, invalid event types detected, orphan steps/evidence detected, health endpoint integrity summary, no destructive repair, empty grace, FK enforcement guard
+- All integrity checks are read-only; no automatic repair, no audit rewriting, no silent suppression
+
+## P0.4 integrity checks
+
+The health endpoint (`GET /api/health`) now includes a compact integrity summary:
+
+Database checks:
+- Every task has a valid status
+- Every step has a valid status and action type
+- Every step references an existing task
+- Every evidence record references existing task and step records
+
+Audit checks:
+- Every JSONL line is valid JSON
+- Every event has required fields: `id`, `event_type`, `task_id`, `data`, `created_at`
+- Every `event_type` is a recognized value
+- Audit task/step references are cross-checked against the database
+
+The integrity checker is read-only. It never rewrites, deletes, or "fixes" data. Production foreign key and CHECK constraints remain enforced by SQLite. Audit log remains append-only.
+
+## P0.4 limitations
+
 # CHANTER Operator — P0.3 Browser Smoke Test Coverage
 
 Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, and audit history. P0.3 adds automated component-level smoke tests for the Operator Console UI without adding real execution capabilities.
@@ -125,6 +156,37 @@ git diff --check
 - Added `src/test/fixtures.ts` — mock task data (completed, awaiting approval, rejected states)
 - Added `src/test/console-smoke.test.tsx` — 31 component tests across 8 describe blocks
 - Updated README with P0.3 validation section
+
+
+## What changed in P0.4
+
+- Added `src/integrity/auditScanner.ts` — read-only audit JSONL scanner that reports parse errors, missing fields, and invalid event types without modifying the file
+- Added `src/integrity/integrityChecker.ts` — read-only integrity checker that cross-references the database and audit log, reports orphaned steps/evidence, invalid status values, and audit/DB consistency gaps
+- Added `checkIntegrity()` method to `OperatorService`, never modifies data
+- Extended `GET /api/health` with an `integrity` summary: healthy flag, record counts, issue counts for both database and audit
+- Added `path` getter to `AuditLogger` for diagnostics access
+- Added 15 new backend tests (44 total): healthy state passes, malformed JSONL detected, missing fields detected, invalid event types detected, orphan steps/evidence detected, health endpoint integrity summary, no destructive repair, empty grace, FK enforcement guard
+- All integrity checks are read-only; no automatic repair, no audit rewriting, no silent suppression
+
+## P0.4 integrity checks
+
+The health endpoint (`GET /api/health`) now includes a compact integrity summary:
+
+Database checks:
+- Every task has a valid status
+- Every step has a valid status and action type
+- Every step references an existing task
+- Every evidence record references existing task and step records
+
+Audit checks:
+- Every JSONL line is valid JSON
+- Every event has required fields: `id`, `event_type`, `task_id`, `data`, `created_at`
+- Every `event_type` is a recognized value
+- Audit task/step references are cross-checked against the database
+
+The integrity checker is read-only. It never rewrites, deletes, or "fixes" data. Production foreign key and CHECK constraints remain enforced by SQLite. Audit log remains append-only.
+
+## P0.4 limitations
 
 ## P0.3 limitations
 

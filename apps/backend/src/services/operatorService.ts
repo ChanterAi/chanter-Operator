@@ -5,6 +5,8 @@ import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
 import { mapEvidence, mapStep, mapTask, withTransaction } from "../db/database.js";
 import { normalizeProductLane } from "../db/schema.js";
+import { runIntegrityCheck } from "../integrity/integrityChecker.js";
+import type { IntegrityReport } from "../integrity/integrityChecker.js";
 import type { Runner } from "../runners/runner.js";
 import type {
   ActionType,
@@ -44,6 +46,11 @@ export class OperatorService {
     private readonly runner: Runner,
     private readonly workspaceRoot: string,
   ) {}
+
+  /** Run a read-only integrity check across the database and audit log. Never modifies data. */
+  checkIntegrity(): IntegrityReport {
+    return runIntegrityCheck(this.database, this.audit.path);
+  }
 
   createTask(input: CreateTaskInput): TaskDetail {
     const rawInput = input.rawInput.trim();
