@@ -1,30 +1,41 @@
-# CHANTER Operator — P0.2 Operator Console
+# CHANTER Operator — P0.3 Browser Smoke Test Coverage
 
-Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, and audit history. P0.2 upgrades the P0.1 mock-only foundation into a clearer Operator Console experience with product-lane framing, agent/mode display, recommended next actions, and improved state handling — without adding any real execution capabilities.
+Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, and audit history. P0.3 adds automated component-level smoke tests for the Operator Console UI without adding real execution capabilities.
 
-## What P0.2 contains
+## What P0.3 adds
+
+- **Frontend component test suite** using Vitest + React Testing Library + jsdom
+- **31 automated UI tests** covering:
+  - App shell renders with brand and cockpit panels
+  - Header agent/mode bar (Runner: Mock Adapter, Mode: Safe / Review-only, Execution: Contained Simulation)
+  - Task intake form renders with description, action type, priority, product lane, workspace path
+  - MOCK ONLY safety pill visible
+  - Product lane selector includes all 6 lanes
+  - User can create a mock task (API called with correct payload)
+  - Created task appears in queue with product lane
+  - Completed task shows status, recommended next action ("Task complete"), evidence summary, audit entries
+  - Awaiting approval state shows "Approve mock simulation", approval buttons, "Decision needed" indicator
+  - Rejected state shows "Rejected" next action and rejection message
+  - Empty/loading/error states render correctly
+  - No real execution controls or wording (no "execute", "run", "deploy", "codex", "ollama", "git push")
+- Root `npm test` now runs both backend and frontend test suites
+- New scripts: `npm run test:backend`, `npm run test:frontend`
+
+## What P0.2 contains (unchanged)
 
 - Node.js + TypeScript API bound to `127.0.0.1:3001`
 - React + Vite + TypeScript cockpit bound to `127.0.0.1:5173`
-- Local SQLite database using Node's built-in `node:sqlite` driver (with P0.2 migration for `product_lane` column)
+- Local SQLite database using Node's built-in `node:sqlite` driver
 - Append-only JSONL audit log
-- Lexical and existing-ancestor symlink/junction-aware workspace path containment guards
+- Symlink/junction-aware workspace path containment guards
 - Task intent, execution step, approval, evidence, and validation models
 - Explicit task/step transition allowlists with conditional state updates
 - Deterministic mock runner that never reads, writes, shells out, or calls a network service
-- Synchronously flushed JSONL audit events with fail-closed write errors and corrupt-record detection
-- Three-panel dark UI with:
-  - **Operator Console header** with agent/mode bar (Runner: Mock Adapter, Mode: Safe / Review-only, Execution: Contained Simulation)
-  - **Task intake form** with description, action type, priority, product lane, and workspace path inputs
-  - **Mock-only safety notice** with `MOCK ONLY` pill badge
-  - **Product-lane framing** (AutoPoster, Loop Governor, Clean Engine, Crypto Radar, Premium Site, CHANTER Operator)
-  - **Task detail panel** with agent frame, recommended next action, execution step, evidence summary, mock output, diff preview
-  - **Review panel** with approval/rejection controls, recommended next action, evidence timeline, and audit preview
-  - Clear empty, loading, error, and disabled states
+- Three-panel dark UI with product-lane framing, agent/mode display, recommended next actions
 
 ## Mock-only boundary
 
-P0.2 does NOT add:
+P0.3 does NOT add:
 - Loop Governor integration
 - Codex integration
 - Ollama integration
@@ -50,14 +61,6 @@ npm run dev
 
 Open `http://127.0.0.1:5173`. The Vite development server proxies `/api` to the local backend.
 
-Local runtime files are created on first backend start:
-
-- `data/operator.sqlite`
-- `data/audit.jsonl`
-- `workspace/`
-
-These runtime files are ignored by git. The workspace is reserved for future adapters; P0.2's mock runner does not modify it.
-
 ## Workflow
 
 1. Create a task: enter a description, choose an action type, select a product lane, set priority, and optionally specify a workspace-relative path.
@@ -66,9 +69,7 @@ These runtime files are ignored by git. The workspace is reserved for future ada
 4. `file_write`, `file_edit`, `shell_command`, and `unknown` actions wait for approval.
 5. Approval runs the deterministic mock adapter; rejection ends the task without evidence.
 6. Mock output, placeholder diff, validation, and audit events are saved locally.
-7. The UI shows a **recommended next action** at all times: "Approve mock simulation", "Review evidence", "Task complete", "Rejected", or "Blocked / invalid".
-
-No P0.2 action executes the submitted command or touches the requested file. The action payload is a review artifact only.
+7. The UI shows a **recommended next action** at all times.
 
 ## API
 
@@ -83,58 +84,55 @@ No P0.2 action executes the submitted command or touches the requested file. The
 | `POST` | `/api/steps/:stepId/reject` | Reject a pending step |
 | `GET` | `/api/audit?limit=50` | Preview recent audit events |
 
-Create-task body:
-
-```json
-{
-  "rawInput": "Preview a safe configuration edit",
-  "actionType": "file_edit",
-  "priority": 1,
-  "productLane": "AutoPoster",
-  "workspaceRelativePath": "config/preview.json"
-}
-```
-
-Absolute paths, `..` escapes, and existing symlink/junction paths that resolve outside the workspace are rejected. Unrecognized action types normalize to `unknown` and require approval. Unrecognized product lanes normalize to `CHANTER Operator`.
-
 ## Validation commands
 
 ```powershell
-npm test
+# Typecheck (backend + frontend)
 npm run typecheck
+
+# All tests (backend + frontend)
+npm test
+
+# Backend tests only (29 tests)
+npm run test:backend
+
+# Frontend component tests only (31 tests)
+npm run test:frontend
+
+# Production build
 npm run build
+
+# Whitespace check
 git diff --check
 ```
 
-The backend integration suite covers task creation, step creation, approval classification, reject and approve flows, repeat/invalid decisions, mock determinism, evidence persistence, durable audit error behavior, symlink-aware workspace containment, status transitions, API error behavior, product lane storage and normalization, workspace path input, health endpoint mode reporting, and prohibited integration verification.
+### Test coverage summary
 
-## What changed in P0.2
+| Suite | Tests | Coverage |
+| --- | --- | --- |
+| Backend (`operator.test.ts`) | 29 | Task creation, step creation, approval classification, reject/approve flows, repeat/invalid decisions, mock determinism, evidence persistence, audit errors, workspace containment, state transitions, API errors, product lanes, health mode, prohibited integration |
+| Frontend (`console-smoke.test.tsx`) | 31 | App shell, header agent/mode bar, task intake form, MOCK ONLY safety pill, product lane selector (6 lanes), task creation flow, task queue rendering, completed task detail (status, next action, evidence, audit), awaiting approval state, rejected state, empty/loading/error states, no real execution controls |
 
-- Added `product_lane` field to task model with 6 predefined lanes and SQLite migration
-- Added `GET /api/lanes` endpoint
-- Extended `GET /api/health` to report mode and execution type
-- Added workspace relative path input to task intake form
-- Added product lane selector to task intake form
-- Added mock-only safety pill notice in the intake form
-- Added agent/mode bar to the header (Runner, Mode, Execution)
-- Added agent frame section to task detail panel
-- Added recommended next action bar to task detail and review panels
-- Improved review panel to show context-aware messaging based on task state
-- Added `task-card__lane` display in the task queue
-- Improved empty/loading/error/disabled states with context-aware messaging
-- Updated test suite with P0.2 coverage (product lanes, workspace path, health mode, prohibited integration check)
-- Updated README for P0.2
+## What changed in P0.3
 
-## P0.2 limitations
+- Added Vitest + React Testing Library + jsdom to frontend devDependencies
+- Added `test` script to frontend package.json (`vitest run`)
+- Added `test:backend` and `test:frontend` scripts to root package.json
+- Updated root `test` script to run both backend and frontend suites
+- Configured Vitest in `vite.config.ts` (jsdom environment, setup file, test include pattern)
+- Updated `tsconfig.app.json` with Vitest and Testing Library types
+- Added `src/test/setup.ts` — test setup with jest-dom matchers and cleanup
+- Added `src/test/fixtures.ts` — mock task data (completed, awaiting approval, rejected states)
+- Added `src/test/console-smoke.test.tsx` — 31 component tests across 8 describe blocks
+- Updated README with P0.3 validation section
 
-- The runner is mock-only. It never reads files, writes files, starts processes, invokes git, calls models, or uses the network.
-- Each task contains one in-process mock step; there is no queue worker, cancellation, retry, crash recovery, or multi-step orchestration.
-- Path containment is checked when a task is created. Any future real filesystem adapter must re-check the path immediately before every operation and defend against link-swap race conditions.
-- Audit records are flushed to the local JSONL file before the surrounding SQLite transaction commits. P0.2 fails closed on audit write errors and reports corrupt records, but SQLite and JSONL do not provide one atomic cross-file transaction.
-- Local SQLite and JSONL files have no authentication, encryption, retention, backup, or multi-user coordination.
-- Product lane is metadata only — no lane-specific routing, filtering, or behavior in P0.2.
-- UI state handling is build-validated but has no automated browser/component test suite in P0.2.
+## P0.3 limitations
+
+- Component tests use mocked API responses — no integration with the real backend
+- No Playwright/E2E browser tests — component-level coverage only
+- `act()` warnings from React Testing Library are expected for async state updates and do not affect test results
+- The mock-only runner, local-first behavior, and all P0.2 limitations remain unchanged
 
 ## Remaining P1 blockers
 
-P1 remains intentionally unimplemented. Before any real runner integration, it needs a separate reviewed design for process isolation, operation-scoped filesystem capabilities, path revalidation at execution time, command allowlisting, timeouts, output limits, cancellation, idempotency, retry/recovery, and an atomic audit/state persistence strategy. Authentication, remote access, git automation, deployment, Loop Governor, YOLO Mode, and autonomous operation remain outside P0.2.
+P1 remains intentionally unimplemented. Before any real runner integration, it needs a separate reviewed design for process isolation, operation-scoped filesystem capabilities, path revalidation at execution time, command allowlisting, timeouts, output limits, cancellation, idempotency, retry/recovery, and an atomic audit/state persistence strategy. Authentication, remote access, git automation, deployment, Loop Governor, YOLO Mode, and autonomous operation remain outside P0.3.

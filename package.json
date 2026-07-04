@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "concurrently -n backend,frontend -c blue,magenta \"npm run dev --workspace @chanter/operator-backend\" \"npm run dev --workspace @chanter/operator-frontend\"",
     "build": "npm run build --workspace @chanter/operator-backend && npm run build --workspace @chanter/operator-frontend",
-    "test": "npm run test --workspace @chanter/operator-backend",
+    "test": "npm run test --workspace @chanter/operator-backend && npm run test --workspace @chanter/operator-frontend",
+    "test:backend": "npm run test --workspace @chanter/operator-backend",
+    "test:frontend": "npm run test --workspace @chanter/operator-frontend",
     "typecheck": "npm run typecheck --workspace @chanter/operator-backend && npm run typecheck --workspace @chanter/operator-frontend"
   },
   "engines": {
@@ -19,4 +21,3 @@
     "concurrently": "^9.2.1"
   }
 }
-
