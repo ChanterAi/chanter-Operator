@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { TaskDetail } from "../api/types";
 import { canCancelTask, canRetryTask, recommendNextAction } from "../api/types";
+import type { ValidationEvidence } from "../api/types";
 
 interface Props {
   detail: TaskDetail | null;
@@ -11,14 +13,21 @@ interface Props {
   onReject: (stepId: string) => Promise<void>;
   onCancel: (taskId: string) => Promise<void>;
   onRetry: (taskId: string) => Promise<void>;
+  onAddValidation: (taskId: string, commandLabel: string, status: string, output: string) => Promise<void>;
 }
 
-export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry }: Props) {
+export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation }: Props) {
   const step = detail?.steps[0];
   const pending = step?.status === "pending_approval";
   const recommendation = detail ? recommendNextAction(detail) : null;
   const showCancel = detail ? canCancelTask(detail.task.status) : false;
   const showRetry = detail ? canRetryTask(detail.task.status) : false;
+
+  // Manual validation form state
+  const [valLabel, setValLabel] = useState("");
+  const [valStatus, setValStatus] = useState<string>("passed");
+  const [valOutput, setValOutput] = useState("");
+  const [addingEvidence, setAddingEvidence] = useState(false);
 
   return (
     <aside className="panel panel--review">
@@ -101,6 +110,84 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
                         : "No approval decision is pending."
               : "Select a task to review its gate."}
           </p>
+        )}
+      </section>
+
+      <section className="review-section review-section--manual-validation">
+        <h3>Manual validation</h3>
+        <p className="evidence-disclaimer">Manual evidence only — no command is run.</p>
+
+        <form
+          className="manual-validation-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!detail) return;
+            setAddingEvidence(true);
+            try {
+              await onAddValidation(detail.task.id, valLabel, valStatus, valOutput);
+              setValLabel("");
+              setValOutput("");
+            } finally {
+              setAddingEvidence(false);
+            }
+          }}
+        >
+          <div className="manual-validation-form__fields">
+            <input
+              className="input input--compact"
+              disabled={busy || addingEvidence}
+              maxLength={200}
+              onChange={(e) => setValLabel(e.target.value)}
+              placeholder="e.g. npm test, npm run build, git diff --check"
+              required
+              type="text"
+              value={valLabel}
+            />
+            <select
+              className="input input--compact"
+              disabled={busy || addingEvidence}
+              onChange={(e) => setValStatus(e.target.value)}
+              value={valStatus}
+            >
+              <option value="passed">Passed</option>
+              <option value="failed">Failed</option>
+              <option value="warning">Warning</option>
+              <option value="not_run">Not run</option>
+            </select>
+            <button
+              className="button button--primary button--compact"
+              disabled={busy || addingEvidence}
+              type="submit"
+            >
+              {addingEvidence ? "Adding..." : "Add evidence"}
+            </button>
+          </div>
+          <textarea
+            className="input input--textarea input--compact"
+            disabled={busy || addingEvidence}
+            maxLength={10000}
+            onChange={(e) => setValOutput(e.target.value)}
+            placeholder="Paste command output or summary..."
+            rows={3}
+            value={valOutput}
+          />
+        </form>
+
+        {detail?.validation_evidence && detail.validation_evidence.length > 0 && (
+          <ul className="validation-list">
+            {detail.validation_evidence.map((ve: ValidationEvidence) => (
+              <li key={ve.id} className="validation-item">
+                <span className={`validation-status validation-status--${ve.status}`}>
+                  {ve.status === "passed" ? "Pass" : ve.status === "failed" ? "Fail" : ve.status === "warning" ? "Warn" : "Not run"}
+                </span>
+                <code className="validation-label-text">{ve.command_label}</code>
+                {ve.output && (
+                  <pre className="validation-output">{ve.output.slice(0, 500)}{ve.output.length > 500 ? "..." : ""}</pre>
+                )}
+                <time>{new Date(ve.created_at).toLocaleString()}</time>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 

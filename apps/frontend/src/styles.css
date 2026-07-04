@@ -254,3 +254,125 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
   .agent-mode-bar { display: none; }
   .agent-frame__row { flex-direction: column; gap: 10px; }
 }
+
+/* ── P0.7 Manual Validation Evidence ──────────────────────────────── */
+
+.review-section--manual-validation {
+  border-top: 1px solid var(--border-color, #e2e8f0);
+}
+
+.manual-validation-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.manual-validation-form__fields {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.input--compact {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--border-color, #cbd5e1);
+  border-radius: 4px;
+  background: var(--bg-input, #fff);
+  color: var(--text-primary, #1e293b);
+}
+
+.input--textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: monospace;
+  font-size: 0.75rem;
+  min-height: 3rem;
+}
+
+.button--compact {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.validation-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.validation-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.4rem;
+  background: var(--bg-subtle, #f8fafc);
+  border-radius: 4px;
+  border: 1px solid var(--border-color, #e2e8f0);
+  flex-wrap: wrap;
+}
+
+.validation-status {
+  display: inline-block;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.validation-status--passed {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.validation-status--failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.validation-status--warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.validation-status--not_run {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.validation-label-text {
+  font-size: 0.75rem;
+  color: var(--text-primary, #334155);
+  background: var(--bg-code, #f1f5f9);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.validation-output {
+  width: 100%;
+  margin: 0.25rem 0 0;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--text-secondary, #475569);
+  background: var(--bg-code, #f1f5f9);
+  border-radius: 3px;
+  max-height: 5rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.validation-item time {
+  margin-left: auto;
+  font-size: 0.65rem;
+  color: var(--text-muted, #94a3b8);
+}

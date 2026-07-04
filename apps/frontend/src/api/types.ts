@@ -59,11 +59,27 @@ export interface AuditEvent {
   created_at: string;
 }
 
+export interface ValidationEvidence {
+  id: string;
+  task_id: string;
+  command_label: string;
+  status: "passed" | "failed" | "warning" | "not_run";
+  output: string;
+  created_at: string;
+}
+
+export interface AddValidationInput {
+  commandLabel: string;
+  status: "passed" | "failed" | "warning" | "not_run";
+  output: string;
+}
+
 export interface TaskDetail {
   task: TaskIntent;
   steps: ExecutionStep[];
   evidence: Evidence[];
   audit_events: AuditEvent[];
+  validation_evidence: ValidationEvidence[];
 }
 
 export interface CreateTaskInput {
@@ -113,7 +129,7 @@ export function canRetryTask(status: string): boolean {
   return status === "failed" || status === "rejected" || status === "cancelled";
 }
 
-// ── P0.5 Readiness Gate ────────────────────────────────────────────
+// â”€â”€ P0.5 Readiness Gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface HealthIntegrity {
   healthy: boolean;

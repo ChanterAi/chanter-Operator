@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Evidence, ExecutionStep, TaskIntent } from "../types.js";
+import type { Evidence, ExecutionStep, TaskIntent, ValidationEvidence } from "../types.js";
 import { schema } from "./schema.js";
 
 type TaskRow = TaskIntent;
@@ -35,7 +35,7 @@ export function createDatabase(databasePath: string): DatabaseSync {
     // If the existing CHECK rejects it, we need to migrate.
     checkAndMigrateCancelled(database);
   } catch {
-    // Migration failed silently — affected databases should be recreated.
+    // Migration failed silently â€” affected databases should be recreated.
     // This is acceptable for mock-only P0 development.
   }
 
@@ -93,6 +93,10 @@ export function mapStep(row: unknown): ExecutionStep {
     action_payload: JSON.parse(step.action_payload) as Record<string, unknown>,
     requires_approval: step.requires_approval === 1,
   };
+}
+
+export function mapValidationEvidence(row: unknown): ValidationEvidence {
+  return row as ValidationEvidence;
 }
 
 export function mapEvidence(row: unknown): Evidence {

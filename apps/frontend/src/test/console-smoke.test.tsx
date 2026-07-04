@@ -198,6 +198,7 @@ describe("P0.3 smoke: completed task detail and review", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText("task_created")).toBeInTheDocument();
@@ -262,6 +263,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /approve & simulate/i })).toBeInTheDocument();
@@ -277,6 +279,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText("Decision needed")).toBeInTheDocument();
@@ -300,6 +303,7 @@ describe("P0.3 smoke: rejected state", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText(/task can be retried/i)).toBeInTheDocument();
@@ -483,6 +487,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -497,6 +502,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -511,6 +517,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText("Retry task")).toBeInTheDocument();
@@ -525,6 +532,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.queryByText("Retry task")).not.toBeInTheDocument();
@@ -542,6 +550,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onReject={vi.fn()}
         onCancel={cancelSpy}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     const btn = screen.getByText("Cancel task");
@@ -559,6 +568,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={retrySpy}
+          onAddValidation={vi.fn()}
       />,
     );
     const btn = screen.getByText("Retry task");
@@ -578,6 +588,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText("Cancelling...")).toBeInTheDocument();
@@ -593,6 +604,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     expect(screen.getByText("Retrying...")).toBeInTheDocument();
@@ -609,6 +621,7 @@ describe("P0.6 smoke: no execution controls introduced", () => {
         onReject={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
+          onAddValidation={vi.fn()}
       />,
     );
     const allButtons = screen.getAllByRole("button");
@@ -617,4 +630,170 @@ describe("P0.6 smoke: no execution controls introduced", () => {
       expect(t).not.toMatch(/\b(execute|run|deploy|start|shell|codex|ollama)\b/);
     }
   });
+
+describe("P0.7 manual validation evidence intake", () => {
+  it("renders manual validation form in ReviewPanel", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Manual validation")).toBeInTheDocument();
+  });
+
+  it("renders no-execution disclaimer", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Manual evidence only/i)).toBeInTheDocument();
+    expect(screen.getByText(/no command is run/i)).toBeInTheDocument();
+  });
+
+  it("renders command label input", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByPlaceholderText(/npm test/i)).toBeInTheDocument();
+  });
+
+  it("renders status selector with all options", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    // The select has "Passed" as default option
+    const selectEl = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(selectEl.value).toBe("passed");
+    // Check all options exist in the select
+    const options = Array.from(selectEl.options).map(o => o.value);
+    expect(options).toContain("passed");
+    expect(options).toContain("failed");
+    expect(options).toContain("warning");
+    expect(options).toContain("not_run");
+  });
+
+  it("renders add evidence button", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /add evidence/i })).toBeInTheDocument();
+  });
+
+  it("renders existing validation evidence entries", () => {
+    const withEvidence = {
+      ...mockCompletedDetail,
+      validation_evidence: [
+        {
+          id: "ve-001",
+          task_id: "task-001",
+          command_label: "npm test",
+          status: "passed" as const,
+          output: "42 tests passed",
+          created_at: new Date().toISOString(),
+        },
+      ],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withEvidence}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Pass")).toBeInTheDocument();
+    expect(screen.getByText("npm test")).toBeInTheDocument();
+    expect(screen.getByText("42 tests passed")).toBeInTheDocument();
+  });
+
+  it("renders passed/failed/warning status badges", () => {
+    const withEvidence = {
+      ...mockCompletedDetail,
+      validation_evidence: [
+        { id: "v1", task_id: "t1", command_label: "c1", status: "passed" as const, output: "", created_at: new Date().toISOString() },
+        { id: "v2", task_id: "t1", command_label: "c2", status: "failed" as const, output: "", created_at: new Date().toISOString() },
+        { id: "v3", task_id: "t1", command_label: "c3", status: "warning" as const, output: "", created_at: new Date().toISOString() },
+      ],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withEvidence}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Pass")).toBeInTheDocument();
+    expect(screen.getByText("Fail")).toBeInTheDocument();
+    expect(screen.getByText("Warn")).toBeInTheDocument();
+  });
+
+  it("no execute/run/deploy wording in validation section", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+      />,
+    );
+    const section = screen.getByText("Manual validation").closest("section")!;
+    const text = section.textContent || "";
+    // Must contain disclaimer
+    expect(text).toMatch(/no command is run/i);
+    // Must NOT contain real-execution language
+    expect(text).not.toMatch(/execute/i);
+    expect(text).not.toMatch(/run command/i);
+    expect(text).not.toMatch(/deploy/i);
+    expect(text).not.toMatch(/codex/i);
+    expect(text).not.toMatch(/ollama/i);
+  });
+});
+
 });

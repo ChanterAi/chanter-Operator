@@ -61,6 +61,15 @@ export interface ExecutionStep {
   updated_at: string;
 }
 
+export interface ValidationEvidence {
+  id: string;
+  task_id: string;
+  command_label: string;
+  status: "passed" | "failed" | "warning" | "not_run";
+  output: string;
+  created_at: string;
+}
+
 export interface Evidence {
   id: string;
   task_id: string;
@@ -89,6 +98,7 @@ export const auditEventTypes = [
   "task_failed",
   "task_cancelled",
   "task_reopened",
+  "validation_evidence_added",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -107,4 +117,5 @@ export interface TaskDetail {
   steps: ExecutionStep[];
   evidence: Evidence[];
   audit_events: AuditEvent[];
+  validation_evidence: ValidationEvidence[];
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
-import { mapEvidence, mapStep, mapTask, withTransaction } from "../db/database.js";
+import { mapEvidence, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
 import { normalizeProductLane } from "../db/schema.js";
 import { runIntegrityCheck } from "../integrity/integrityChecker.js";
 import type { IntegrityReport } from "../integrity/integrityChecker.js";
@@ -17,6 +17,7 @@ import type {
   TaskDetail,
   TaskIntent,
   TaskStatus,
+  ValidationEvidence,
 } from "../types.js";
 import { validateRunnerResult } from "../validation/stepValidation.js";
 import { resolveWorkspacePath, WorkspacePathError } from "../workspace/pathGuard.js";
@@ -44,6 +45,11 @@ export interface CreateTaskInput {
   productLane?: string;
 }
 
+/** Valid manual validation evidence statuses. */
+const validationStatuses = new Set<string>(["passed", "failed", "warning", "not_run"]);
+
+/** Maximum length for pasted validation output. */
+const MAX_VALIDATION_OUTPUT_LENGTH = 10_000;
 export class OperatorService {
   constructor(
     private readonly database: DatabaseSync,
@@ -57,7 +63,7 @@ export class OperatorService {
     return runIntegrityCheck(this.database, this.audit.path);
   }
 
-  // ── Lifecycle: Cancel task ────────────────────────────────────────
+  // â”€â”€ Lifecycle: Cancel task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Cancel a task that is in a cancellable state.
@@ -96,7 +102,7 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-  // ── Lifecycle: Retry / reopen task ────────────────────────────────
+  // â”€â”€ Lifecycle: Retry / reopen task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   /**
    * Retry a task from a terminal state.
@@ -169,7 +175,7 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-  // ── Task CRUD ─────────────────────────────────────────────────────
+  // â”€â”€ Task CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   createTask(input: CreateTaskInput): TaskDetail {
     const rawInput = input.rawInput.trim();
@@ -273,11 +279,17 @@ export class OperatorService {
       .all(taskId)
       .map(mapEvidence);
 
+    const validation_evidence = this.database
+      .prepare("SELECT * FROM validation_evidence WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId)
+      .map(mapValidationEvidence);
+
     return {
       task: mapTask(taskRow),
       steps,
       evidence,
       audit_events: this.audit.readRecent(100, taskId),
+      validation_evidence,
     };
   }
 
@@ -325,7 +337,67 @@ export class OperatorService {
     return this.audit.readRecent(limit);
   }
 
-  // ── Private helpers ──────────────────────────────────────────────
+  /**
+   * Record manual validation evidence for a task.
+   * Does NOT run any command — purely records human-pasted results.
+   */
+  addValidationEvidence(
+    taskId: string,
+    commandLabel: string,
+    status: string,
+    output: string,
+  ): TaskDetail {
+    this.requireTask(taskId);
+
+    const trimmedLabel = commandLabel.trim();
+    if (!trimmedLabel) {
+      throw new OperatorError("A command label is required.", 400);
+    }
+    if (trimmedLabel.length > 200) {
+      throw new OperatorError("Command label must be 200 characters or fewer.", 400);
+    }
+
+    if (!validationStatuses.has(status)) {
+      throw new OperatorError(
+        'Invalid validation status "' + status + '". Must be passed, failed, warning, or not_run.',
+        400,
+      );
+    }
+
+    if (output.length > MAX_VALIDATION_OUTPUT_LENGTH) {
+      throw new OperatorError("Validation output must be 10,000 characters or fewer.", 400);
+    }
+
+    const now = new Date().toISOString();
+    const evidenceId = randomUUID();
+
+    withTransaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO validation_evidence
+            (id, task_id, command_label, status, output, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(evidenceId, taskId, trimmedLabel, status, output, now);
+
+      this.audit.append(
+        "validation_evidence_added",
+        taskId,
+        undefined,
+        {
+          evidence_id: evidenceId,
+          command_label: trimmedLabel,
+          status,
+          output_length: output.length,
+        },
+      );
+    });
+
+    return this.getTaskDetail(taskId);
+  }
+
+  // Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
   private getStepsForTask(taskId: string): ExecutionStep[] {
     return this.database

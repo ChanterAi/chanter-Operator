@@ -763,4 +763,138 @@ describe("P0.6 task lifecycle controls", () => {
     const response = await request(createApp(service)).post("/api/tasks/" + created.task.id + "/retry");
     expect(response.status).toBe(409);
   });
+
+describe("P0.7 manual validation evidence intake", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p07-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+    service = new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("creates validation evidence for an existing task", () => {
+    const created = service.createTask({ rawInput: "Task for manual validation", actionType: "analysis" });
+    const result = service.addValidationEvidence(created.task.id, "npm test", "passed", "All 42 tests passed.");
+
+    expect(result.validation_evidence).toHaveLength(1);
+    expect(result.validation_evidence[0].command_label).toBe("npm test");
+    expect(result.validation_evidence[0].status).toBe("passed");
+    expect(result.validation_evidence[0].output).toBe("All 42 tests passed.");
+  });
+
+  it("returns validation evidence in task detail", () => {
+    const created = service.createTask({ rawInput: "Detail check", actionType: "analysis" });
+    service.addValidationEvidence(created.task.id, "npm run build", "passed", "Build OK.");
+
+    const detail = service.getTaskDetail(created.task.id);
+    expect(detail.validation_evidence).toHaveLength(1);
+    expect(detail.validation_evidence[0].command_label).toBe("npm run build");
+  });
+
+  it("rejects validation for a missing task", () => {
+    expect(() =>
+      service.addValidationEvidence("missing-task-id", "npm test", "passed", "ok"),
+    ).toThrow(/was not found/);
+  });
+
+  it("rejects invalid validation status", () => {
+    const created = service.createTask({ rawInput: "Bad status", actionType: "analysis" });
+    expect(() =>
+      service.addValidationEvidence(created.task.id, "npm test", "banana", "ok"),
+    ).toThrow(/Invalid validation status/);
+  });
+
+  it("rejects empty command label", () => {
+    const created = service.createTask({ rawInput: "Empty label", actionType: "analysis" });
+    expect(() =>
+      service.addValidationEvidence(created.task.id, "   ", "passed", "output"),
+    ).toThrow(/command label is required/);
+  });
+
+  it("rejects oversized output", () => {
+    const created = service.createTask({ rawInput: "Large output", actionType: "analysis" });
+    const hugeOutput = "x".repeat(10_001);
+
+    expect(() =>
+      service.addValidationEvidence(created.task.id, "long test", "passed", hugeOutput),
+    ).toThrow(/10,000 characters or fewer/);
+  });
+
+  it("rejects command labels longer than 200 characters", () => {
+    const created = service.createTask({ rawInput: "Long label", actionType: "analysis" });
+    const longLabel = "x".repeat(201);
+
+    expect(() =>
+      service.addValidationEvidence(created.task.id, longLabel, "passed", "ok"),
+    ).toThrow(/200 characters or fewer/);
+  });
+
+  it("appends audit event for validation evidence", () => {
+    const created = service.createTask({ rawInput: "Audited validation", actionType: "analysis" });
+    const result = service.addValidationEvidence(created.task.id, "git diff --check", "warning", "trailing whitespace");
+
+    expect(result.audit_events.some(e => e.event_type === "validation_evidence_added")).toBe(true);
+  });
+
+  it("does not change task lifecycle state", () => {
+    const created = service.createTask({ rawInput: "No state change", actionType: "file_edit" });
+    const beforeStatus = created.task.status;
+
+    const result = service.addValidationEvidence(created.task.id, "npm test", "failed", "2 tests failed");
+    expect(result.task.status).toBe(beforeStatus);
+  });
+
+  it("accepts all four valid statuses", () => {
+    const created = service.createTask({ rawInput: "All statuses", actionType: "analysis" });
+
+    service.addValidationEvidence(created.task.id, "test passed", "passed", "ok");
+    service.addValidationEvidence(created.task.id, "test failed", "failed", "fail");
+    service.addValidationEvidence(created.task.id, "test warning", "warning", "warn");
+    service.addValidationEvidence(created.task.id, "test not run", "not_run", "skipped");
+
+    const detail = service.getTaskDetail(created.task.id);
+    expect(detail.validation_evidence).toHaveLength(4);
+    expect(detail.validation_evidence.map(v => v.status).sort()).toEqual(
+      ["failed", "not_run", "passed", "warning"],
+    );
+  });
+
+  it("multiple evidence entries are ordered newest-first", () => {
+    const created = service.createTask({ rawInput: "Ordered", actionType: "analysis" });
+
+    service.addValidationEvidence(created.task.id, "first", "passed", "1");
+    service.addValidationEvidence(created.task.id, "second", "failed", "2");
+
+    const detail = service.getTaskDetail(created.task.id);
+    expect(detail.validation_evidence).toHaveLength(2);
+    // newest first
+    expect(detail.validation_evidence[0].command_label).toBe("second");
+    expect(detail.validation_evidence[1].command_label).toBe("first");
+  });
+
+  it("no shell or filesystem execution introduced by validation", () => {
+    // This is a design guarantee, not a runtime check in the test.
+    // The addValidationEvidence method has no runner call, no exec, no spawn.
+    const created = service.createTask({ rawInput: "Safety check", actionType: "file_edit" });
+    const result = service.addValidationEvidence(created.task.id, "any command", "passed", "safe");
+
+    expect(result.validation_evidence).toHaveLength(1);
+    // Task remains in its original state — no execution happened
+    expect(result.task.status).toBe("awaiting_approval"); // file_edit is guarded — no auto-execution
+  });
+});
+
 });

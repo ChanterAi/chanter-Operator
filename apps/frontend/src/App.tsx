@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { approveStep, cancelTask, createTask, fetchHealth, getTask, listTasks, rejectStep, retryTask } from "./api/client";
+import { addValidationEvidence, approveStep, cancelTask, createTask, fetchHealth, getTask, listTasks, rejectStep, retryTask } from "./api/client";
 import type { CreateTaskInput, ReadinessState, TaskDetail, TaskIntent } from "./api/types";
 import { ReadinessBar } from "./components/ReadinessBar";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 
-type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying";
+type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying" | "adding-evidence";
 
 export default function App() {
   const [tasks, setTasks] = useState<TaskIntent[]>([]);
@@ -132,6 +132,7 @@ export default function App() {
           onReject={(stepId) => runAction("rejecting", () => rejectStep(stepId)).then(() => undefined)}
           onCancel={(taskId) => runAction("cancelling", () => cancelTask(taskId)).then(() => undefined)}
           onRetry={(taskId) => runAction("retrying", () => retryTask(taskId)).then(() => undefined)}
+          onAddValidation={async (taskId, commandLabel, status, output) => { await runAction("adding-evidence", () => addValidationEvidence(taskId, { commandLabel, status: status as any, output })); }}
         />
       </div>
     </div>

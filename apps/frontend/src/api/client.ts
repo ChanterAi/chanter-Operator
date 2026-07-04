@@ -1,4 +1,4 @@
-import type { CreateTaskInput, HealthResponse, TaskDetail, TaskIntent } from "./types";
+import type { AddValidationInput, CreateTaskInput, HealthResponse, TaskDetail, TaskIntent } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -53,6 +53,13 @@ export function retryTask(taskId: string): Promise<TaskDetail> {
 
 export function approveStep(stepId: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/api/steps/${stepId}/approve`, { method: "POST", body: "{}" });
+}
+
+export async function addValidationEvidence(taskId: string, input: AddValidationInput): Promise<TaskDetail> {
+  return request<TaskDetail>(`/api/tasks/${taskId}/validations`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function rejectStep(stepId: string): Promise<TaskDetail> {

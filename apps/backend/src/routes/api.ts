@@ -88,6 +88,15 @@ export function createApiRouter(service: OperatorService): Router {
     response.json(service.rejectStep(request.params.stepId, reason));
   });
 
+  router.post("/tasks/:taskId/validations", (request, response) => {
+    const commandLabel = typeof request.body?.commandLabel === "string" ? request.body.commandLabel : "";
+    const status = typeof request.body?.status === "string" ? request.body.status : "";
+    const output = typeof request.body?.output === "string" ? request.body.output : "";
+    response.status(201).json(
+      service.addValidationEvidence(request.params.taskId, commandLabel, status, output),
+    );
+  });
+
   router.get("/audit", (request, response) => {
     const parsedLimit = Number(request.query.limit ?? 50);
     const limit = Number.isFinite(parsedLimit) ? parsedLimit : 50;

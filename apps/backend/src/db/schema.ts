@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS evidence (
 
 CREATE INDEX IF NOT EXISTS idx_steps_task_id ON execution_steps(task_id, step_number);
 CREATE INDEX IF NOT EXISTS idx_evidence_task_id ON evidence(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS validation_evidence (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task_intents(id) ON DELETE RESTRICT,
+  command_label TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'warning', 'not_run')),
+  output TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_validation_evidence_task_id ON validation_evidence(task_id, created_at);
 `;
 
 const validLanes = new Set<string>([
