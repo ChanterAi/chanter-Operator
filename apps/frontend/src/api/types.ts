@@ -79,20 +79,38 @@ export type RecommendedAction =
   | "Review evidence"
   | "Task complete"
   | "Rejected"
-  | "Blocked / invalid";
+  | "Cancelled"
+  | "Blocked / invalid"
+  | "Retry available";
 
 export function recommendNextAction(detail: TaskDetail): RecommendedAction {
   const task = detail.task;
   const step = detail.steps[0];
 
-  if (task.status === "rejected") return "Rejected";
+  // P0.6: terminal retryable states should surface Retry, not "no further action".
+  if (canRetryTask(task.status)) return "Retry available";
+
   if (task.status === "completed" && step?.status === "completed") return "Task complete";
-  if (task.status === "failed" || step?.status === "failed") return "Blocked / invalid";
-  if (task.status === "awaiting_approval" && step?.status === "pending_approval")
+
+  if (task.status === "awaiting_approval" && step?.status === "pending_approval") {
     return "Approve mock simulation";
-  if (task.status === "completed" || task.status === "executing" || task.status === "queued")
+  }
+
+  if (task.status === "completed" || task.status === "executing" || task.status === "queued") {
     return "Review evidence";
+  }
+
   return "Blocked / invalid";
+}
+
+/** States where cancel is a valid lifecycle action. */
+export function canCancelTask(status: string): boolean {
+  return status === "pending" || status === "queued" || status === "awaiting_approval";
+}
+
+/** Terminal states where retry is a valid lifecycle action. */
+export function canRetryTask(status: string): boolean {
+  return status === "failed" || status === "rejected" || status === "cancelled";
 }
 
 // ── P0.5 Readiness Gate ────────────────────────────────────────────

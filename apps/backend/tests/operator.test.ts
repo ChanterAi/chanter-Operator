@@ -626,3 +626,141 @@ describe("P0.4 persistence and audit integrity", () => {
     const report = svc.checkIntegrity();
     expect(report.database.stepCount).toBe(0);
   });});
+
+describe("P0.6 task lifecycle controls", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p06-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+    service = new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("cancels an awaiting_approval task and rejects pending step", () => {
+    const created = service.createTask({ rawInput: "Cancel this edit", actionType: "file_edit" });
+    const cancelled = service.cancelTask(created.task.id);
+    expect(cancelled.task.status).toBe("cancelled");
+    expect(cancelled.steps[0].status).toBe("rejected");
+  });
+
+  it("rejects cancel on a completed task", () => {
+    const created = service.createTask({ rawInput: "Completed analysis", actionType: "analysis" });
+    expect(() => service.cancelTask(created.task.id)).toThrow(/cannot be cancelled/);
+  });
+
+  it("rejects cancel on a failed task", () => {
+    const created = service.createTask({ rawInput: "Will fail", actionType: "file_edit" });
+    database.prepare("UPDATE task_intents SET status = ? WHERE id = ?").run("failed", created.task.id);
+    expect(() => service.cancelTask(created.task.id)).toThrow(/cannot be cancelled/);
+  });
+
+  it("rejects cancel on already cancelled task", () => {
+    const created = service.createTask({ rawInput: "Double cancel", actionType: "file_edit" });
+    service.cancelTask(created.task.id);
+    expect(() => service.cancelTask(created.task.id)).toThrow(/cannot be cancelled/);
+  });
+
+  it("audit records task_cancelled event", () => {
+    const created = service.createTask({ rawInput: "Audited cancel", actionType: "file_edit" });
+    service.cancelTask(created.task.id);
+    const detail = service.getTaskDetail(created.task.id);
+    expect(detail.audit_events.some(e => e.event_type === "task_cancelled")).toBe(true);
+  });
+
+  it("retries a failed task with new step", () => {
+    const created = service.createTask({ rawInput: "Retry me", actionType: "file_edit" });
+    database.prepare("UPDATE task_intents SET status = ? WHERE id = ?").run("failed", created.task.id);
+    database.prepare("UPDATE execution_steps SET status = ? WHERE id = ?").run("failed", created.steps[0].id);
+    const retried = service.retryTask(created.task.id);
+    expect(retried.steps).toHaveLength(2);
+    expect(retried.steps[1].step_number).toBe(2);
+  });
+
+  it("retries a rejected task", () => {
+    const created = service.createTask({ rawInput: "Rejected to retry", actionType: "shell_command" });
+    service.rejectStep(created.steps[0].id);
+    const retried = service.retryTask(created.task.id);
+    expect(retried.steps).toHaveLength(2);
+    expect(retried.steps[1].action_type).toBe("shell_command");
+  });
+
+  it("cancels a queued task", () => {
+    // Create guarded task, approve it (which takes it queued→executing→completed),
+    // but we need to cancel from queued. Create another and cancel before approve.
+    const fresh = service.createTask({ rawInput: "To cancel from waiting", actionType: "file_edit" });
+    expect(fresh.task.status).toBe("awaiting_approval");
+    const cancelled = service.cancelTask(fresh.task.id);
+    expect(cancelled.task.status).toBe("cancelled");
+  });
+
+  it("rejects retry on completed task", () => {
+    const created = service.createTask({ rawInput: "Cannot retry", actionType: "analysis" });
+    expect(() => service.retryTask(created.task.id)).toThrow(/cannot be retried/);
+  });
+
+  it("rejects retry on executing task", () => {
+    const created = service.createTask({ rawInput: "Running", actionType: "file_edit" });
+    database.prepare("UPDATE task_intents SET status = ? WHERE id = ?").run("executing", created.task.id);
+    expect(() => service.retryTask(created.task.id)).toThrow(/cannot be retried/);
+  });
+
+  it("rejects retry on awaiting_approval task", () => {
+    const created = service.createTask({ rawInput: "Pending retry", actionType: "file_edit" });
+    expect(() => service.retryTask(created.task.id)).toThrow(/cannot be retried/);
+  });
+
+  it("audit records task_reopened on retry", () => {
+    const created = service.createTask({ rawInput: "Audited retry", actionType: "file_edit" });
+    service.cancelTask(created.task.id);
+    const retried = service.retryTask(created.task.id);
+    expect(retried.audit_events.some(e => e.event_type === "task_reopened")).toBe(true);
+  });
+
+  it("cancel and retry preserve integrity", () => {
+    const guarded = service.createTask({ rawInput: "Guarded cancel/retry", actionType: "file_edit" });
+    service.cancelTask(guarded.task.id);
+    const retried = service.retryTask(guarded.task.id);
+    expect(retried.steps).toHaveLength(2);
+    const report = service.checkIntegrity();
+    expect(report.healthy).toBe(true);
+  });
+
+  it("API cancel endpoint", async () => {
+    const created = service.createTask({ rawInput: "API cancel", actionType: "file_edit" });
+    const response = await request(createApp(service)).post("/api/tasks/" + created.task.id + "/cancel");
+    expect(response.status).toBe(200);
+    expect(response.body.task.status).toBe("cancelled");
+  });
+
+  it("API retry endpoint", async () => {
+    const created = service.createTask({ rawInput: "API retry", actionType: "file_edit" });
+    service.cancelTask(created.task.id);
+    const response = await request(createApp(service)).post("/api/tasks/" + created.task.id + "/retry");
+    expect(response.status).toBe(200);
+    expect(response.body.steps).toHaveLength(2);
+  });
+
+  it("API typed error for invalid cancel", async () => {
+    const created = service.createTask({ rawInput: "Bad cancel", actionType: "analysis" });
+    const response = await request(createApp(service)).post("/api/tasks/" + created.task.id + "/cancel");
+    expect(response.status).toBe(409);
+  });
+
+  it("API typed error for invalid retry", async () => {
+    const created = service.createTask({ rawInput: "Bad retry", actionType: "analysis" });
+    const response = await request(createApp(service)).post("/api/tasks/" + created.task.id + "/retry");
+    expect(response.status).toBe(409);
+  });
+});

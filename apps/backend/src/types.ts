@@ -27,7 +27,8 @@ export type TaskStatus =
   | "executing"
   | "completed"
   | "failed"
-  | "rejected";
+  | "rejected"
+  | "cancelled";
 
 export type StepStatus =
   | "pending_approval"
@@ -86,6 +87,8 @@ export const auditEventTypes = [
   "validation_failed",
   "task_completed",
   "task_failed",
+  "task_cancelled",
+  "task_reopened",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];

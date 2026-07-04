@@ -71,6 +71,14 @@ export function createApiRouter(service: OperatorService): Router {
     response.json(service.getTaskDetail(request.params.taskId));
   });
 
+  router.post("/tasks/:taskId/cancel", (request, response) => {
+    response.json(service.cancelTask(request.params.taskId));
+  });
+
+  router.post("/tasks/:taskId/retry", (request, response) => {
+    response.json(service.retryTask(request.params.taskId));
+  });
+
   router.post("/steps/:stepId/approve", (request, response) => {
     response.json(service.approveStep(request.params.stepId));
   });

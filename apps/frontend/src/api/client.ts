@@ -43,6 +43,14 @@ export function createTask(input: CreateTaskInput): Promise<TaskDetail> {
   });
 }
 
+export function cancelTask(taskId: string): Promise<TaskDetail> {
+  return request<TaskDetail>(`/api/tasks/${taskId}/cancel`, { method: "POST", body: "{}" });
+}
+
+export function retryTask(taskId: string): Promise<TaskDetail> {
+  return request<TaskDetail>(`/api/tasks/${taskId}/retry`, { method: "POST", body: "{}" });
+}
+
 export function approveStep(stepId: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/api/steps/${stepId}/approve`, { method: "POST", body: "{}" });
 }

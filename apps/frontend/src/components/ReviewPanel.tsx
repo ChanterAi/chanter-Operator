@@ -1,18 +1,24 @@
 import type { TaskDetail } from "../api/types";
-import { recommendNextAction } from "../api/types";
+import { canCancelTask, canRetryTask, recommendNextAction } from "../api/types";
 
 interface Props {
   detail: TaskDetail | null;
   busy: boolean;
   decision?: "approving" | "rejecting";
+  cancelDecision?: "cancelling";
+  retryDecision?: "retrying";
   onApprove: (stepId: string) => Promise<void>;
   onReject: (stepId: string) => Promise<void>;
+  onCancel: (taskId: string) => Promise<void>;
+  onRetry: (taskId: string) => Promise<void>;
 }
 
-export function ReviewPanel({ detail, busy, decision, onApprove, onReject }: Props) {
+export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry }: Props) {
   const step = detail?.steps[0];
   const pending = step?.status === "pending_approval";
   const recommendation = detail ? recommendNextAction(detail) : null;
+  const showCancel = detail ? canCancelTask(detail.task.status) : false;
+  const showRetry = detail ? canRetryTask(detail.task.status) : false;
 
   return (
     <aside className="panel panel--review">
@@ -31,6 +37,37 @@ export function ReviewPanel({ detail, busy, decision, onApprove, onReject }: Pro
         <section className="review-section review-section--recommendation">
           <h3>Next action</h3>
           <p className="recommendation-text">{recommendation}</p>
+        </section>
+      )}
+
+      {/* Lifecycle controls */}
+      {(showCancel || showRetry) && (
+        <section className="review-section review-section--lifecycle">
+          <h3>Lifecycle</h3>
+          <div className="lifecycle-actions">
+            {showCancel && (
+              <button
+                aria-busy={cancelDecision === "cancelling"}
+                className="button button--lifecycle button--lifecycle-cancel"
+                disabled={busy}
+                onClick={() => onCancel(detail!.task.id)}
+                type="button"
+              >
+                {cancelDecision === "cancelling" ? "Cancelling..." : "Cancel task"}
+              </button>
+            )}
+            {showRetry && (
+              <button
+                aria-busy={retryDecision === "retrying"}
+                className="button button--lifecycle button--lifecycle-retry"
+                disabled={busy}
+                onClick={() => onRetry(detail!.task.id)}
+                type="button"
+              >
+                {retryDecision === "retrying" ? "Retrying..." : "Retry task"}
+              </button>
+            )}
+          </div>
         </section>
       )}
 
@@ -55,9 +92,13 @@ export function ReviewPanel({ detail, busy, decision, onApprove, onReject }: Pro
                 ? "Task is complete. No further action needed."
                 : recommendation === "Rejected"
                   ? "Task was rejected. No further action is available."
-                  : recommendation === "Blocked / invalid"
-                    ? "Task is blocked. Review the evidence and audit trail."
-                    : "No approval decision is pending."
+                  : recommendation === "Cancelled"
+                    ? "Task was cancelled. No further action is available."
+                    : recommendation === "Retry available"
+                      ? "Task can be retried. Use the lifecycle controls above."
+                      : recommendation === "Blocked / invalid"
+                        ? "Task is blocked. Review the evidence and audit trail."
+                        : "No approval decision is pending."
               : "Select a task to review its gate."}
           </p>
         )}

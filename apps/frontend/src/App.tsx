@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { approveStep, createTask, fetchHealth, getTask, listTasks, rejectStep } from "./api/client";
+import { approveStep, cancelTask, createTask, fetchHealth, getTask, listTasks, rejectStep, retryTask } from "./api/client";
 import type { CreateTaskInput, ReadinessState, TaskDetail, TaskIntent } from "./api/types";
 import { ReadinessBar } from "./components/ReadinessBar";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 
-type Operation = "creating" | "approving" | "rejecting";
+type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying";
 
 export default function App() {
   const [tasks, setTasks] = useState<TaskIntent[]>([]);
@@ -125,9 +125,13 @@ export default function App() {
         <ReviewPanel
           busy={busy}
           decision={operation === "approving" || operation === "rejecting" ? operation : undefined}
+          cancelDecision={operation === "cancelling" ? "cancelling" : undefined}
+          retryDecision={operation === "retrying" ? "retrying" : undefined}
           detail={detail}
           onApprove={(stepId) => runAction("approving", () => approveStep(stepId)).then(() => undefined)}
           onReject={(stepId) => runAction("rejecting", () => rejectStep(stepId)).then(() => undefined)}
+          onCancel={(taskId) => runAction("cancelling", () => cancelTask(taskId)).then(() => undefined)}
+          onRetry={(taskId) => runAction("retrying", () => retryTask(taskId)).then(() => undefined)}
         />
       </div>
     </div>

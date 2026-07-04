@@ -196,6 +196,8 @@ describe("P0.3 smoke: completed task detail and review", () => {
         busy={false}
         onApprove={vi.fn()}
         onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
       />,
     );
     expect(screen.getByText("task_created")).toBeInTheDocument();
@@ -258,6 +260,8 @@ describe("P0.3 smoke: awaiting approval state", () => {
         busy={false}
         onApprove={vi.fn()}
         onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /approve & simulate/i })).toBeInTheDocument();
@@ -271,6 +275,8 @@ describe("P0.3 smoke: awaiting approval state", () => {
         busy={false}
         onApprove={vi.fn()}
         onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
       />,
     );
     expect(screen.getByText("Decision needed")).toBeInTheDocument();
@@ -280,21 +286,23 @@ describe("P0.3 smoke: awaiting approval state", () => {
 // ── Rejected state ───────────────────────────────────────────────────
 
 describe("P0.3 smoke: rejected state", () => {
-  it("shows Rejected as next action in detail panel", async () => {
+  it("shows Retry available as next action in detail panel", async () => {
     render(<TaskDetailPanel detail={mockRejectedDetail} loading={false} error="" />);
-    expect(screen.getByText("Rejected")).toBeInTheDocument();
+    expect(screen.getByText("Retry available")).toBeInTheDocument();
   });
 
-  it("shows rejection message in review panel", async () => {
+  it("shows retry guidance in review panel", async () => {
     render(
       <ReviewPanel
         detail={mockRejectedDetail}
         busy={false}
         onApprove={vi.fn()}
         onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
       />,
     );
-    expect(screen.getByText(/task was rejected/i)).toBeInTheDocument();
+    expect(screen.getByText(/task can be retried/i)).toBeInTheDocument();
   });
 });
 
@@ -430,6 +438,7 @@ describe("P0.5 smoke: ReadinessBar component isolation", () => {
   });
 });
 
+
 describe("P0.5 smoke: no new real execution controls or wording", () => {
   beforeEach(() => {
     vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
@@ -446,5 +455,166 @@ describe("P0.5 smoke: no new real execution controls or wording", () => {
     const bar = document.querySelector(".readiness-bar");
     const text = bar?.textContent?.toLowerCase() ?? "";
     expect(text).not.toMatch(/\b(execute|run|deploy|start|network)\b/);
+  });
+});
+
+// ── P0.6 Lifecycle Controls ──────────────────────────────────────────
+
+describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
+  it("shows Cancel button for awaiting_approval task", async () => {
+    vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
+    vi.spyOn(client, "listTasks").mockResolvedValue([mockAwaitingDetail.task]);
+    vi.spyOn(client, "getTask").mockResolvedValue(mockAwaitingDetail);
+    vi.spyOn(client, "cancelTask").mockResolvedValue(mockAwaitingDetail);
+    vi.spyOn(client, "retryTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "approveStep").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
+    render(<App />);
+    expect(await screen.findByText("Cancel task")).toBeInTheDocument();
+  });
+
+  it("hides Cancel button for completed task", async () => {
+    render(
+      <ReviewPanel
+        detail={mockCompletedDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
+  });
+
+  it("hides Cancel button for rejected task", async () => {
+    render(
+      <ReviewPanel
+        detail={mockRejectedDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
+  });
+
+  it("shows Retry button for rejected task", async () => {
+    render(
+      <ReviewPanel
+        detail={mockRejectedDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Retry task")).toBeInTheDocument();
+  });
+
+  it("hides Retry button for awaiting_approval task", async () => {
+    render(
+      <ReviewPanel
+        detail={mockAwaitingDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Retry task")).not.toBeInTheDocument();
+  });
+});
+
+describe("P0.6 smoke: lifecycle actions call correct API", () => {
+  it("clicking Cancel calls cancelTask", async () => {
+    const cancelSpy = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ReviewPanel
+        detail={mockAwaitingDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={cancelSpy}
+        onRetry={vi.fn()}
+      />,
+    );
+    const btn = screen.getByText("Cancel task");
+    btn.click();
+    expect(cancelSpy).toHaveBeenCalledWith(mockAwaitingDetail.task.id);
+  });
+
+  it("clicking Retry calls retryTask", async () => {
+    const retrySpy = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ReviewPanel
+        detail={mockRejectedDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={retrySpy}
+      />,
+    );
+    const btn = screen.getByText("Retry task");
+    btn.click();
+    expect(retrySpy).toHaveBeenCalledWith(mockRejectedDetail.task.id);
+  });
+});
+
+describe("P0.6 smoke: lifecycle controls show busy state", () => {
+  it("Cancel button shows Cancelling... when busy", async () => {
+    render(
+      <ReviewPanel
+        detail={mockAwaitingDetail}
+        busy={true}
+        cancelDecision="cancelling"
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Cancelling...")).toBeInTheDocument();
+  });
+
+  it("Retry button shows Retrying... when busy", async () => {
+    render(
+      <ReviewPanel
+        detail={mockRejectedDetail}
+        busy={true}
+        retryDecision="retrying"
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Retrying...")).toBeInTheDocument();
+  });
+});
+
+describe("P0.6 smoke: no execution controls introduced", () => {
+  it("lifecycle buttons do not mention execute/run/deploy", async () => {
+    render(
+      <ReviewPanel
+        detail={mockRejectedDetail}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    const allButtons = screen.getAllByRole("button");
+    const texts = allButtons.map((b) => b.textContent?.toLowerCase() ?? "");
+    for (const t of texts) {
+      expect(t).not.toMatch(/\b(execute|run|deploy|start|shell|codex|ollama)\b/);
+    }
   });
 });

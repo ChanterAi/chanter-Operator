@@ -20,7 +20,12 @@ import type {
 } from "../types.js";
 import { validateRunnerResult } from "../validation/stepValidation.js";
 import { resolveWorkspacePath, WorkspacePathError } from "../workspace/pathGuard.js";
-import { canTransitionStep, canTransitionTask } from "./stateTransitions.js";
+import {
+  cancellableTaskStates,
+  canTransitionStep,
+  canTransitionTask,
+  retryableTaskStates,
+} from "./stateTransitions.js";
 
 export class OperatorError extends Error {
   constructor(
@@ -51,6 +56,120 @@ export class OperatorService {
   checkIntegrity(): IntegrityReport {
     return runIntegrityCheck(this.database, this.audit.path);
   }
+
+  // ── Lifecycle: Cancel task ────────────────────────────────────────
+
+  /**
+   * Cancel a task that is in a cancellable state.
+   * Allowed from: pending, queued, awaiting_approval.
+   * Rejected for: completed, executing, failed, rejected, cancelled.
+   * Pending steps are rejected. Audit records are appended.
+   */
+  cancelTask(taskId: string): TaskDetail {
+    const task = this.requireTask(taskId);
+
+    if (!cancellableTaskStates.has(task.status)) {
+      throw new OperatorError(
+        `Task cannot be cancelled from "${task.status}". Only pending, queued, or awaiting-approval tasks can be cancelled.`,
+        409,
+      );
+    }
+
+    const now = new Date().toISOString();
+    const steps = this.getStepsForTask(taskId);
+
+    withTransaction(this.database, () => {
+      this.transitionTask(task, "cancelled", now);
+
+      // Reject any pending-approval steps
+      for (const step of steps) {
+        if (step.status === "pending_approval") {
+          this.transitionStep(step, "rejected", now);
+        }
+      }
+
+      this.audit.append("task_cancelled", taskId, undefined, {
+        previous_status: task.status,
+      });
+    });
+
+    return this.getTaskDetail(taskId);
+  }
+
+  // ── Lifecycle: Retry / reopen task ────────────────────────────────
+
+  /**
+   * Retry a task from a terminal state.
+   * Allowed from: failed, rejected, cancelled.
+   * Creates a new execution step, reusing the original action payload.
+   * Safe actions execute immediately; guarded actions await approval.
+   */
+  retryTask(taskId: string): TaskDetail {
+    const task = this.requireTask(taskId);
+
+    if (!retryableTaskStates.has(task.status)) {
+      throw new OperatorError(
+        `Task cannot be retried from "${task.status}". Only failed, rejected, or cancelled tasks can be retried.`,
+        409,
+      );
+    }
+
+    // Get the most recent step to reuse its action type and payload
+    const steps = this.getStepsForTask(taskId);
+    const latestStep = steps[steps.length - 1];
+    if (!latestStep) {
+      throw new OperatorError("Cannot retry a task that has no execution steps.", 409);
+    }
+
+    const now = new Date().toISOString();
+    const stepId = randomUUID();
+    const approvalRequired = requiresApproval(latestStep.action_type);
+    const taskStatus: TaskStatus = approvalRequired ? "awaiting_approval" : "queued";
+    const previousStatus = task.status;
+
+    withTransaction(this.database, () => {
+      this.transitionTask(task, taskStatus, now);
+
+      this.database
+        .prepare(
+          `INSERT INTO execution_steps
+            (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          stepId,
+          taskId,
+          steps.length + 1,
+          latestStep.action_type,
+          JSON.stringify(latestStep.action_payload),
+          approvalRequired ? "pending_approval" : "approved",
+          approvalRequired ? 1 : 0,
+          now,
+          now,
+        );
+
+      this.audit.append("task_reopened", taskId, stepId, {
+        previous_status: previousStatus,
+        new_status: taskStatus,
+        action_type: latestStep.action_type,
+        requires_approval: approvalRequired,
+      });
+
+      if (approvalRequired) {
+        this.audit.append("approval_required", taskId, stepId, {
+          action_type: latestStep.action_type,
+        });
+      }
+    });
+
+    if (!approvalRequired) {
+      this.executeApprovedStep(taskId, stepId);
+    }
+
+    return this.getTaskDetail(taskId);
+  }
+
+  // ── Task CRUD ─────────────────────────────────────────────────────
 
   createTask(input: CreateTaskInput): TaskDetail {
     const rawInput = input.rawInput.trim();
@@ -148,10 +267,7 @@ export class OperatorService {
       throw new OperatorError("Task was not found.", 404);
     }
 
-    const steps = this.database
-      .prepare("SELECT * FROM execution_steps WHERE task_id = ? ORDER BY step_number ASC")
-      .all(taskId)
-      .map(mapStep);
+    const steps = this.getStepsForTask(taskId);
     const evidence = this.database
       .prepare("SELECT * FROM evidence WHERE task_id = ? ORDER BY created_at DESC")
       .all(taskId)
@@ -207,6 +323,15 @@ export class OperatorService {
 
   listAuditEvents(limit = 50) {
     return this.audit.readRecent(limit);
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────
+
+  private getStepsForTask(taskId: string): ExecutionStep[] {
+    return this.database
+      .prepare("SELECT * FROM execution_steps WHERE task_id = ? ORDER BY step_number ASC")
+      .all(taskId)
+      .map(mapStep);
   }
 
   private requireStep(stepId: string): ExecutionStep {

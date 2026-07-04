@@ -129,6 +129,15 @@ textarea:disabled, select:disabled, .text-input:disabled { opacity: .58; cursor:
 .button--primary:hover:not(:disabled) { background: #fff; }
 .button--danger { background: #221519; border-color: #653741; color: #efb5be; }
 .button--danger:hover:not(:disabled) { background: #301a20; }
+/* Lifecycle buttons */
+.button--lifecycle { min-height: 32px; font-size: 11px; }
+.button--lifecycle-cancel { background: #221519; border-color: #653741; color: #efb5be; }
+.button--lifecycle-cancel:hover:not(:disabled) { background: #301a20; }
+.button--lifecycle-retry { background: #141a22; border-color: #3a5068; color: #8ab4d6; }
+.button--lifecycle-retry:hover:not(:disabled) { background: #1a2430; }
+.lifecycle-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+.review-section--lifecycle { padding-top: 0; }
+
 
 .task-list { display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 488px); overflow-y: auto; padding-right: 2px; }
 .task-card { width: 100%; padding: 12px; text-align: left; background: #10141a; border: 1px solid #222832; border-radius: 8px; cursor: pointer; }
@@ -148,6 +157,7 @@ textarea:disabled, select:disabled, .text-input:disabled { opacity: .58; cursor:
 .status--completed .status__dot { background: #65c391; }
 .status--failed .status__dot, .status--rejected .status__dot { background: #d16c79; }
 .status--executing .status__dot, .status--queued .status__dot { background: #6e9fd0; }
+.status--cancelled .status__dot { background: #8a8495; }
 
 /* Agent frame section */
 .agent-frame { padding: 14px 18px; }
