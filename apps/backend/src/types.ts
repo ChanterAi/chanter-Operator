@@ -61,6 +61,16 @@ export interface ExecutionStep {
   updated_at: string;
 }
 
+export interface RunnerPolicyPreview {
+  id: string;
+  task_id: string;
+  proposed_command: string;
+  proposed_purpose: string;
+  verdict: "allowed_readonly" | "requires_approval" | "blocked";
+  reasons: string[];
+  created_at: string;
+}
+
 export interface CommitReview {
   id: string;
   task_id: string;
@@ -113,6 +123,7 @@ export const auditEventTypes = [
   "validation_evidence_added",
   "commit_review_added",
   "evidence_bundle_generated",
+  "runner_policy_preview_added",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -133,9 +144,15 @@ export interface TaskDetail {
   audit_events: AuditEvent[];
   validation_evidence: ValidationEvidence[];
   commit_reviews: CommitReview[];
+  runner_policy_previews: RunnerPolicyPreview[];
 }
 
 export interface EvidenceBundleResponse {
   taskId: string;
   markdown: string;
+}
+
+export interface RunnerPolicyPreviewInput {
+  proposedCommand: string;
+  proposedPurpose: string;
 }

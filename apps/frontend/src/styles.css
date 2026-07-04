@@ -513,3 +513,67 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
   font-size: 0.75rem;
   margin: 0.25rem 0;
 }
+
+/* ── P0.10 Runner Policy Preview ──────────────────────────────────── */
+
+.review-section--policy-preview {
+  border-top: 1px solid var(--border-color, #e2e8f0);
+}
+
+.policy-preview-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.policy-preview-list {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.policy-preview-card {
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 6px;
+  padding: 0.5rem;
+  background: var(--bg-card, #fff);
+}
+
+.policy-preview-card--allowed_readonly {
+  border-left: 3px solid #16a34a;
+  background: #f0fdf4;
+}
+
+.policy-preview-card--requires_approval {
+  border-left: 3px solid #d97706;
+  background: #fffbeb;
+}
+
+.policy-preview-card--blocked {
+  border-left: 3px solid #dc2626;
+  background: #fef2f2;
+}
+
+.policy-preview-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.verdict-badge--allowed_readonly {
+  background: #bbf7d0;
+  color: #166534;
+}
+
+.verdict-badge--requires_approval {
+  background: #fde68a;
+  color: #92400e;
+}
+
+.verdict-badge--blocked {
+  background: #fecaca;
+  color: #991b1b;
+}

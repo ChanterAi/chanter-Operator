@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { TaskDetail } from "../api/types";
 import { canCancelTask, canRetryTask, recommendNextAction } from "../api/types";
-import { fetchEvidenceBundle } from "../api/client";
-import type { CommitReview, EvidenceBundleResponse, ValidationEvidence } from "../api/types";
+import { fetchEvidenceBundle, previewRunnerPolicy } from "../api/client";
+import type { CommitReview, EvidenceBundleResponse, RunnerPolicyPreview, ValidationEvidence } from "../api/types";
 
 interface Props {
   detail: TaskDetail | null;
@@ -17,9 +17,10 @@ interface Props {
   onAddValidation: (taskId: string, commandLabel: string, status: string, output: string) => Promise<void>;
   onAddCommitReview: (taskId: string, summaryText: string, changedFilesText: string, validationText: string, riskNotesText: string) => Promise<void>;
   onEvidenceBundleGenerated?: (bundle: EvidenceBundleResponse) => void;
+  onPolicyPreviewGenerated?: (result: TaskDetail) => void;
 }
 
-export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation, onAddCommitReview, onEvidenceBundleGenerated }: Props) {
+export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation, onAddCommitReview, onEvidenceBundleGenerated, onPolicyPreviewGenerated }: Props) {
   const step = detail?.steps[0];
   const pending = step?.status === "pending_approval";
   const recommendation = detail ? recommendNextAction(detail) : null;
@@ -44,6 +45,12 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
   const [generatingBundle, setGeneratingBundle] = useState(false);
   const [bundleError, setBundleError] = useState("");
   const [copied, setCopied] = useState(false);
+
+  // Runner policy preview state
+  const [policyCommand, setPolicyCommand] = useState("");
+  const [policyPurpose, setPolicyPurpose] = useState("");
+  const [previewingPolicy, setPreviewingPolicy] = useState(false);
+  const [policyError, setPolicyError] = useState("");
   // Clear stale bundle when selected task changes
   useEffect(() => {
     setBundleResult(null);
@@ -135,6 +142,82 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
                         : "No approval decision is pending."
               : "Select a task to review its gate."}
           </p>
+        )}
+      </section>
+
+      <section className="review-section review-section--policy-preview">
+        <h3>Runner policy preview</h3>
+        <p className="evidence-disclaimer">Policy preview only — no command is run.</p>
+
+        <form
+          className="policy-preview-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!detail) return;
+            setPreviewingPolicy(true);
+            setPolicyError("");
+            try {
+              const result = await previewRunnerPolicy(detail.task.id, policyCommand, policyPurpose);
+              onPolicyPreviewGenerated?.(result);
+              setPolicyCommand("");
+              setPolicyPurpose("");
+            } catch (err: any) {
+              setPolicyError(err.message || "Failed to preview policy");
+            } finally {
+              setPreviewingPolicy(false);
+            }
+          }}
+        >
+          <input
+            className="input input--compact"
+            disabled={busy || previewingPolicy}
+            maxLength={1000}
+            onChange={(e) => setPolicyCommand(e.target.value)}
+            placeholder="e.g. git status --short, npm test..."
+            required
+            type="text"
+            value={policyCommand}
+          />
+          <input
+            className="input input--compact"
+            disabled={busy || previewingPolicy}
+            maxLength={2000}
+            onChange={(e) => setPolicyPurpose(e.target.value)}
+            placeholder="Purpose (e.g. check working tree before commit)"
+            type="text"
+            value={policyPurpose}
+          />
+          <button
+            className="button button--primary button--compact"
+            disabled={busy || previewingPolicy}
+            type="submit"
+          >
+            {previewingPolicy ? "Checking..." : "Preview policy"}
+          </button>
+        </form>
+        {policyError && <p className="error-text">{policyError}</p>}
+
+        {detail?.runner_policy_previews && detail.runner_policy_previews.length > 0 && (
+          <div className="policy-preview-list">
+            {detail.runner_policy_previews.map((pp: RunnerPolicyPreview) => (
+              <div key={pp.id} className={`policy-preview-card policy-preview-card--${pp.verdict}`}>
+                <div className="policy-preview-card__header">
+                  <span className={`verdict-badge verdict-badge--${pp.verdict}`}>
+                    {pp.verdict === "allowed_readonly" ? "✅ ALLOWED (READ-ONLY)" : pp.verdict === "requires_approval" ? "⚠️ REQUIRES APPROVAL" : "⛔ BLOCKED"}
+                  </span>
+                  <time>{new Date(pp.created_at).toLocaleString()}</time>
+                </div>
+                <code className="validation-label-text">{pp.proposed_command}</code>
+                {pp.reasons.length > 0 && (
+                  <ul className="verdict-reasons">
+                    {pp.reasons.map((r, i) => (
+                      <li key={i} className="verdict-reason-item">{r}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </section>
 

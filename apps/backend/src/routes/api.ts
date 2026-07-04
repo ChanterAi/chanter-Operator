@@ -89,6 +89,14 @@ export function createApiRouter(service: OperatorService): Router {
   });
 
 
+
+  router.post("/tasks/:taskId/runner-policy-previews", (request, response) => {
+    const proposedCommand = typeof request.body?.proposedCommand === "string" ? request.body.proposedCommand : "";
+    const proposedPurpose = typeof request.body?.proposedPurpose === "string" ? request.body.proposedPurpose : "";
+    response.status(201).json(
+      service.previewRunnerPolicy(request.params.taskId, { proposedCommand, proposedPurpose }),
+    );
+  });
   router.get("/tasks/:taskId/evidence-bundle", (request, response) => {
     response.status(200).json(service.buildEvidenceBundle(request.params.taskId));
   });

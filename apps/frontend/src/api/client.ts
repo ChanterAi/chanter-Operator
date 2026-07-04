@@ -55,6 +55,13 @@ export function approveStep(stepId: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/api/steps/${stepId}/approve`, { method: "POST", body: "{}" });
 }
 
+export async function previewRunnerPolicy(taskId: string, proposedCommand: string, proposedPurpose: string): Promise<TaskDetail> {
+  return request<TaskDetail>(`/api/tasks/${taskId}/runner-policy-previews`, {
+    method: "POST",
+    body: JSON.stringify({ proposedCommand, proposedPurpose }),
+  });
+}
+
 export async function addCommitReview(taskId: string, input: AddCommitReviewInput): Promise<TaskDetail> {
   return request<TaskDetail>(`/api/tasks/${taskId}/commit-reviews`, {
     method: "POST",

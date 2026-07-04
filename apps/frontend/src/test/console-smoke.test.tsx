@@ -200,6 +200,7 @@ describe("P0.3 smoke: completed task detail and review", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("task_created")).toBeInTheDocument();
@@ -266,6 +267,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /approve & simulate/i })).toBeInTheDocument();
@@ -283,6 +285,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Decision needed")).toBeInTheDocument();
@@ -308,6 +311,7 @@ describe("P0.3 smoke: rejected state", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/task can be retried/i)).toBeInTheDocument();
@@ -493,6 +497,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -509,6 +514,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -525,6 +531,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Retry task")).toBeInTheDocument();
@@ -541,6 +548,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.queryByText("Retry task")).not.toBeInTheDocument();
@@ -560,6 +568,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const btn = screen.getByText("Cancel task");
@@ -579,6 +588,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onRetry={retrySpy}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const btn = screen.getByText("Retry task");
@@ -600,6 +610,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Cancelling...")).toBeInTheDocument();
@@ -617,6 +628,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Retrying...")).toBeInTheDocument();
@@ -635,6 +647,7 @@ describe("P0.6 smoke: no execution controls introduced", () => {
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const allButtons = screen.getAllByRole("button");
@@ -656,6 +669,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Manual validation")).toBeInTheDocument();
@@ -672,6 +686,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/Manual evidence only/i)).toBeInTheDocument();
@@ -689,9 +704,11 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
-    expect(screen.getByPlaceholderText(/npm test/i)).toBeInTheDocument();
+    const manualSection = screen.getByText("Manual validation").closest("section")!;
+    expect(manualSection.querySelector('input[placeholder*="npm test"]')).toBeInTheDocument();
   });
 
   it("renders status selector with all options", () => {
@@ -705,6 +722,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     // The select has "Passed" as default option
@@ -729,6 +747,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /add evidence/i })).toBeInTheDocument();
@@ -758,6 +777,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Pass")).toBeInTheDocument();
@@ -784,6 +804,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Pass")).toBeInTheDocument();
@@ -802,6 +823,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
           onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const section = screen.getByText("Manual validation").closest("section")!;
@@ -830,6 +852,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Safe commit review intake")).toBeInTheDocument();
@@ -846,6 +869,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/Manual review only/i)).toBeInTheDocument();
@@ -863,6 +887,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /submit review/i })).toBeInTheDocument();
@@ -893,6 +918,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/BLOCKED/i)).toBeInTheDocument();
@@ -923,6 +949,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/NEEDS REVIEW/i)).toBeInTheDocument();
@@ -953,6 +980,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/SAFE TO REVIEW/i)).toBeInTheDocument();
@@ -983,6 +1011,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText(/Failing tests reported/i)).toBeInTheDocument();
@@ -1000,6 +1029,7 @@ describe("P0.8 safe commit review intake", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const section = screen.getByText("Safe commit review intake").closest("section")!;
@@ -1027,6 +1057,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByText("Evidence bundle")).toBeInTheDocument();
@@ -1043,6 +1074,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getAllByText(/no command is run/i).length).toBeGreaterThanOrEqual(1);
@@ -1059,6 +1091,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /generate evidence bundle/i })).toBeInTheDocument();
@@ -1075,6 +1108,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const button = screen.getByRole("button", { name: /generate evidence bundle/i });
@@ -1092,6 +1126,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const button = screen.getByRole("button", { name: /generate evidence bundle/i });
@@ -1109,6 +1144,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
 
@@ -1127,6 +1163,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
 
@@ -1146,6 +1183,7 @@ describe("P0.9 evidence bundle export", () => {
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
         onAddCommitReview={vi.fn()}
+      onPolicyPreviewGenerated={vi.fn()}
       />,
     );
     const section = screen.getByText("Evidence bundle").closest("section")!;
@@ -1155,6 +1193,193 @@ describe("P0.9 evidence bundle export", () => {
     expect(text).not.toMatch(/\bdeploy\b/i);
     expect(text).not.toMatch(/\bcodex\b/i);
     expect(text).not.toMatch(/\bollama\b/i);
+  });
+});
+
+
+describe("P0.10 runner policy preview", () => {
+  it("renders runner policy preview section", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Runner policy preview")).toBeInTheDocument();
+  });
+
+  it("renders no-command disclaimer", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Policy preview only/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/no command is run/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders preview policy button", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /preview policy/i })).toBeInTheDocument();
+  });
+
+  it("renders ALLOWED READ-ONLY verdict badge", () => {
+    const withPreview = {
+      ...mockCompletedDetail,
+      runner_policy_previews: [{
+        id: "rpp-001", task_id: "task-001",
+        proposed_command: "git status --short",
+        proposed_purpose: "check status",
+        verdict: "allowed_readonly" as const,
+        reasons: ["Exact allowlisted read-only command"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withPreview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/ALLOWED.*READ-ONLY/i)).toBeInTheDocument();
+  });
+
+  it("renders REQUIRES APPROVAL verdict badge", () => {
+    const withPreview = {
+      ...mockCompletedDetail,
+      runner_policy_previews: [{
+        id: "rpp-002", task_id: "task-001",
+        proposed_command: "npm test",
+        proposed_purpose: "run tests",
+        verdict: "requires_approval" as const,
+        reasons: ["Validation/build command requires explicit human approval"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withPreview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/REQUIRES APPROVAL/i)).toBeInTheDocument();
+  });
+
+  it("renders BLOCKED verdict badge", () => {
+    const withPreview = {
+      ...mockCompletedDetail,
+      runner_policy_previews: [{
+        id: "rpp-003", task_id: "task-001",
+        proposed_command: "git push",
+        proposed_purpose: "push",
+        verdict: "blocked" as const,
+        reasons: ["git push is blocked — no remote pushes"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withPreview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/BLOCKED/)).toBeInTheDocument();
+  });
+
+  it("renders verdict reasons", () => {
+    const withPreview = {
+      ...mockCompletedDetail,
+      runner_policy_previews: [{
+        id: "rpp-004", task_id: "task-001",
+        proposed_command: "rm -rf /tmp",
+        proposed_purpose: "cleanup",
+        verdict: "blocked" as const,
+        reasons: ["rm/del is blocked — no file deletion"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withPreview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/no file deletion/i)).toBeInTheDocument();
+  });
+
+  it("no execute/run/deploy wording as executable controls", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+        onPolicyPreviewGenerated={vi.fn()}
+      />,
+    );
+    const section = screen.getByText("Runner policy preview").closest("section")!;
+    const text = section.textContent || "";
+    expect(text).toMatch(/Policy preview only/i);
+    expect(text).not.toMatch(/git push/i);
   });
 });
 

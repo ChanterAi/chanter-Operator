@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS commit_reviews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_commit_reviews_task_id ON commit_reviews(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS runner_policy_previews (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task_intents(id) ON DELETE RESTRICT,
+  proposed_command TEXT NOT NULL,
+  proposed_purpose TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('allowed_readonly', 'requires_approval', 'blocked')),
+  reasons TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runner_policy_previews_task_id ON runner_policy_previews(task_id, created_at);
 `;
 
 const validLanes = new Set<string>([

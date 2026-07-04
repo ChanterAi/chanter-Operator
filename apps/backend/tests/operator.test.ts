@@ -1258,4 +1258,168 @@ describe("P0.9 evidence bundle export", () => {
   });
 });
 
+
+describe("P0.10 runner policy preview", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p10-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+    service = new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("creates runner policy preview for existing task", () => {
+    const created = service.createTask({ rawInput: "Policy preview test", actionType: "analysis" });
+    const result = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git status --short", proposedPurpose: "check status" });
+    expect(result.runner_policy_previews).toHaveLength(1);
+    expect(result.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  it("rejects missing task", () => {
+    expect(() => service.previewRunnerPolicy("missing-id", { proposedCommand: "git status --short", proposedPurpose: "check" }))
+      .toThrow(/was not found/);
+  });
+
+  it("rejects oversized command with 400", () => {
+    const created = service.createTask({ rawInput: "Oversized command", actionType: "analysis" });
+    const huge = "x".repeat(1_500);
+    expect(() => service.previewRunnerPolicy(created.task.id, { proposedCommand: huge, proposedPurpose: "test" }))
+      .toThrow(/command must be 1,000 characters or fewer/i);
+  });
+
+  it("rejects oversized purpose with 400", () => {
+    const created = service.createTask({ rawInput: "Oversized purpose", actionType: "analysis" });
+    const huge = "x".repeat(3_000);
+    expect(() => service.previewRunnerPolicy(created.task.id, { proposedCommand: "npm test", proposedPurpose: huge }))
+      .toThrow(/purpose must be 2,000 characters or fewer/i);
+  });
+
+  // ALLOWED_READONLY tests
+  it("git status --short => allowed_readonly", () => {
+    const created = service.createTask({ rawInput: "Git status", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git status --short", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  it("git diff --stat => allowed_readonly", () => {
+    const created = service.createTask({ rawInput: "Git diff stat", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git diff --stat", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  it("git diff --check => allowed_readonly", () => {
+    const created = service.createTask({ rawInput: "Git diff check", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git diff --check", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  it("git show --stat --oneline HEAD => allowed_readonly", () => {
+    const created = service.createTask({ rawInput: "Git show stat", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git show --stat --oneline HEAD", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  it("git show --name-only HEAD => allowed_readonly", () => {
+    const created = service.createTask({ rawInput: "Git show names", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git show --name-only HEAD", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("allowed_readonly");
+  });
+
+  // REQUIRES_APPROVAL tests
+  it("npm run typecheck => requires_approval", () => {
+    const created = service.createTask({ rawInput: "Typecheck", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "npm run typecheck", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("requires_approval");
+  });
+
+  it("npm test => requires_approval", () => {
+    const created = service.createTask({ rawInput: "Npm test", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "npm test", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("requires_approval");
+  });
+
+  it("npm run build => requires_approval", () => {
+    const created = service.createTask({ rawInput: "Npm build", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "npm run build", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("requires_approval");
+  });
+
+  // BLOCKED tests
+  const blockedCases = [
+    ["git add", "git add => blocked"],
+    ["git commit -m test", "git commit => blocked"],
+    ["git push origin main", "git push => blocked"],
+    ["git pull", "git pull => blocked"],
+    ["git merge", "git merge => blocked"],
+    ["git rebase main", "git rebase => blocked"],
+    ["rm file.ts", "rm => blocked"],
+    ["del file.ts", "del => blocked"],
+    ["rmdir folder", "rmdir => blocked"],
+    ["npm install express", "npm install => blocked"],
+    ["npm i react", "npm i => blocked"],
+    ["curl https://example.com", "curl => blocked"],
+    ["wget https://example.com", "wget => blocked"],
+    ["deploy production", "deploy => blocked"],
+    ["codex run", "codex => blocked"],
+    ["ollama run", "ollama => blocked"],
+    ["openclaw something", "openclaw => blocked"],
+    ["python script.py", "python => blocked"],
+    ["node script.js", "node => blocked"],
+    ["bash script.sh", "bash => blocked"],
+    ["pwsh script.ps1", "pwsh => blocked"],
+    ["cmd /c dir", "cmd => blocked"],
+    ["cmd && dir", "&& chaining => blocked"],
+    ["ls | grep test", "pipe => blocked"],
+    ["npm run typecheck; npm test", "semicolon => blocked"],
+  ];
+
+  for (const [cmd, label] of blockedCases) {
+    it(label, () => {
+      const created = service.createTask({ rawInput: label, actionType: "analysis" });
+      const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: cmd, proposedPurpose: "" });
+      expect(r.runner_policy_previews[0].verdict).toBe("blocked");
+    });
+  }
+
+  it("unknown command => blocked", () => {
+    const created = service.createTask({ rawInput: "Unknown cmd", actionType: "analysis" });
+    const r = service.previewRunnerPolicy(created.task.id, { proposedCommand: "some-random-command --flag", proposedPurpose: "" });
+    expect(r.runner_policy_previews[0].verdict).toBe("blocked");
+  });
+
+  it("preview does not mutate task lifecycle state", () => {
+    const created = service.createTask({ rawInput: "No mutation", actionType: "file_edit" });
+    const before = created.task.status;
+    service.previewRunnerPolicy(created.task.id, { proposedCommand: "git status --short", proposedPurpose: "" });
+    const after = service.getTaskDetail(created.task.id);
+    expect(after.task.status).toBe(before);
+  });
+
+  it("audit event appended", () => {
+    const created = service.createTask({ rawInput: "Audited preview", actionType: "analysis" });
+    const result = service.previewRunnerPolicy(created.task.id, { proposedCommand: "npm test", proposedPurpose: "validate" });
+    expect(result.audit_events.some(e => e.event_type === "runner_policy_preview_added")).toBe(true);
+  });
+
+  it("no shell, process, git, or filesystem scan introduced", () => {
+    const created = service.createTask({ rawInput: "Safety check", actionType: "analysis" });
+    const result = service.previewRunnerPolicy(created.task.id, { proposedCommand: "git status --short", proposedPurpose: "" });
+    expect(result.runner_policy_previews).toHaveLength(1);
+    // Task remains completed (analysis auto-executes via mock) — no real execution happened
+    expect(result.task.status).toBe("completed");
+  });
+});
+
 });

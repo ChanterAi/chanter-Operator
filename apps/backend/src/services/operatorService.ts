@@ -3,7 +3,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
-import { mapCommitReview, mapEvidence, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
+import { mapCommitReview, mapEvidence, mapRunnerPolicyPreview, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
 import { normalizeProductLane } from "../db/schema.js";
 import { runIntegrityCheck } from "../integrity/integrityChecker.js";
 import type { IntegrityReport } from "../integrity/integrityChecker.js";
@@ -18,7 +18,9 @@ import type {
   TaskIntent,
   TaskStatus,
   CommitReview,
+  RunnerPolicyPreview,
   EvidenceBundleResponse,
+  RunnerPolicyPreviewInput,
   ValidationEvidence,
 } from "../types.js";
 import { validateRunnerResult } from "../validation/stepValidation.js";
@@ -99,6 +101,61 @@ function allFourGatesPassed(validationText: string): { allPassed: boolean; missi
   }
   return { allPassed: missing.length === 0, missing };
 }
+
+const MAX_COMMAND_LENGTH = 1_000;
+const MAX_PURPOSE_LENGTH = 2_000;
+
+const allowedReadonlyCommands = new Set<string>([
+  "git status --short",
+  "git diff --stat",
+  "git diff --check",
+  "git show --stat --oneline HEAD",
+  "git show --name-only HEAD",
+]);
+
+const requiresApprovalCommands = new Set<string>([
+  "npm run typecheck",
+  "npm test",
+  "npm run build",
+]);
+
+const blockedPrefixes: { prefix: string; reason: string }[] = [
+  { prefix: "git add", reason: "git add is blocked — no automated staging" },
+  { prefix: "git commit", reason: "git commit is blocked — no automated commits" },
+  { prefix: "git push", reason: "git push is blocked — no remote pushes" },
+  { prefix: "git pull", reason: "git pull is blocked — no remote fetches" },
+  { prefix: "git merge", reason: "git merge is blocked — no automated merges" },
+  { prefix: "git rebase", reason: "git rebase is blocked" },
+  { prefix: "rm ", reason: "rm/del is blocked — no file deletion" },
+  { prefix: "del ", reason: "rm/del is blocked — no file deletion" },
+  { prefix: "rmdir", reason: "rm/del is blocked — no file deletion" },
+  { prefix: "cp ", reason: "File copy/move/write is blocked" },
+  { prefix: "mv ", reason: "File copy/move/write is blocked" },
+  { prefix: "copy ", reason: "File copy/move/write is blocked" },
+  { prefix: "move ", reason: "File copy/move/write is blocked" },
+  { prefix: "npm install", reason: "npm install is blocked — no package changes" },
+  { prefix: "npm i ", reason: "npm install is blocked — no package changes" },
+  { prefix: "curl ", reason: "curl/wget/network commands are blocked" },
+  { prefix: "wget ", reason: "curl/wget/network commands are blocked" },
+  { prefix: "deploy", reason: "Deploy commands are blocked" },
+  { prefix: "env", reason: "Environment/secret access is blocked" },
+  { prefix: "export ", reason: "Environment/secret access is blocked" },
+  { prefix: "set ", reason: "Environment variable setting is blocked" },
+  { prefix: "codex", reason: "Codex/agent integration is blocked" },
+  { prefix: "ollama", reason: "Ollama/agent integration is blocked" },
+  { prefix: "openclaw", reason: "Agent/runner integration is blocked" },
+  { prefix: "python", reason: "Arbitrary script execution is blocked" },
+  { prefix: "node ", reason: "Arbitrary script execution is blocked" },
+  { prefix: "bash ", reason: "Arbitrary shell execution is blocked" },
+  { prefix: "cmd ", reason: "Arbitrary shell execution is blocked" },
+  { prefix: "powershell", reason: "Arbitrary shell execution is blocked" },
+  { prefix: "pwsh ", reason: "Arbitrary shell execution is blocked" },
+  { prefix: "sh ", reason: "Arbitrary shell execution is blocked" },
+  { prefix: "&&", reason: "Shell chaining is blocked" },
+  { prefix: "||", reason: "Shell chaining is blocked" },
+  { prefix: "|", reason: "Pipe/chain is blocked" },
+  { prefix: ";", reason: "Command separator is blocked" },
+];
 
 export class OperatorService {
   constructor(
@@ -339,6 +396,11 @@ export class OperatorService {
       .all(taskId)
       .map(mapCommitReview);
 
+    const runner_policy_previews = this.database
+      .prepare("SELECT * FROM runner_policy_previews WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId)
+      .map(mapRunnerPolicyPreview);
+
     return {
       task: mapTask(taskRow),
       steps,
@@ -346,6 +408,7 @@ export class OperatorService {
       audit_events: this.audit.readRecent(100, taskId),
       validation_evidence,
       commit_reviews,
+      runner_policy_previews,
     };
   }
 
@@ -658,7 +721,90 @@ export class OperatorService {
   }
 
 
-  // ── Private helpers ──
+  classifyRunnerPolicy(command: string): { verdict: "allowed_readonly" | "requires_approval" | "blocked"; reasons: string[] } {
+    const normalized = command.trim();
+    if (!normalized) return { verdict: "blocked", reasons: ["Empty command is blocked"] };
+
+    // Check exact allowlist matches first
+    if (allowedReadonlyCommands.has(normalized)) {
+      return { verdict: "allowed_readonly", reasons: ["Exact allowlisted read-only command"] };
+    }
+    if (requiresApprovalCommands.has(normalized)) {
+      return { verdict: "requires_approval", reasons: ["Validation/build command requires explicit human approval"] };
+    }
+
+    // Check for pipe/chain separators anywhere in the command
+    if (normalized.includes(";")) {
+      return { verdict: "blocked", reasons: ["Command separator (;) is blocked"] };
+    }
+    if (normalized.includes("&&")) {
+      return { verdict: "blocked", reasons: ["Shell chaining (&&) is blocked"] };
+    }
+    if (normalized.includes("||")) {
+      return { verdict: "blocked", reasons: ["Shell chaining (||) is blocked"] };
+    }
+    if (normalized.includes("|")) {
+      return { verdict: "blocked", reasons: ["Pipe is blocked"] };
+    }
+
+    // Check blocked prefixes
+    const lower = normalized.toLowerCase();
+    for (const rule of blockedPrefixes) {
+      if (lower.startsWith(rule.prefix)) {
+        return { verdict: "blocked", reasons: [rule.reason] };
+      }
+    }
+
+    // Default: blocked
+    return { verdict: "blocked", reasons: ["Command not found in any allowlist — blocked by default"] };
+  }
+
+  /**
+   * Preview runner policy for a proposed command.
+   * Does NOT run the command — purely deterministic classification.
+   */
+  previewRunnerPolicy(taskId: string, input: RunnerPolicyPreviewInput): TaskDetail {
+    const task = this.requireTask(taskId);
+
+    if (input.proposedCommand.length > MAX_COMMAND_LENGTH) {
+      throw new OperatorError("Proposed command must be 1,000 characters or fewer.", 400);
+    }
+    if (input.proposedPurpose.length > MAX_PURPOSE_LENGTH) {
+      throw new OperatorError("Proposed purpose must be 2,000 characters or fewer.", 400);
+    }
+
+    const { verdict, reasons } = this.classifyRunnerPolicy(input.proposedCommand);
+
+    const now = new Date().toISOString();
+    const previewId = randomUUID();
+
+    withTransaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO runner_policy_previews
+            (id, task_id, proposed_command, proposed_purpose, verdict, reasons, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(previewId, taskId, input.proposedCommand, input.proposedPurpose, verdict, JSON.stringify(reasons), now);
+
+      this.audit.append(
+        "runner_policy_preview_added",
+        taskId,
+        undefined,
+        {
+          preview_id: previewId,
+          verdict,
+          reason_count: reasons.length,
+          command_length: input.proposedCommand.length,
+          purpose_length: input.proposedPurpose.length,
+        },
+      );
+    });
+
+    return this.getTaskDetail(taskId);
+  }
+
+    // ── Private helpers ──
 
 
   private getStepsForTask(taskId: string): ExecutionStep[] {

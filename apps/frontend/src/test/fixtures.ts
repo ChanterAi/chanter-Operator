@@ -42,6 +42,7 @@ export const mockCompletedDetail: TaskDetail = {
   ],
   validation_evidence: [],
   commit_reviews: [],
+  runner_policy_previews: [],
   audit_events: [
     { id: "a1", event_type: "task_created", task_id: "task-001", data: {}, created_at: "2026-07-04T09:00:00.000Z" },
     { id: "a2", event_type: "step_created", task_id: "task-001", step_id: "step-001", data: {}, created_at: "2026-07-04T09:00:00.000Z" },
@@ -71,6 +72,7 @@ export const mockAwaitingDetail: TaskDetail = {
   evidence: [],
   validation_evidence: [],
   commit_reviews: [],
+  runner_policy_previews: [],
   audit_events: [
     { id: "b1", event_type: "task_created", task_id: "task-002", data: {}, created_at: "2026-07-04T09:10:00.000Z" },
     { id: "b2", event_type: "step_created", task_id: "task-002", step_id: "step-002", data: {}, created_at: "2026-07-04T09:10:00.000Z" },
@@ -96,6 +98,7 @@ export const mockRejectedDetail: TaskDetail = {
   evidence: [],
   validation_evidence: [],
   commit_reviews: [],
+  runner_policy_previews: [],
   audit_events: [
     { id: "c1", event_type: "task_created", task_id: "task-003", data: {}, created_at: "2026-07-04T09:20:00.000Z" },
     { id: "c2", event_type: "step_created", task_id: "task-003", step_id: "step-003", data: {}, created_at: "2026-07-04T09:20:00.000Z" },

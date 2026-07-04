@@ -80,6 +80,16 @@ export interface CommitReview {
   created_at: string;
 }
 
+export interface RunnerPolicyPreview {
+  id: string;
+  task_id: string;
+  proposed_command: string;
+  proposed_purpose: string;
+  verdict: "allowed_readonly" | "requires_approval" | "blocked";
+  reasons: string[];
+  created_at: string;
+}
+
 export interface AddCommitReviewInput {
   summaryText: string;
   changedFilesText: string;
@@ -100,6 +110,7 @@ export interface TaskDetail {
   audit_events: AuditEvent[];
   validation_evidence: ValidationEvidence[];
   commit_reviews: CommitReview[];
+  runner_policy_previews: RunnerPolicyPreview[];
 }
 
 export interface CreateTaskInput {
