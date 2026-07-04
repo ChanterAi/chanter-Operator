@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { productLanes } from "../types.js";
 import { actionTypes, type ActionType } from "../types.js";
 import { OperatorService } from "../services/operatorService.js";
 
@@ -15,9 +16,15 @@ export function createApiRouter(service: OperatorService): Router {
     response.json({
       status: "ok",
       runner: "mock",
+      mode: "safe / review-only",
+      execution: "contained_simulation",
       real_execution_enabled: false,
       network_execution_enabled: false,
     });
+  });
+
+  router.get("/lanes", (_request, response) => {
+    response.json({ lanes: productLanes });
   });
 
   router.get("/tasks", (_request, response) => {
@@ -32,6 +39,10 @@ export function createApiRouter(service: OperatorService): Router {
       workspaceRelativePath:
         typeof request.body?.workspaceRelativePath === "string"
           ? request.body.workspaceRelativePath
+          : undefined,
+      productLane:
+        typeof request.body?.productLane === "string"
+          ? request.body.productLane
           : undefined,
     });
     response.status(201).json(detail);
@@ -58,4 +69,3 @@ export function createApiRouter(service: OperatorService): Router {
 
   return router;
 }
-

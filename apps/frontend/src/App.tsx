@@ -5,11 +5,17 @@ import { ReviewPanel } from "./components/ReviewPanel";
 import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 
+type Operation = "creating" | "approving" | "rejecting";
+
 export default function App() {
   const [tasks, setTasks] = useState<TaskIntent[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [detail, setDetail] = useState<TaskDetail | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<Operation>();
+  const [loadingTasks, setLoadingTasks] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [taskListError, setTaskListError] = useState("");
+  const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
 
   const refreshTasks = useCallback(async () => {
@@ -20,54 +26,90 @@ export default function App() {
 
   const selectTask = useCallback(async (taskId: string) => {
     setSelectedTaskId(taskId);
-    setDetail(await getTask(taskId));
+    setLoadingDetail(true);
+    setDetailError("");
+    try {
+      setDetail(await getTask(taskId));
+    } catch (reason) {
+      setDetail(null);
+      setDetailError(reason instanceof Error ? reason.message : "Could not load the selected task.");
+    } finally {
+      setLoadingDetail(false);
+    }
   }, []);
 
   useEffect(() => {
+    setLoadingTasks(true);
+    setTaskListError("");
     refreshTasks()
       .then((nextTasks) => nextTasks[0] && selectTask(nextTasks[0].id))
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load tasks."));
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : "Could not load tasks.";
+        setTaskListError(message);
+        setError(message);
+      })
+      .finally(() => setLoadingTasks(false));
   }, [refreshTasks, selectTask]);
 
-  async function runAction(action: () => Promise<TaskDetail>) {
-    setBusy(true);
+  async function runAction(nextOperation: Operation, action: () => Promise<TaskDetail>): Promise<boolean> {
+    setOperation(nextOperation);
     setError("");
     try {
       const nextDetail = await action();
       setDetail(nextDetail);
+      setDetailError("");
       setSelectedTaskId(nextDetail.task.id);
-      await refreshTasks();
+      try {
+        await refreshTasks();
+        setTaskListError("");
+      } catch {
+        setError("The action completed, but the task queue could not be refreshed.");
+      }
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "The local action failed.");
+      return false;
     } finally {
-      setBusy(false);
+      setOperation(undefined);
     }
   }
+
+  const busy = operation !== undefined || loadingDetail || loadingTasks;
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand__mark">C</span><div><strong>CHANTER</strong><span>Operator</span></div></div>
-        <div className="mode"><span className="mode__dot" />Local · Mock runner</div>
+        <div className="agent-mode-bar">
+          <span className="agent-mode-bar__item"><span className="agent-mode-bar__label">Runner</span> Mock Adapter</span>
+          <span className="agent-mode-bar__sep" />
+          <span className="agent-mode-bar__item"><span className="agent-mode-bar__label">Mode</span> Safe / Review-only</span>
+          <span className="agent-mode-bar__sep" />
+          <span className="agent-mode-bar__item"><span className="agent-mode-bar__label">Execution</span> Contained Simulation</span>
+        </div>
+        <div className="mode"><span className="mode__dot" />Local &mdash; Mock runner</div>
       </header>
-      {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} type="button" aria-label="Dismiss error">×</button></div>}
+      {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} type="button" aria-label="Dismiss error">&times;</button></div>}
       <div className="cockpit">
         <TaskQueuePanel
           busy={busy}
-          onCreate={(input: CreateTaskInput) => runAction(() => createTask(input))}
-          onSelect={(taskId) => runAction(() => getTask(taskId))}
+          creating={operation === "creating"}
+          error={taskListError}
+          loading={loadingTasks}
+          onCreate={(input: CreateTaskInput) => runAction("creating", () => createTask(input))}
+          onSelect={selectTask}
           selectedTaskId={selectedTaskId}
           tasks={tasks}
         />
-        <TaskDetailPanel detail={detail} />
+        <TaskDetailPanel detail={detail} error={detailError} loading={loadingDetail} />
         <ReviewPanel
           busy={busy}
+          decision={operation === "approving" || operation === "rejecting" ? operation : undefined}
           detail={detail}
-          onApprove={(stepId) => runAction(() => approveStep(stepId))}
-          onReject={(stepId) => runAction(() => rejectStep(stepId))}
+          onApprove={(stepId) => runAction("approving", () => approveStep(stepId)).then(() => undefined)}
+          onReject={(stepId) => runAction("rejecting", () => rejectStep(stepId)).then(() => undefined)}
         />
       </div>
     </div>
   );
 }
-

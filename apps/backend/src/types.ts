@@ -1,3 +1,14 @@
+export const productLanes = [
+  "AutoPoster",
+  "Loop Governor",
+  "Clean Engine",
+  "Crypto Radar",
+  "Premium Site",
+  "CHANTER Operator",
+] as const;
+
+export type ProductLane = (typeof productLanes)[number];
+
 export const actionTypes = [
   "analysis",
   "read_file",
@@ -32,6 +43,7 @@ export interface TaskIntent {
   parsed_description: string;
   status: TaskStatus;
   priority: number;
+  product_lane: ProductLane;
   created_at: string;
   updated_at: string;
 }
@@ -67,6 +79,7 @@ export const auditEventTypes = [
   "approval_required",
   "step_approved",
   "step_rejected",
+  "step_execution_started",
   "step_executed",
   "evidence_recorded",
   "validation_passed",
@@ -92,4 +105,3 @@ export interface TaskDetail {
   evidence: Evidence[];
   audit_events: AuditEvent[];
 }
-

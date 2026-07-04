@@ -1,15 +1,16 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import request from "supertest";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
-import { AuditLogger } from "../src/audit/auditLogger.js";
+import { AuditLogger, AuditStorageError } from "../src/audit/auditLogger.js";
 import { createDatabase } from "../src/db/database.js";
 import { MockRunner } from "../src/runners/mockRunner.js";
 import { OperatorService } from "../src/services/operatorService.js";
 import type { ActionType } from "../src/types.js";
+import { productLanes } from "../src/types.js";
 import { ensureWorkspace, resolveWorkspacePath } from "../src/workspace/pathGuard.js";
 
 describe("CHANTER Operator P0 workflow", () => {
@@ -89,6 +90,15 @@ describe("CHANTER Operator P0 workflow", () => {
     expect(detail.evidence[0].stdout).toContain("No external model was called");
   });
 
+  it("returns identical mock output for identical task and step input", () => {
+    const created = service.createTask({ rawInput: "Stable mock preview", actionType: "file_edit" });
+    const runner = new MockRunner();
+    const first = runner.run(created.task, created.steps[0]);
+    const second = runner.run(created.task, created.steps[0]);
+
+    expect(second).toEqual(first);
+  });
+
   it("saves evidence and validation after approval", () => {
     const created = service.createTask({ rawInput: "Simulate writing a file", actionType: "file_write" });
     const completed = service.approveStep(created.steps[0].id);
@@ -115,6 +125,7 @@ describe("CHANTER Operator P0 workflow", () => {
       "step_created",
       "approval_required",
       "step_approved",
+      "step_execution_started",
       "step_executed",
       "evidence_recorded",
       "validation_passed",
@@ -134,13 +145,96 @@ describe("CHANTER Operator P0 workflow", () => {
     );
   });
 
-  it("enforces valid status transitions and rejects repeat decisions", () => {
-    const created = service.createTask({ rawInput: "One decision only", actionType: "shell_command" });
-    expect(created.task.status).toBe("awaiting_approval");
+  it("rejects workspace paths that traverse an external symlink or junction", () => {
+    const outsideRoot = path.join(temporaryRoot, "outside-workspace");
+    const linkedRoot = path.join(workspaceRoot, "linked-outside");
+    mkdirSync(outsideRoot);
+    symlinkSync(outsideRoot, linkedRoot, process.platform === "win32" ? "junction" : "dir");
 
-    const completed = service.approveStep(created.steps[0].id);
-    expect(completed.task.status).toBe("completed");
+    expect(() => resolveWorkspacePath(workspaceRoot, "linked-outside/preview.txt")).toThrow(
+      "must not traverse a link outside",
+    );
+  });
+
+  it("rejects approval when task and step states are inconsistent", () => {
+    const created = service.createTask({ rawInput: "Guard inconsistent state", actionType: "file_edit" });
+    database.prepare("UPDATE task_intents SET status = 'completed' WHERE id = ?").run(created.task.id);
+
+    expect(() => service.approveStep(created.steps[0].id)).toThrow(
+      "task state no longer permits approval",
+    );
+    expect(service.getTaskDetail(created.task.id).steps[0].status).toBe("pending_approval");
+  });
+
+  it("rejects duplicate approvals", () => {
+    const created = service.createTask({ rawInput: "Approve once", actionType: "shell_command" });
+    service.approveStep(created.steps[0].id);
+
+    expect(() => service.approveStep(created.steps[0].id)).toThrow("not awaiting approval");
+  });
+
+  it("rejects duplicate rejections", () => {
+    const created = service.createTask({ rawInput: "Reject once", actionType: "file_write" });
+    service.rejectStep(created.steps[0].id);
+
     expect(() => service.rejectStep(created.steps[0].id)).toThrow("not awaiting approval");
+  });
+
+  it("does not approve a rejected step", () => {
+    const created = service.createTask({ rawInput: "Keep rejected", actionType: "file_edit" });
+    service.rejectStep(created.steps[0].id);
+
+    expect(() => service.approveStep(created.steps[0].id)).toThrow("not awaiting approval");
+  });
+
+  it("does not approve a completed step", () => {
+    const created = service.createTask({ rawInput: "Keep completed", actionType: "file_edit" });
+    service.approveStep(created.steps[0].id);
+
+    expect(() => service.approveStep(created.steps[0].id)).toThrow("not awaiting approval");
+  });
+
+  it("rolls back state when an audit event cannot be durably recorded", () => {
+    const unusableAuditPath = path.join(temporaryRoot, "audit-is-a-directory");
+    mkdirSync(unusableAuditPath);
+    const guardedService = new OperatorService(
+      database,
+      new AuditLogger(unusableAuditPath),
+      new MockRunner(),
+      workspaceRoot,
+    );
+
+    expect(() => guardedService.createTask({ rawInput: "Must be audited", actionType: "file_edit" }))
+      .toThrow(AuditStorageError);
+    expect(guardedService.listTasks()).toHaveLength(0);
+  });
+
+  it("rolls back a decision when audit storage fails during the transition", () => {
+    const created = service.createTask({ rawInput: "Keep pending without audit", actionType: "file_edit" });
+    rmSync(auditPath, { force: true });
+    mkdirSync(auditPath);
+
+    expect(() => service.rejectStep(created.steps[0].id)).toThrow(AuditStorageError);
+    const task = database.prepare("SELECT status FROM task_intents WHERE id = ?").get(created.task.id) as {
+      status: string;
+    };
+    const step = database.prepare("SELECT status FROM execution_steps WHERE id = ?").get(created.steps[0].id) as {
+      status: string;
+    };
+    expect(task.status).toBe("awaiting_approval");
+    expect(step.status).toBe("pending_approval");
+  });
+
+  it("reports corrupt audit history as unavailable instead of returning partial data", async () => {
+    writeFileSync(auditPath, "not-json\n", "utf8");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await request(createApp(service)).get("/api/audit");
+    consoleError.mockRestore();
+
+    expect(response.status).toBe(503);
+    expect(response.body.error).toBe(
+      "Audit storage is unavailable. State changes are disabled until it is repaired.",
+    );
   });
 
   it("exposes the workflow through local API routes with human-readable errors", async () => {
@@ -153,5 +247,96 @@ describe("CHANTER Operator P0 workflow", () => {
     expect(invalid.status).toBe(400);
     expect(invalid.body.error).toBe("Task description is required.");
   });
-});
 
+  it("returns a human-readable client error for an escaping workspace path", async () => {
+    const response = await request(createApp(service)).post("/api/tasks").send({
+      rawInput: "Preview an invalid path",
+      actionType: "file_edit",
+      workspaceRelativePath: "../outside.txt",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("Workspace path must remain inside the local workspace.");
+  });
+
+  // P0.2 tests
+
+  it("stores and returns the product lane for a task", () => {
+    const detail = service.createTask({
+      rawInput: "AutoPoster deployment check",
+      actionType: "analysis",
+      productLane: "AutoPoster",
+    });
+
+    expect(detail.task.product_lane).toBe("AutoPoster");
+  });
+
+  it("defaults product lane to CHANTER Operator when not specified", () => {
+    const detail = service.createTask({
+      rawInput: "Default lane task",
+      actionType: "analysis",
+    });
+
+    expect(detail.task.product_lane).toBe("CHANTER Operator");
+  });
+
+  it("normalizes invalid product lane to CHANTER Operator", () => {
+    const detail = service.createTask({
+      rawInput: "Invalid lane task",
+      actionType: "analysis",
+      productLane: "Nonexistent Lane",
+    });
+
+    expect(detail.task.product_lane).toBe("CHANTER Operator");
+  });
+
+  it("exposes available product lanes through the API", async () => {
+    const response = await request(createApp(service)).get("/api/lanes");
+
+    expect(response.status).toBe(200);
+    expect(response.body.lanes).toEqual(productLanes);
+  });
+
+  it("health endpoint reports safe / review-only mode and contained simulation", async () => {
+    const response = await request(createApp(service)).get("/api/health");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      runner: "mock",
+      mode: "safe / review-only",
+      execution: "contained_simulation",
+      real_execution_enabled: false,
+      network_execution_enabled: false,
+    });
+  });
+
+  it("accepts workspaceRelativePath in task creation and stores it in action payload", () => {
+    const detail = service.createTask({
+      rawInput: "Edit config file",
+      actionType: "file_edit",
+      workspaceRelativePath: "config/settings.json",
+    });
+
+    expect(detail.steps[0].action_payload.workspace_relative_path).toBe("config/settings.json");
+  });
+
+  it("includes product_lane in audit trail when task is created", () => {
+    const detail = service.createTask({
+      rawInput: "Audited lane task",
+      actionType: "analysis",
+      productLane: "Crypto Radar",
+    });
+
+    const taskCreatedEvent = detail.audit_events.find((e) => e.event_type === "task_created");
+    expect(taskCreatedEvent?.data.product_lane).toBe("Crypto Radar");
+  });
+
+  it("does not add any prohibited integration", () => {
+    // Verify the mock runner does not import or use fs, child_process, net, or http
+    const runnerSource = readFileSync(
+      path.join(__dirname, "..", "src", "runners", "mockRunner.ts"),
+      "utf8",
+    );
+    expect(runnerSource).not.toMatch(/require\s*\(\s*['"]fs['"]|require\s*\(\s*['"]child_process['"]|require\s*\(\s*['"]net['"]|require\s*\(\s*['"]http['"]|import.*from\s*['"]fs['"]|import.*from\s*['"]child_process['"]|import.*from\s*['"]net['"]|import.*from\s*['"]http['"]/);
+  });
+});

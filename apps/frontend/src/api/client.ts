@@ -1,11 +1,22 @@
 import type { CreateTaskInput, TaskDetail, TaskIntent } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...options?.headers },
-  });
-  const payload = (await response.json()) as T & { error?: string };
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...options?.headers },
+    });
+  } catch {
+    throw new Error("Could not reach the local Operator API.");
+  }
+
+  let payload: T & { error?: string };
+  try {
+    payload = (await response.json()) as T & { error?: string };
+  } catch {
+    throw new Error("The local Operator API returned an unreadable response.");
+  }
   if (!response.ok) {
     throw new Error(payload.error || "The local operator request failed.");
   }
@@ -38,4 +49,3 @@ export function rejectStep(stepId: string): Promise<TaskDetail> {
     body: JSON.stringify({ reason: "Rejected from cockpit review." }),
   });
 }
-

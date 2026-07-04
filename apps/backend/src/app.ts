@@ -1,4 +1,5 @@
 import express, { type ErrorRequestHandler } from "express";
+import { AuditStorageError } from "./audit/auditLogger.js";
 import type { OperatorService } from "./services/operatorService.js";
 import { OperatorError } from "./services/operatorService.js";
 import { createApiRouter } from "./routes/api.js";
@@ -22,10 +23,16 @@ export function createApp(service: OperatorService) {
       response.status(400).json({ error: "Request body must contain valid JSON." });
       return;
     }
+    if (error instanceof AuditStorageError) {
+      console.error("Operator audit storage failed", error);
+      response.status(503).json({
+        error: "Audit storage is unavailable. State changes are disabled until it is repaired.",
+      });
+      return;
+    }
     console.error("Operator request failed", error);
     response.status(500).json({ error: "The local operator could not complete the request." });
   };
   app.use(errorHandler);
   return app;
 }
-

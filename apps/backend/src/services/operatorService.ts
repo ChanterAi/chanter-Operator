@@ -4,17 +4,21 @@ import type { DatabaseSync } from "node:sqlite";
 import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
 import { mapEvidence, mapStep, mapTask, withTransaction } from "../db/database.js";
+import { normalizeProductLane } from "../db/schema.js";
 import type { Runner } from "../runners/runner.js";
 import type {
   ActionType,
   Evidence,
   ExecutionStep,
+  ProductLane,
+  StepStatus,
   TaskDetail,
   TaskIntent,
   TaskStatus,
 } from "../types.js";
 import { validateRunnerResult } from "../validation/stepValidation.js";
-import { resolveWorkspacePath } from "../workspace/pathGuard.js";
+import { resolveWorkspacePath, WorkspacePathError } from "../workspace/pathGuard.js";
+import { canTransitionStep, canTransitionTask } from "./stateTransitions.js";
 
 export class OperatorError extends Error {
   constructor(
@@ -30,6 +34,7 @@ export interface CreateTaskInput {
   actionType: ActionType;
   priority?: number;
   workspaceRelativePath?: string;
+  productLane?: string;
 }
 
 export class OperatorService {
@@ -57,26 +62,35 @@ export class OperatorService {
     const priority = Number.isInteger(input.priority)
       ? Math.max(0, Math.min(input.priority ?? 0, 2))
       : 0;
+    const productLane: ProductLane = normalizeProductLane(input.productLane);
     const actionPayload: Record<string, unknown> = { description: rawInput };
 
-    if (input.workspaceRelativePath?.trim()) {
-      resolveWorkspacePath(this.workspaceRoot, input.workspaceRelativePath);
-      actionPayload.workspace_relative_path = input.workspaceRelativePath
-        .split(path.sep)
-        .join("/");
-    } else if (input.actionType === "file_write" || input.actionType === "file_edit") {
-      resolveWorkspacePath(this.workspaceRoot, "mock-output.txt");
-      actionPayload.workspace_relative_path = "mock-output.txt";
+    const requestedPath = input.workspaceRelativePath?.trim()
+      || ((input.actionType === "file_write" || input.actionType === "file_edit")
+        ? "mock-output.txt"
+        : undefined);
+    if (requestedPath) {
+      try {
+        const resolvedPath = resolveWorkspacePath(this.workspaceRoot, requestedPath);
+        actionPayload.workspace_relative_path = path.relative(this.workspaceRoot, resolvedPath)
+          .split(path.sep)
+          .join("/");
+      } catch (error) {
+        if (error instanceof WorkspacePathError) {
+          throw new OperatorError(error.message, 400);
+        }
+        throw error;
+      }
     }
 
     withTransaction(this.database, () => {
       this.database
         .prepare(
           `INSERT INTO task_intents
-            (id, raw_input, parsed_description, status, priority, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(taskId, rawInput, rawInput.replace(/\s+/g, " "), taskStatus, priority, now, now);
+        .run(taskId, rawInput, rawInput.replace(/\s+/g, " "), taskStatus, priority, productLane, now, now);
 
       this.database
         .prepare(
@@ -95,7 +109,7 @@ export class OperatorService {
           now,
         );
 
-      this.audit.append("task_created", taskId, undefined, { status: taskStatus, priority });
+      this.audit.append("task_created", taskId, undefined, { status: taskStatus, priority, product_lane: productLane });
       this.audit.append("step_created", taskId, stepId, {
         action_type: input.actionType,
         requires_approval: approvalRequired,
@@ -146,18 +160,18 @@ export class OperatorService {
 
   approveStep(stepId: string): TaskDetail {
     const step = this.requireStep(stepId);
+    const task = this.requireTask(step.task_id);
     if (!step.requires_approval || step.status !== "pending_approval") {
       throw new OperatorError("This step is not awaiting approval.", 409);
+    }
+    if (task.status !== "awaiting_approval") {
+      throw new OperatorError("The task state no longer permits approval.", 409);
     }
 
     const now = new Date().toISOString();
     withTransaction(this.database, () => {
-      this.database
-        .prepare("UPDATE execution_steps SET status = 'approved', updated_at = ? WHERE id = ?")
-        .run(now, stepId);
-      this.database
-        .prepare("UPDATE task_intents SET status = 'queued', updated_at = ? WHERE id = ?")
-        .run(now, step.task_id);
+      this.transitionStep(step, "approved", now);
+      this.transitionTask(task, "queued", now);
       this.audit.append("step_approved", step.task_id, step.id);
     });
     this.executeApprovedStep(step.task_id, step.id);
@@ -166,19 +180,19 @@ export class OperatorService {
 
   rejectStep(stepId: string, reason = "Rejected by user."): TaskDetail {
     const step = this.requireStep(stepId);
-    if (step.status !== "pending_approval") {
+    const task = this.requireTask(step.task_id);
+    if (!step.requires_approval || step.status !== "pending_approval") {
       throw new OperatorError("This step is not awaiting approval.", 409);
+    }
+    if (task.status !== "awaiting_approval") {
+      throw new OperatorError("The task state no longer permits rejection.", 409);
     }
 
     const safeReason = reason.trim().slice(0, 500) || "Rejected by user.";
     const now = new Date().toISOString();
     withTransaction(this.database, () => {
-      this.database
-        .prepare("UPDATE execution_steps SET status = 'rejected', updated_at = ? WHERE id = ?")
-        .run(now, stepId);
-      this.database
-        .prepare("UPDATE task_intents SET status = 'rejected', updated_at = ? WHERE id = ?")
-        .run(now, step.task_id);
+      this.transitionStep(step, "rejected", now);
+      this.transitionTask(task, "rejected", now);
       this.audit.append("step_rejected", step.task_id, step.id, { reason: safeReason });
     });
     return this.getTaskDetail(step.task_id);
@@ -196,35 +210,72 @@ export class OperatorService {
     return mapStep(row);
   }
 
+  private requireTask(taskId: string): TaskIntent {
+    const row = this.database.prepare("SELECT * FROM task_intents WHERE id = ?").get(taskId);
+    if (!row) {
+      throw new OperatorError("Task was not found.", 404);
+    }
+    return mapTask(row);
+  }
+
+  private transitionStep(step: ExecutionStep, nextStatus: StepStatus, updatedAt: string): void {
+    if (!canTransitionStep(step.status, nextStatus)) {
+      throw new OperatorError(
+        `Execution step cannot transition from ${step.status} to ${nextStatus}.`,
+        409,
+      );
+    }
+    const result = this.database
+      .prepare("UPDATE execution_steps SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+      .run(nextStatus, updatedAt, step.id, step.status);
+    if (Number(result.changes) !== 1) {
+      throw new OperatorError("Execution step state changed before the transition could be saved.", 409);
+    }
+  }
+
+  private transitionTask(task: TaskIntent, nextStatus: TaskStatus, updatedAt: string): void {
+    if (!canTransitionTask(task.status, nextStatus)) {
+      throw new OperatorError(
+        `Task cannot transition from ${task.status} to ${nextStatus}.`,
+        409,
+      );
+    }
+    const result = this.database
+      .prepare("UPDATE task_intents SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+      .run(nextStatus, updatedAt, task.id, task.status);
+    if (Number(result.changes) !== 1) {
+      throw new OperatorError("Task state changed before the transition could be saved.", 409);
+    }
+  }
+
   private executeApprovedStep(taskId: string, stepId: string): void {
-    const task = this.getTaskDetail(taskId).task;
+    const task = this.requireTask(taskId);
     const step = this.requireStep(stepId);
     if (step.status !== "approved") {
       throw new OperatorError("Only approved steps can be executed.", 409);
     }
+    if (task.status !== "queued") {
+      throw new OperatorError("Only queued tasks can begin execution.", 409);
+    }
 
     const executingAt = new Date().toISOString();
     withTransaction(this.database, () => {
-      this.database
-        .prepare("UPDATE execution_steps SET status = 'executing', updated_at = ? WHERE id = ?")
-        .run(executingAt, stepId);
-      this.database
-        .prepare("UPDATE task_intents SET status = 'executing', updated_at = ? WHERE id = ?")
-        .run(executingAt, taskId);
+      this.transitionStep(step, "executing", executingAt);
+      this.transitionTask(task, "executing", executingAt);
+      this.audit.append("step_execution_started", taskId, stepId, { runner: "mock" });
     });
+
+    const executingStep: ExecutionStep = { ...step, status: "executing", updated_at: executingAt };
+    const executingTask: TaskIntent = { ...task, status: "executing", updated_at: executingAt };
 
     let result;
     try {
-      result = this.runner.run(task, { ...step, status: "executing", updated_at: executingAt });
+      result = this.runner.run(executingTask, executingStep);
     } catch {
       const failedAt = new Date().toISOString();
       withTransaction(this.database, () => {
-        this.database
-          .prepare("UPDATE execution_steps SET status = 'failed', updated_at = ? WHERE id = ?")
-          .run(failedAt, stepId);
-        this.database
-          .prepare("UPDATE task_intents SET status = 'failed', updated_at = ? WHERE id = ?")
-          .run(failedAt, taskId);
+        this.transitionStep(executingStep, "failed", failedAt);
+        this.transitionTask(executingTask, "failed", failedAt);
         this.audit.append("task_failed", taskId, stepId, { reason: "mock_runner_error" });
       });
       throw new OperatorError("The mock runner could not complete this step.", 500);
@@ -264,12 +315,8 @@ export class OperatorService {
           evidence.validation_summary,
           evidence.created_at,
         );
-      this.database
-        .prepare("UPDATE execution_steps SET status = ?, updated_at = ? WHERE id = ?")
-        .run(validation.passed ? "completed" : "failed", completedAt, stepId);
-      this.database
-        .prepare("UPDATE task_intents SET status = ?, updated_at = ? WHERE id = ?")
-        .run(validation.passed ? "completed" : "failed", completedAt, taskId);
+      this.transitionStep(executingStep, validation.passed ? "completed" : "failed", completedAt);
+      this.transitionTask(executingTask, validation.passed ? "completed" : "failed", completedAt);
       this.audit.append("step_executed", taskId, stepId, { exit_code: result.exitCode });
       this.audit.append("evidence_recorded", taskId, stepId, { evidence_id: evidence.id });
       this.audit.append(validation.passed ? "validation_passed" : "validation_failed", taskId, stepId, {

@@ -20,6 +20,14 @@ export function createDatabase(databasePath: string): DatabaseSync {
   database.exec("PRAGMA foreign_keys = ON;");
   database.exec("PRAGMA journal_mode = WAL;");
   database.exec(schema);
+
+  // P0.2 migration: add product_lane column to pre-existing databases.
+  try {
+    database.exec("ALTER TABLE task_intents ADD COLUMN product_lane TEXT NOT NULL DEFAULT 'CHANTER Operator';");
+  } catch {
+    // Column already exists — expected on fresh databases created by the schema above.
+  }
+
   return database;
 }
 
@@ -52,4 +60,3 @@ export function withTransaction<T>(database: DatabaseSync, operation: () => T): 
     throw error;
   }
 }
-

@@ -6,12 +6,21 @@ export type ActionType =
   | "shell_command"
   | "unknown";
 
+export type ProductLane =
+  | "AutoPoster"
+  | "Loop Governor"
+  | "Clean Engine"
+  | "Crypto Radar"
+  | "Premium Site"
+  | "CHANTER Operator";
+
 export interface TaskIntent {
   id: string;
   raw_input: string;
   parsed_description: string;
   status: string;
   priority: number;
+  product_lane: ProductLane;
   created_at: string;
   updated_at: string;
 }
@@ -61,5 +70,27 @@ export interface CreateTaskInput {
   rawInput: string;
   actionType: ActionType;
   priority: number;
+  workspaceRelativePath?: string;
+  productLane?: ProductLane;
 }
 
+export type RecommendedAction =
+  | "Approve mock simulation"
+  | "Review evidence"
+  | "Task complete"
+  | "Rejected"
+  | "Blocked / invalid";
+
+export function recommendNextAction(detail: TaskDetail): RecommendedAction {
+  const task = detail.task;
+  const step = detail.steps[0];
+
+  if (task.status === "rejected") return "Rejected";
+  if (task.status === "completed" && step?.status === "completed") return "Task complete";
+  if (task.status === "failed" || step?.status === "failed") return "Blocked / invalid";
+  if (task.status === "awaiting_approval" && step?.status === "pending_approval")
+    return "Approve mock simulation";
+  if (task.status === "completed" || task.status === "executing" || task.status === "queued")
+    return "Review evidence";
+  return "Blocked / invalid";
+}

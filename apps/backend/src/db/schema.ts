@@ -1,3 +1,5 @@
+import type { ProductLane } from "../types.js";
+
 export const schema = `
 CREATE TABLE IF NOT EXISTS task_intents (
   id TEXT PRIMARY KEY,
@@ -5,6 +7,7 @@ CREATE TABLE IF NOT EXISTS task_intents (
   parsed_description TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending', 'queued', 'awaiting_approval', 'executing', 'completed', 'failed', 'rejected')),
   priority INTEGER NOT NULL DEFAULT 0,
+  product_lane TEXT NOT NULL DEFAULT 'CHANTER Operator',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -39,3 +42,24 @@ CREATE INDEX IF NOT EXISTS idx_steps_task_id ON execution_steps(task_id, step_nu
 CREATE INDEX IF NOT EXISTS idx_evidence_task_id ON evidence(task_id, created_at);
 `;
 
+const validLanes = new Set<string>([
+  "AutoPoster",
+  "Loop Governor",
+  "Clean Engine",
+  "Crypto Radar",
+  "Premium Site",
+  "CHANTER Operator",
+]);
+
+export function normalizeProductLane(value: unknown): ProductLane {
+  return typeof value === "string" && validLanes.has(value)
+    ? (value as ProductLane)
+    : "CHANTER Operator";
+}
+
+/** Add product_lane column to legacy databases that predate P0.2. */
+export function migrate(database: { exec: (sql: string) => void }): void {
+  const columns = database.exec("PRAGMA table_info(task_intents);");
+  // node:sqlite exec returns void; use a pragma-based check instead.
+  // We rely on a try/catch ALTER TABLE approach since the column may already exist.
+}
