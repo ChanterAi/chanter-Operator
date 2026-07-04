@@ -27,6 +27,31 @@ Audit checks:
 
 The integrity checker is read-only. It never rewrites, deletes, or "fixes" data. Production foreign key and CHECK constraints remain enforced by SQLite. Audit log remains append-only.
 
+
+## What changed in P0.5
+
+- Added etchHealth() to the API client — fetches GET /api/health on app mount
+- Added HealthResponse, HealthIntegrity, and ReadinessState types
+- Created ReadinessBar component — a compact readiness strip below the header
+- Wired readiness fetch into App.tsx on mount, independent of task loading
+- Readiness bar displays: Backend reachable/unreachable, Integrity Healthy/Unhealthy, DB mode (Mock-only), record counts, and issue counts when unhealthy
+- Added 14 new frontend component tests (45 total): healthy readiness, unhealthy warning with issue counts, backend unavailable recovery, ReadinessBar isolation states, and no new execution controls introduced
+- CSS: added .readiness-bar and related class styles; adjusted cockpit heights for the 28px bar
+- Backend unchanged — uses existing GET /api/health endpoint from P0.4
+
+## P0.5 readiness gate
+
+The readiness bar appears between the header and the cockpit panels. It fetches GET /api/health once on app mount and renders one of three states:
+
+| State | Display |
+| --- | --- |
+| Healthy | Green dot, "Backend Reachable", "Integrity Healthy", record counts, "Mock-only" |
+| Unhealthy (integrity.healthy=false) | Amber bar, "Integrity Unhealthy", issue counts (DB: N, Audit: N) |
+| Unavailable (fetch fails) | Red bar, "Backend unavailable", error detail |
+
+The readiness bar is informational only — it never blocks task creation, approval, or review. No destructive repair is attempted.
+
+## P0.5 limitations
 ## P0.4 limitations
 
 # CHANTER Operator — P0.3 Browser Smoke Test Coverage

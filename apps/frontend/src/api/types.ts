@@ -94,3 +94,41 @@ export function recommendNextAction(detail: TaskDetail): RecommendedAction {
     return "Review evidence";
   return "Blocked / invalid";
 }
+
+// ── P0.5 Readiness Gate ────────────────────────────────────────────
+
+export interface HealthIntegrity {
+  healthy: boolean;
+  database: {
+    tasks: number;
+    steps: number;
+    evidence: number;
+    issues: number;
+  };
+  audit: {
+    totalLines: number;
+    validEvents: number;
+    parseErrors: number;
+    missingFieldErrors: number;
+    invalidTypeErrors: number;
+    crossRefIssues: number;
+  };
+  checkedAt: string;
+}
+
+export interface HealthResponse {
+  status: string;
+  runner: string;
+  mode: string;
+  execution: string;
+  real_execution_enabled: boolean;
+  network_execution_enabled: boolean;
+  integrity: HealthIntegrity;
+}
+
+export type ReadinessState =
+  | { kind: "loading" }
+  | { kind: "unavailable"; error: string }
+  | { kind: "healthy"; health: HealthResponse }
+  | { kind: "unhealthy"; health: HealthResponse }
+  | { kind: "error"; error: string };

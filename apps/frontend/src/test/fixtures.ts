@@ -1,4 +1,4 @@
-import type { TaskDetail, TaskIntent } from "../api/types";
+import type { HealthResponse, TaskDetail, TaskIntent } from "../api/types";
 
 export const mockTaskIntent: TaskIntent = {
   id: "task-001",
@@ -96,4 +96,50 @@ export const mockRejectedDetail: TaskDetail = {
     { id: "c3", event_type: "approval_required", task_id: "task-003", step_id: "step-003", data: {}, created_at: "2026-07-04T09:20:00.000Z" },
     { id: "c4", event_type: "step_rejected", task_id: "task-003", step_id: "step-003", data: {}, created_at: "2026-07-04T09:20:05.000Z" },
   ],
+};
+
+// ── P0.5 Readiness Gate Fixtures ───────────────────────────────────
+
+export const mockHealthHealthy: HealthResponse = {
+  status: "ok",
+  runner: "mock",
+  mode: "safe / review-only",
+  execution: "contained_simulation",
+  real_execution_enabled: false,
+  network_execution_enabled: false,
+  integrity: {
+    healthy: true,
+    database: { tasks: 3, steps: 3, evidence: 2, issues: 0 },
+    audit: {
+      totalLines: 15,
+      validEvents: 15,
+      parseErrors: 0,
+      missingFieldErrors: 0,
+      invalidTypeErrors: 0,
+      crossRefIssues: 0,
+    },
+    checkedAt: "2026-07-04T12:00:00.000Z",
+  },
+};
+
+export const mockHealthUnhealthy: HealthResponse = {
+  status: "ok",
+  runner: "mock",
+  mode: "safe / review-only",
+  execution: "contained_simulation",
+  real_execution_enabled: false,
+  network_execution_enabled: false,
+  integrity: {
+    healthy: false,
+    database: { tasks: 5, steps: 5, evidence: 3, issues: 2 },
+    audit: {
+      totalLines: 20,
+      validEvents: 19,
+      parseErrors: 1,
+      missingFieldErrors: 0,
+      invalidTypeErrors: 0,
+      crossRefIssues: 1,
+    },
+    checkedAt: "2026-07-04T12:00:00.000Z",
+  },
 };

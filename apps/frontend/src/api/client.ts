@@ -1,4 +1,4 @@
-import type { CreateTaskInput, TaskDetail, TaskIntent } from "./types";
+import type { CreateTaskInput, HealthResponse, TaskDetail, TaskIntent } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -21,6 +21,10 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new Error(payload.error || "The local operator request failed.");
   }
   return payload;
+}
+
+export async function fetchHealth(): Promise<HealthResponse> {
+  return request<HealthResponse>("/api/health");
 }
 
 export async function listTasks(): Promise<TaskIntent[]> {

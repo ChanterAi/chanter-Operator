@@ -2,13 +2,17 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
+import { ReadinessBar } from "../components/ReadinessBar";
 import { TaskDetailPanel } from "../components/TaskDetailPanel";
 import { ReviewPanel } from "../components/ReviewPanel";
 import { TaskQueuePanel } from "../components/TaskQueuePanel";
 import * as client from "../api/client";
+import type { HealthResponse, ReadinessState } from "../api/types";
 import {
   mockAwaitingDetail,
   mockCompletedDetail,
+  mockHealthHealthy,
+  mockHealthUnhealthy,
   mockRejectedDetail,
   mockTaskIntent,
 } from "./fixtures";
@@ -16,6 +20,7 @@ import {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function mockAllApi() {
+  vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
   vi.spyOn(client, "listTasks").mockResolvedValue([]);
   vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
   vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
@@ -141,6 +146,7 @@ describe("P0.3 smoke: create mock task", () => {
 
 describe("P0.3 smoke: task appears in queue", () => {
   beforeEach(() => {
+    vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
     vi.spyOn(client, "listTasks").mockResolvedValue([mockTaskIntent]);
     vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
     vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
@@ -308,5 +314,137 @@ describe("P0.3 smoke: empty state", () => {
   it("shows error state", async () => {
     render(<TaskDetailPanel detail={null} loading={false} error="Connection failed" />);
     expect(screen.getByText("Connection failed")).toBeInTheDocument();
+  });
+});
+
+// ── P0.5 Readiness Gate ──────────────────────────────────────────────
+
+describe("P0.5 smoke: readiness gate renders healthy state", () => {
+  beforeEach(() => {
+    vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
+    vi.spyOn(client, "listTasks").mockResolvedValue([]);
+    vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "approveStep").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
+  });
+
+  it("shows Backend Reachable in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText("Reachable")).toBeInTheDocument();
+  });
+
+  it("shows Integrity Healthy in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText("Healthy")).toBeInTheDocument();
+  });
+
+  it("shows record counts in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText(/3T \/ 3S \/ 2E/i)).toBeInTheDocument();
+  });
+
+  it("shows Mock-only in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText("Mock-only")).toBeInTheDocument();
+  });
+});
+
+describe("P0.5 smoke: unhealthy integrity renders warning", () => {
+  beforeEach(() => {
+    vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthUnhealthy);
+    vi.spyOn(client, "listTasks").mockResolvedValue([]);
+    vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "approveStep").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
+  });
+
+  it("shows Unhealthy in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText("Unhealthy")).toBeInTheDocument();
+  });
+
+  it("shows issue counts when unhealthy", async () => {
+    render(<App />);
+    // DB: 2 issues, Audit: 2 issues (1 parse + 1 crossRef)
+    const bar = await screen.findByText("Unhealthy");
+    expect(bar.closest(".readiness-bar")).toBeInTheDocument();
+    expect(screen.getByText(/DB: 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Audit: 2/)).toBeInTheDocument();
+  });
+
+  it("still keeps the task creation form functional", async () => {
+    render(<App />);
+    expect(await screen.findByPlaceholderText(/describe one reviewable/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /create task/i })).toBeInTheDocument();
+  });
+});
+
+describe("P0.5 smoke: backend unavailable renders safely", () => {
+  beforeEach(() => {
+    vi.spyOn(client, "fetchHealth").mockRejectedValue(new Error("Cannot connect to local backend."));
+    vi.spyOn(client, "listTasks").mockResolvedValue([]);
+    vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "approveStep").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
+  });
+
+  it("shows Backend unavailable in the readiness bar", async () => {
+    render(<App />);
+    expect(await screen.findByText("Backend unavailable")).toBeInTheDocument();
+  });
+
+  it("does not crash the rest of the UI", async () => {
+    render(<App />);
+    expect(await screen.findByText("CHANTER")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^queue$/i })).toBeInTheDocument();
+  });
+});
+
+describe("P0.5 smoke: ReadinessBar component isolation", () => {
+  it("renders loading state", () => {
+    render(<ReadinessBar state={{ kind: "loading" }} />);
+    expect(screen.getByText(/checking backend readiness/i)).toBeInTheDocument();
+  });
+
+  it("renders unavailable state with error text", () => {
+    render(<ReadinessBar state={{ kind: "unavailable", error: "Connection refused." }} />);
+    expect(screen.getByText("Backend unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Connection refused.")).toBeInTheDocument();
+  });
+
+  it("renders healthy state with record counts", () => {
+    render(<ReadinessBar state={{ kind: "healthy", health: mockHealthHealthy }} />);
+    expect(screen.getByText("Reachable")).toBeInTheDocument();
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
+    expect(screen.getByText("Mock-only")).toBeInTheDocument();
+  });
+
+  it("renders unhealthy state with issue counts", () => {
+    render(<ReadinessBar state={{ kind: "unhealthy", health: mockHealthUnhealthy }} />);
+    expect(screen.getByText("Unhealthy")).toBeInTheDocument();
+    expect(screen.getByText(/DB: 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Audit: 2/)).toBeInTheDocument();
+  });
+});
+
+describe("P0.5 smoke: no new real execution controls or wording", () => {
+  beforeEach(() => {
+    vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
+    vi.spyOn(client, "listTasks").mockResolvedValue([]);
+    vi.spyOn(client, "getTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "createTask").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "approveStep").mockResolvedValue(mockCompletedDetail);
+    vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
+  });
+
+  it("does not introduce execute/run/deploy in readiness text", async () => {
+    render(<App />);
+    await screen.findByText("Reachable");
+    const bar = document.querySelector(".readiness-bar");
+    const text = bar?.textContent?.toLowerCase() ?? "";
+    expect(text).not.toMatch(/\b(execute|run|deploy|start|network)\b/);
   });
 });

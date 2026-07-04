@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { approveStep, createTask, getTask, listTasks, rejectStep } from "./api/client";
-import type { CreateTaskInput, TaskDetail, TaskIntent } from "./api/types";
+import { approveStep, createTask, fetchHealth, getTask, listTasks, rejectStep } from "./api/client";
+import type { CreateTaskInput, ReadinessState, TaskDetail, TaskIntent } from "./api/types";
+import { ReadinessBar } from "./components/ReadinessBar";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
@@ -17,6 +18,7 @@ export default function App() {
   const [taskListError, setTaskListError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
+  const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -36,6 +38,23 @@ export default function App() {
     } finally {
       setLoadingDetail(false);
     }
+  }, []);
+
+  // Fetch health on mount
+  useEffect(() => {
+    setReadiness({ kind: "loading" });
+    fetchHealth()
+      .then((health) => {
+        setReadiness(
+          health.integrity.healthy ? { kind: "healthy", health } : { kind: "unhealthy", health },
+        );
+      })
+      .catch((reason: unknown) => {
+        setReadiness({
+          kind: "unavailable",
+          error: reason instanceof Error ? reason.message : "Backend unreachable.",
+        });
+      });
   }, []);
 
   useEffect(() => {
@@ -89,6 +108,7 @@ export default function App() {
         </div>
         <div className="mode"><span className="mode__dot" />Local &mdash; Mock runner</div>
       </header>
+      <ReadinessBar state={readiness} />
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} type="button" aria-label="Dismiss error">&times;</button></div>}
       <div className="cockpit">
         <TaskQueuePanel
