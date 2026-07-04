@@ -484,3 +484,32 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
 .review-detail summary:hover {
   color: var(--text-primary, #334155);
 }
+
+/* ── P0.9 Evidence Bundle Export ──────────────────────────────────── */
+
+.review-section--evidence-bundle {
+  border-top: 1px solid var(--border-color, #e2e8f0);
+}
+
+.evidence-bundle-controls {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.evidence-bundle-textarea {
+  height: 18rem;
+  font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  color: var(--text-primary, #1e293b);
+  background: var(--bg-code, #f8fafc);
+  border: 1px solid var(--border-color, #cbd5e1);
+  resize: vertical;
+}
+
+.error-text {
+  color: #dc2626;
+  font-size: 0.75rem;
+  margin: 0.25rem 0;
+}

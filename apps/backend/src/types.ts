@@ -112,6 +112,7 @@ export const auditEventTypes = [
   "task_reopened",
   "validation_evidence_added",
   "commit_review_added",
+  "evidence_bundle_generated",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -132,4 +133,9 @@ export interface TaskDetail {
   audit_events: AuditEvent[];
   validation_evidence: ValidationEvidence[];
   commit_reviews: CommitReview[];
+}
+
+export interface EvidenceBundleResponse {
+  taskId: string;
+  markdown: string;
 }

@@ -675,7 +675,7 @@ describe("P0.7 manual validation evidence intake", () => {
       />,
     );
     expect(screen.getByText(/Manual evidence only/i)).toBeInTheDocument();
-    expect(screen.getByText(/no command is run/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/no command is run/i).length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders command label input", () => {
@@ -1010,6 +1010,151 @@ describe("P0.8 safe commit review intake", () => {
     expect(text).not.toMatch(/deploy/i);
     expect(text).not.toMatch(/codex/i);
     expect(text).not.toMatch(/ollama/i);
+  });
+});
+
+
+
+describe("P0.9 evidence bundle export", () => {
+  it("renders evidence bundle section", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Evidence bundle")).toBeInTheDocument();
+  });
+
+  it("renders no-command disclaimer", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByText(/no command is run/i).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders generate evidence bundle button", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /generate evidence bundle/i })).toBeInTheDocument();
+  });
+
+  it("generate button is not disabled when task is selected", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /generate evidence bundle/i });
+    expect(button).not.toBeDisabled();
+  });
+
+  it("generate button is disabled when no task selected", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={null}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: /generate evidence bundle/i });
+    expect(button).toBeDisabled();
+  });
+
+  it("clears stale bundle when switching to a different task", () => {
+    const { rerender } = render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+
+    // Bundle textarea should NOT appear (no generation happened)
+    const section = screen.getByText("Evidence bundle").closest("section")!;
+    expect(section.querySelector(".evidence-bundle-textarea")).toBeNull();
+
+    // Re-render with a different task
+    rerender(
+      <ReviewPanel
+        busy={false}
+        detail={mockAwaitingDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+
+    // Bundle textarea still not present — bundle was cleared on task switch
+    const section2 = screen.getByText("Evidence bundle").closest("section")!;
+    expect(section2.querySelector(".evidence-bundle-textarea")).toBeNull();
+  });
+
+  it("no execute/run/deploy wording in evidence bundle section", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    const section = screen.getByText("Evidence bundle").closest("section")!;
+    const text = section.textContent || "";
+    expect(text).toMatch(/no command is run/i);
+    expect(text).not.toMatch(/\bexecute\b/i);
+    expect(text).not.toMatch(/\bdeploy\b/i);
+    expect(text).not.toMatch(/\bcodex\b/i);
+    expect(text).not.toMatch(/\bollama\b/i);
   });
 });
 

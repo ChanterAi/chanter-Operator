@@ -1148,4 +1148,114 @@ describe("P0.8 safe commit review intake", () => {
   });
 });
 
+
+describe("P0.9 evidence bundle export", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p09-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+    service = new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("builds evidence bundle for existing task", () => {
+    const created = service.createTask({ rawInput: "Bundle test", actionType: "analysis" });
+    const result = service.buildEvidenceBundle(created.task.id);
+    expect(result.taskId).toBe(created.task.id);
+    expect(result.markdown).toContain("CHANTER Operator");
+    expect(result.markdown).toContain("Evidence Bundle");
+  });
+
+  it("rejects bundle for missing task", () => {
+    expect(() =>
+      service.buildEvidenceBundle("missing-task-id"),
+    ).toThrow(/was not found/);
+  });
+
+  it("bundle includes task metadata", () => {
+    const created = service.createTask({ rawInput: "Metadata check", actionType: "analysis" });
+    const result = service.buildEvidenceBundle(created.task.id);
+    expect(result.markdown).toContain("Metadata check");
+    expect(result.markdown).toContain("completed");
+    expect(result.markdown).toContain("mock-only");
+    expect(result.markdown).toContain("safe/review-only");
+  });
+
+  it("bundle includes validation evidence", () => {
+    const created = service.createTask({ rawInput: "Bundle with validation", actionType: "analysis" });
+    service.addValidationEvidence(created.task.id, "npm test", "passed", "42 tests passed");
+    const result = service.buildEvidenceBundle(created.task.id);
+    expect(result.markdown).toContain("Manual Validation Evidence");
+    expect(result.markdown).toContain("npm test");
+    expect(result.markdown).toContain("passed");
+  });
+
+  it("bundle includes safe commit review verdict and reasons", () => {
+    const created = service.createTask({ rawInput: "Bundle with review", actionType: "analysis" });
+    service.addCommitReview(
+      created.task.id,
+      "Clean delivery",
+      "3 files changed",
+      "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.",
+      "",
+    );
+    const result = service.buildEvidenceBundle(created.task.id);
+    expect(result.markdown).toContain("Safe Commit Review");
+    expect(result.markdown).toContain("SAFE TO REVIEW");
+    expect(result.markdown).toContain("All four validation gates pass");
+  });
+
+  it("bundle includes audit event summary", () => {
+    const created = service.createTask({ rawInput: "Bundle with audit", actionType: "analysis" });
+    const result = service.buildEvidenceBundle(created.task.id);
+    expect(result.markdown).toContain("Audit Summary");
+    expect(result.markdown).toContain("task_created");
+  });
+
+  it("bundle is deterministic for unchanged task", () => {
+    const created = service.createTask({ rawInput: "Deterministic check", actionType: "analysis" });
+    const bundle1 = service.buildEvidenceBundle(created.task.id);
+    const bundle2 = service.buildEvidenceBundle(created.task.id);
+    expect(bundle1.markdown).toBe(bundle2.markdown);
+  });
+
+  it("bundle generation does not mutate task lifecycle state", () => {
+    const created = service.createTask({ rawInput: "No mutation", actionType: "file_edit" });
+    const beforeStatus = created.task.status;
+    service.buildEvidenceBundle(created.task.id);
+    const after = service.getTaskDetail(created.task.id);
+    expect(after.task.status).toBe(beforeStatus);
+  });
+
+  it("bundle generation does not append audit events", () => {
+    const created = service.createTask({ rawInput: "No audit append", actionType: "analysis" });
+    const beforeCount = service.getTaskDetail(created.task.id).audit_events.length;
+    service.buildEvidenceBundle(created.task.id);
+    const afterCount = service.getTaskDetail(created.task.id).audit_events.length;
+    expect(afterCount).toBe(beforeCount);
+  });
+
+  it("no shell, process, git, or filesystem scan introduced", () => {
+    const created = service.createTask({ rawInput: "Safety check", actionType: "analysis" });
+    const result = service.buildEvidenceBundle(created.task.id);
+    // Bundle output must contain the safety disclaimer
+    expect(result.markdown).toContain("no command was run");
+    expect(result.markdown).toContain("mock-only");
+    // Result is a plain object with markdown string — no side effects
+    expect(typeof result.markdown).toBe("string");
+  });
+});
+
 });

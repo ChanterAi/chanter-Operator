@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { TaskDetail } from "../api/types";
 import { canCancelTask, canRetryTask, recommendNextAction } from "../api/types";
-import type { CommitReview, ValidationEvidence } from "../api/types";
+import { fetchEvidenceBundle } from "../api/client";
+import type { CommitReview, EvidenceBundleResponse, ValidationEvidence } from "../api/types";
 
 interface Props {
   detail: TaskDetail | null;
@@ -15,9 +16,10 @@ interface Props {
   onRetry: (taskId: string) => Promise<void>;
   onAddValidation: (taskId: string, commandLabel: string, status: string, output: string) => Promise<void>;
   onAddCommitReview: (taskId: string, summaryText: string, changedFilesText: string, validationText: string, riskNotesText: string) => Promise<void>;
+  onEvidenceBundleGenerated?: (bundle: EvidenceBundleResponse) => void;
 }
 
-export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation, onAddCommitReview }: Props) {
+export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation, onAddCommitReview, onEvidenceBundleGenerated }: Props) {
   const step = detail?.steps[0];
   const pending = step?.status === "pending_approval";
   const recommendation = detail ? recommendNextAction(detail) : null;
@@ -36,6 +38,21 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
   const [crValidation, setCrValidation] = useState("");
   const [crRisk, setCrRisk] = useState("");
   const [addingCommitReview, setAddingCommitReview] = useState(false);
+
+  // Evidence bundle state
+  const [bundleResult, setBundleResult] = useState<EvidenceBundleResponse | null>(null);
+  const [generatingBundle, setGeneratingBundle] = useState(false);
+  const [bundleError, setBundleError] = useState("");
+  const [copied, setCopied] = useState(false);
+  // Clear stale bundle when selected task changes
+  useEffect(() => {
+    setBundleResult(null);
+    setBundleError("");
+    setCopied(false);
+  }, [detail?.task.id]);
+
+  // Only show bundle if it matches the currently selected task
+  const currentBundle = bundleResult?.taskId === detail?.task.id ? bundleResult : null;
 
   return (
     <aside className="panel panel--review">
@@ -118,6 +135,59 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
                         : "No approval decision is pending."
               : "Select a task to review its gate."}
           </p>
+        )}
+      </section>
+
+      <section className="review-section review-section--evidence-bundle">
+        <h3>Evidence bundle</h3>
+        <p className="evidence-disclaimer">Evidence bundle only — no command is run.</p>
+
+        <div className="evidence-bundle-controls">
+          <button
+            className="button button--primary button--compact"
+            disabled={!detail || busy || generatingBundle}
+            onClick={async () => {
+              if (!detail) return;
+              setGeneratingBundle(true);
+              setBundleError("");
+              try {
+                const result = await fetchEvidenceBundle(detail.task.id);
+                setBundleResult(result);
+                onEvidenceBundleGenerated?.(result);
+              } catch (err: any) {
+                setBundleError(err.message || "Failed to generate bundle");
+              } finally {
+                setGeneratingBundle(false);
+              }
+            }}
+          >
+            {generatingBundle ? "Generating..." : "Generate evidence bundle"}
+          </button>
+          {currentBundle && (
+            <button
+              className="button button--compact"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(currentBundle.markdown);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                } catch {
+                  setBundleError("Clipboard not available");
+                }
+              }}
+            >
+              {copied ? "Copied!" : "Copy bundle"}
+            </button>
+          )}
+        </div>
+        {bundleError && <p className="error-text">{bundleError}</p>}
+        {currentBundle && (
+          <textarea
+            className="input input--textarea input--compact evidence-bundle-textarea"
+            readOnly
+            rows={16}
+            value={currentBundle.markdown}
+          />
         )}
       </section>
 

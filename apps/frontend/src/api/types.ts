@@ -186,3 +186,8 @@ export type ReadinessState =
   | { kind: "healthy"; health: HealthResponse }
   | { kind: "unhealthy"; health: HealthResponse }
   | { kind: "error"; error: string };
+
+export interface EvidenceBundleResponse {
+  taskId: string;
+  markdown: string;
+}

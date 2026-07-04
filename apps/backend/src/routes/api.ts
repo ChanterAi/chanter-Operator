@@ -89,6 +89,10 @@ export function createApiRouter(service: OperatorService): Router {
   });
 
 
+  router.get("/tasks/:taskId/evidence-bundle", (request, response) => {
+    response.status(200).json(service.buildEvidenceBundle(request.params.taskId));
+  });
+
   router.post("/tasks/:taskId/commit-reviews", (request, response) => {
     const summaryText = typeof request.body?.summaryText === "string" ? request.body.summaryText : "";
     const changedFilesText = typeof request.body?.changedFilesText === "string" ? request.body.changedFilesText : "";

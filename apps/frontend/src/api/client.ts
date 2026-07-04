@@ -1,4 +1,4 @@
-import type { AddCommitReviewInput, AddValidationInput, CreateTaskInput, HealthResponse, TaskDetail, TaskIntent } from "./types";
+import type { AddCommitReviewInput, AddValidationInput, CreateTaskInput, EvidenceBundleResponse, HealthResponse, TaskDetail, TaskIntent } from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -60,6 +60,10 @@ export async function addCommitReview(taskId: string, input: AddCommitReviewInpu
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function fetchEvidenceBundle(taskId: string): Promise<EvidenceBundleResponse> {
+  return request<EvidenceBundleResponse>(`/api/tasks/${taskId}/evidence-bundle`);
 }
 
 export async function addValidationEvidence(taskId: string, input: AddValidationInput): Promise<TaskDetail> {
