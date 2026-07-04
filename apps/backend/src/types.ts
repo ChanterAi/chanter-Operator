@@ -61,6 +61,18 @@ export interface ExecutionStep {
   updated_at: string;
 }
 
+export interface CommitReview {
+  id: string;
+  task_id: string;
+  summary_text: string;
+  changed_files_text: string;
+  validation_text: string;
+  risk_notes_text: string;
+  verdict: "blocked" | "needs_review" | "safe_to_review";
+  reasons: string[];
+  created_at: string;
+}
+
 export interface ValidationEvidence {
   id: string;
   task_id: string;
@@ -99,6 +111,7 @@ export const auditEventTypes = [
   "task_cancelled",
   "task_reopened",
   "validation_evidence_added",
+  "commit_review_added",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -118,4 +131,5 @@ export interface TaskDetail {
   evidence: Evidence[];
   audit_events: AuditEvent[];
   validation_evidence: ValidationEvidence[];
+  commit_reviews: CommitReview[];
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
-import { mapEvidence, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
+import { mapCommitReview, mapEvidence, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
 import { normalizeProductLane } from "../db/schema.js";
 import { runIntegrityCheck } from "../integrity/integrityChecker.js";
 import type { IntegrityReport } from "../integrity/integrityChecker.js";
@@ -17,6 +17,7 @@ import type {
   TaskDetail,
   TaskIntent,
   TaskStatus,
+  CommitReview,
   ValidationEvidence,
 } from "../types.js";
 import { validateRunnerResult } from "../validation/stepValidation.js";
@@ -50,6 +51,54 @@ const validationStatuses = new Set<string>(["passed", "failed", "warning", "not_
 
 /** Maximum length for pasted validation output. */
 const MAX_VALIDATION_OUTPUT_LENGTH = 10_000;
+const MAX_REVIEW_FIELD_LENGTH = 10_000;
+
+const blockedTriggers: { pattern: RegExp; reason: string }[] = [
+  { pattern: /test.*fail|failing.*test|tests?:\s*\d+\s*failed/i, reason: "Failing tests reported" },
+  { pattern: /build.*fail|failed.*build|typecheck.*fail/i, reason: "Build or typecheck failure reported" },
+  { pattern: /git diff.*fail|diff.?check.*fail/i, reason: "git diff --check failure reported" },
+  {
+    pattern: /(?:added|enabled|introduced|implemented|wired|new)\s+(?:real.?execution|shell.?exec|external.?api)|(?:real.?execution|shell.?exec|external.?api)\s+(?:added|enabled|introduced|implemented|wired)/i,
+    reason: "Real execution or external API detected",
+  },
+  { pattern: /\.fixed\.ts|stray.*files|temp.*files/i, reason: "Stray or temp files detected" },
+  {
+    pattern: /(?:added|enabled|introduced|implemented|wired|in place|present).*(?:destructive.*repair|approval.*bypass|hidden.*agent)|(?:destructive.*repair|approval.*bypass|hidden.*agent).*(?:added|enabled|introduced|implemented|wired|in place|present)/i,
+    reason: "Destructive repair or approval bypass detected",
+  },
+  {
+    pattern: /(?:added|enabled|introduced|implemented|wired|new).*(?:\bcodex\b|\bollama\b|\bgit\s+automation\b|\bloop\s+governor\b)|(?:\bcodex\b|\bollama\b|\bgit\s+automation\b|\bloop\s+governor\b).*(?:added|enabled|introduced|implemented|wired|automation)/i,
+    reason: "Prohibited capability mentioned",
+  },
+  { pattern: /validation.*missing|no.*validation|untested/i, reason: "Validation claims missing" },
+];
+
+const needsReviewTriggers: { pattern: RegExp; reason: string }[] = [
+  { pattern: /vague|unclear|broad/i, reason: "Validation claims appear vague or broad" },
+  { pattern: /files.*changed.*\d{2,}[^0-9]/i, reason: "High number of changed files" },
+  { pattern: /readme.*mismatch|doc.*outdated/i, reason: "README or doc mismatch noted" },
+  { pattern: /scope.*unclear|unknown.*limitation|incomplete.*evidence/i, reason: "Scope unclear or evidence incomplete" },
+  { pattern: /known.*limitation.*safety|limitation.*affects/i, reason: "Known limitation may affect safety" },
+];
+
+/** Check that all four validation gates are explicitly reported as passed. */
+function allFourGatesPassed(validationText: string): { allPassed: boolean; missing: string[] } {
+  const missing: string[] = [];
+  if (!/typecheck.*(?:pass|ok|success|exit\s*0)|(?:pass|ok|success).*typecheck/i.test(validationText)) {
+    missing.push("Typecheck not explicitly reported as passing");
+  }
+  if (!/tests?\s*(?::|–|—|-)\s*(?:\d+\s*)*pass|all\s+(?:tests|specs).*pass/i.test(validationText)) {
+    missing.push("Tests not explicitly reported as passing");
+  }
+  if (!/build.*(?:pass|ok|success|exit\s*0)|(?:pass|ok|success).*build/i.test(validationText)) {
+    missing.push("Build not explicitly reported as passing");
+  }
+  if (!/git\s*diff\s*(?:--check)?.*(?:pass|ok|clean|exit\s*0)|diff.?check.*(?:pass|ok|clean|exit\s*0)/i.test(validationText)) {
+    missing.push("git diff --check not explicitly reported as passing");
+  }
+  return { allPassed: missing.length === 0, missing };
+}
+
 export class OperatorService {
   constructor(
     private readonly database: DatabaseSync,
@@ -284,12 +333,18 @@ export class OperatorService {
       .all(taskId)
       .map(mapValidationEvidence);
 
+    const commit_reviews = this.database
+      .prepare("SELECT * FROM commit_reviews WHERE task_id = ? ORDER BY created_at DESC")
+      .all(taskId)
+      .map(mapCommitReview);
+
     return {
       task: mapTask(taskRow),
       steps,
       evidence,
       audit_events: this.audit.readRecent(100, taskId),
       validation_evidence,
+      commit_reviews,
     };
   }
 
@@ -396,7 +451,102 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-  // Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  private classifyVerdict(
+    summaryText: string,
+    changedFilesText: string,
+    validationText: string,
+    riskNotesText: string,
+  ): { verdict: "blocked" | "needs_review" | "safe_to_review"; reasons: string[] } {
+    const combined = [summaryText, changedFilesText, validationText, riskNotesText].join("\n");
+    const reasons: string[] = [];
+
+    for (const rule of blockedTriggers) {
+      if (rule.pattern.test(combined)) {
+        reasons.push(rule.reason);
+      }
+    }
+    if (reasons.length > 0) {
+      return { verdict: "blocked", reasons };
+    }
+
+    for (const rule of needsReviewTriggers) {
+      if (rule.pattern.test(combined)) {
+        reasons.push(rule.reason);
+      }
+    }
+    if (reasons.length > 0) {
+      return { verdict: "needs_review", reasons };
+    }
+
+    // SAFE_TO_REVIEW requires explicit evidence of all four validation gates
+    const gates = allFourGatesPassed(validationText);
+    if (!gates.allPassed) {
+      return { verdict: "needs_review", reasons: gates.missing };
+    }
+
+    return { verdict: "safe_to_review", reasons: ["All four validation gates pass explicitly (typecheck, tests, build, git diff --check). Review manually before commit."] };
+  }
+
+  /**
+   * Record a safe commit review for a task.
+   * Does NOT run git or any command — purely records human-pasted analysis.
+   */
+  addCommitReview(
+    taskId: string,
+    summaryText: string,
+    changedFilesText: string,
+    validationText: string,
+    riskNotesText: string,
+  ): TaskDetail {
+    const task = this.requireTask(taskId);
+
+    if (summaryText.length > MAX_REVIEW_FIELD_LENGTH) {
+      throw new OperatorError("Summary text must be 10,000 characters or fewer.", 400);
+    }
+    if (changedFilesText.length > MAX_REVIEW_FIELD_LENGTH) {
+      throw new OperatorError("Changed files text must be 10,000 characters or fewer.", 400);
+    }
+    if (validationText.length > MAX_REVIEW_FIELD_LENGTH) {
+      throw new OperatorError("Validation text must be 10,000 characters or fewer.", 400);
+    }
+    if (riskNotesText.length > MAX_REVIEW_FIELD_LENGTH) {
+      throw new OperatorError("Risk notes text must be 10,000 characters or fewer.", 400);
+    }
+
+    const { verdict, reasons } = this.classifyVerdict(summaryText, changedFilesText, validationText, riskNotesText);
+
+    const now = new Date().toISOString();
+    const reviewId = randomUUID();
+
+    withTransaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO commit_reviews
+            (id, task_id, summary_text, changed_files_text, validation_text, risk_notes_text, verdict, reasons, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(reviewId, taskId, summaryText, changedFilesText, validationText, riskNotesText, verdict, JSON.stringify(reasons), now);
+
+      this.audit.append(
+        "commit_review_added",
+        taskId,
+        undefined,
+        {
+          review_id: reviewId,
+          verdict,
+          reason_count: reasons.length,
+          summary_length: summaryText.length,
+          files_length: changedFilesText.length,
+          validation_length: validationText.length,
+          risk_notes_length: riskNotesText.length,
+        },
+      );
+    });
+
+    return this.getTaskDetail(taskId);
+  }
+
+    // Private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
   private getStepsForTask(taskId: string): ExecutionStep[] {

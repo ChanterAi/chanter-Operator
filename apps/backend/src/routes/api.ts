@@ -88,6 +88,16 @@ export function createApiRouter(service: OperatorService): Router {
     response.json(service.rejectStep(request.params.stepId, reason));
   });
 
+
+  router.post("/tasks/:taskId/commit-reviews", (request, response) => {
+    const summaryText = typeof request.body?.summaryText === "string" ? request.body.summaryText : "";
+    const changedFilesText = typeof request.body?.changedFilesText === "string" ? request.body.changedFilesText : "";
+    const validationText = typeof request.body?.validationText === "string" ? request.body.validationText : "";
+    const riskNotesText = typeof request.body?.riskNotesText === "string" ? request.body.riskNotesText : "";
+    response.status(201).json(
+      service.addCommitReview(request.params.taskId, summaryText, changedFilesText, validationText, riskNotesText),
+    );
+  });
   router.post("/tasks/:taskId/validations", (request, response) => {
     const commandLabel = typeof request.body?.commandLabel === "string" ? request.body.commandLabel : "";
     const status = typeof request.body?.status === "string" ? request.body.status : "";

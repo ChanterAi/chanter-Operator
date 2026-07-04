@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Evidence, ExecutionStep, TaskIntent, ValidationEvidence } from "../types.js";
+import type { CommitReview, Evidence, ExecutionStep, TaskIntent, ValidationEvidence } from "../types.js";
 import { schema } from "./schema.js";
 
 type TaskRow = TaskIntent;
@@ -93,6 +93,11 @@ export function mapStep(row: unknown): ExecutionStep {
     action_payload: JSON.parse(step.action_payload) as Record<string, unknown>,
     requires_approval: step.requires_approval === 1,
   };
+}
+
+export function mapCommitReview(row: unknown): CommitReview {
+  const r = row as Omit<CommitReview, "reasons"> & { reasons: string };
+  return { ...r, reasons: JSON.parse(r.reasons) as string[] };
 }
 
 export function mapValidationEvidence(row: unknown): ValidationEvidence {

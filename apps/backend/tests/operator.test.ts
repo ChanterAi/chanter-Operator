@@ -897,4 +897,255 @@ describe("P0.7 manual validation evidence intake", () => {
   });
 });
 
+
+describe("P0.8 safe commit review intake", () => {
+  let temporaryRoot: string;
+  let database: DatabaseSync;
+  let service: OperatorService;
+  let auditPath: string;
+  let workspaceRoot: string;
+
+  beforeEach(() => {
+    temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "chanter-operator-p08-"));
+    mkdirSync(path.join(temporaryRoot, "data"), { recursive: true });
+    auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
+    workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
+    database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+    service = new OperatorService(database, new AuditLogger(auditPath), new MockRunner(), workspaceRoot);
+  });
+
+  afterEach(() => {
+    database.close();
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  });
+
+  it("creates commit review for existing task", () => {
+    const created = service.createTask({ rawInput: "Review candidate", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "P0.8 implementation: clean delivery with all gates passing",
+      "5 files changed",
+      "npm run typecheck: pass. npm test: 135 passing. npm run build: success. git diff --check: clean.",
+      "No known limitations.",
+    );
+
+    expect(result.commit_reviews).toHaveLength(1);
+    expect(result.commit_reviews[0].verdict).toBe("safe_to_review");
+    expect(result.commit_reviews[0].reasons.some(r => r.includes("All four validation gates pass"))).toBe(true);
+  });
+
+  it("returns commit review in task detail", () => {
+    const created = service.createTask({ rawInput: "Detail check", actionType: "analysis" });
+    service.addCommitReview(created.task.id, "summary", "files", "all good", "");
+
+    const detail = service.getTaskDetail(created.task.id);
+    expect(detail.commit_reviews).toHaveLength(1);
+  });
+
+  it("rejects review for missing task", () => {
+    expect(() =>
+      service.addCommitReview("missing-id", "s", "f", "v", "r"),
+    ).toThrow(/was not found/);
+  });
+
+  it("rejects oversized summary text with 400", () => {
+    const created = service.createTask({ rawInput: "Oversized summary", actionType: "analysis" });
+    const huge = "x".repeat(15_000);
+    expect(() =>
+      service.addCommitReview(created.task.id, huge, "files", "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.", ""),
+    ).toThrow(/summary text must be 10,000 characters or fewer/i);
+  });
+
+  it("rejects oversized validation text with 400", () => {
+    const created = service.createTask({ rawInput: "Oversized validation", actionType: "analysis" });
+    const huge = "x".repeat(15_000);
+    expect(() =>
+      service.addCommitReview(created.task.id, "summary", "files", huge, ""),
+    ).toThrow(/validation text must be 10,000 characters or fewer/i);
+  });
+
+  it("classification: failing tests => blocked", () => {
+    const created = service.createTask({ rawInput: "Failing", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "P0.x implementation",
+      "5 files changed",
+      "npm test: 65 passed, 2 failed. typecheck OK.",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+    expect(result.commit_reviews[0].reasons.some(r => /failing/i.test(r))).toBe(true);
+  });
+
+  it("classification: build failure => blocked", () => {
+    const created = service.createTask({ rawInput: "Build fail", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "P0.x implementation",
+      "3 files changed",
+      "npm run build: failed with TSC errors.",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+  });
+
+  it("classification: prohibited capability (codex) => blocked", () => {
+    const created = service.createTask({ rawInput: "Prohibited", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Added Codex integration for auto-fix",
+      "2 files changed",
+      "all tests pass",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+  });
+
+  it("classification: real execution mentioned => blocked", () => {
+    const created = service.createTask({ rawInput: "Real exec", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Added real execution capabilities",
+      "4 files changed",
+      "passes",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+  });
+
+  it("classification: broad changes => needs_review", () => {
+    const created = service.createTask({ rawInput: "Broad", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Large refactoring across the codebase. Scope is unclear.",
+      "45 files changed throughout the project",
+      "npm test: 200 passing",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("needs_review");
+  });
+
+  it("classification: vague validation => needs_review", () => {
+    const created = service.createTask({ rawInput: "Vague", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Added some features",
+      "a few files changed",
+      "vague results, need more validation",
+      "",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("needs_review");
+  });
+
+
+  it("missing validation gate evidence => needs_review", () => {
+    const created = service.createTask({ rawInput: "Missing evidence", actionType: "analysis" });
+    // Only tests passing — no typecheck, build, or diff-check evidence
+    const result = service.addCommitReview(
+      created.task.id,
+      "Implemented feature X",
+      "3 files changed",
+      "npm test: all 42 tests pass.",
+      "",
+    );
+    expect(result.commit_reviews[0].verdict).toBe("needs_review");
+    expect(result.commit_reviews[0].reasons.some(r => /typecheck/i.test(r))).toBe(true);
+  });
+
+  it("partial gate evidence => needs_review", () => {
+    const created = service.createTask({ rawInput: "Partial evidence", actionType: "analysis" });
+    // Tests and build pass, but no typecheck or diff-check
+    const result = service.addCommitReview(
+      created.task.id,
+      "Partial validation",
+      "2 files changed",
+      "npm test: all passing. npm run build: success.",
+      "",
+    );
+    expect(result.commit_reviews[0].verdict).toBe("needs_review");
+    expect(result.commit_reviews[0].reasons.some(r => /typecheck/i.test(r))).toBe(true);
+    expect(result.commit_reviews[0].reasons.some(r => /git diff/i.test(r))).toBe(true);
+  });
+
+  it("SAFE_TO_REVIEW requires all four gates explicitly", () => {
+    const created = service.createTask({ rawInput: "All gates", actionType: "analysis" });
+    // All four gates explicitly passed
+    const result = service.addCommitReview(
+      created.task.id,
+      "Clean P0.8 delivery",
+      "3 files changed, +5 / -1",
+      "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.",
+      "",
+    );
+    expect(result.commit_reviews[0].verdict).toBe("safe_to_review");
+  });
+  it("risk notes with real execution added => blocked", () => {
+    const created = service.createTask({ rawInput: "Risk notes real execution", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Clean P0.8 delivery",
+      "3 files changed",
+      "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.",
+      "Risk: real execution added.",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+  });
+
+  it("risk notes with approval bypass present => blocked", () => {
+    const created = service.createTask({ rawInput: "Risk notes approval bypass", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Clean P0.8 delivery",
+      "3 files changed",
+      "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.",
+      "Risk: approval bypass is present.",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("blocked");
+  });
+
+  it("negative safety notes do not falsely block clean four-gate review", () => {
+    const created = service.createTask({ rawInput: "Clean negative safety notes", actionType: "analysis" });
+    const result = service.addCommitReview(
+      created.task.id,
+      "Clean P0.8 delivery",
+      "3 files changed",
+      "npm run typecheck: pass. npm test: 42 passing. npm run build: success. git diff --check: clean.",
+      "No real execution. No external APIs. No approval bypass. No Codex or Ollama integration.",
+    );
+
+    expect(result.commit_reviews[0].verdict).toBe("safe_to_review");
+  });
+  it("audit event appended", () => {
+    const created = service.createTask({ rawInput: "Audited review", actionType: "analysis" });
+    const result = service.addCommitReview(created.task.id, "summary", "files", "validation", "risks");
+
+    expect(result.audit_events.some(e => e.event_type === "commit_review_added")).toBe(true);
+  });
+
+  it("does not change task lifecycle state", () => {
+    const created = service.createTask({ rawInput: "No state change", actionType: "file_edit" });
+    const beforeStatus = created.task.status;
+
+    const result = service.addCommitReview(created.task.id, "summary", "files", "passes", "");
+    expect(result.task.status).toBe(beforeStatus);
+  });
+
+  it("no shell/git/filesystem execution introduced", () => {
+    const created = service.createTask({ rawInput: "Safety check", actionType: "analysis" });
+    const result = service.addCommitReview(created.task.id, "summary", "files", "ok", "");
+
+    expect(result.commit_reviews).toHaveLength(1);
+    // Task remains completed after analysis auto-executes
+    expect(result.task.status).toBe("completed");
+  });
+});
+
 });

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { TaskDetail } from "../api/types";
 import { canCancelTask, canRetryTask, recommendNextAction } from "../api/types";
-import type { ValidationEvidence } from "../api/types";
+import type { CommitReview, ValidationEvidence } from "../api/types";
 
 interface Props {
   detail: TaskDetail | null;
@@ -14,9 +14,10 @@ interface Props {
   onCancel: (taskId: string) => Promise<void>;
   onRetry: (taskId: string) => Promise<void>;
   onAddValidation: (taskId: string, commandLabel: string, status: string, output: string) => Promise<void>;
+  onAddCommitReview: (taskId: string, summaryText: string, changedFilesText: string, validationText: string, riskNotesText: string) => Promise<void>;
 }
 
-export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation }: Props) {
+export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecision, onApprove, onReject, onCancel, onRetry, onAddValidation, onAddCommitReview }: Props) {
   const step = detail?.steps[0];
   const pending = step?.status === "pending_approval";
   const recommendation = detail ? recommendNextAction(detail) : null;
@@ -28,6 +29,13 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
   const [valStatus, setValStatus] = useState<string>("passed");
   const [valOutput, setValOutput] = useState("");
   const [addingEvidence, setAddingEvidence] = useState(false);
+
+  // Commit review form state
+  const [crSummary, setCrSummary] = useState("");
+  const [crFiles, setCrFiles] = useState("");
+  const [crValidation, setCrValidation] = useState("");
+  const [crRisk, setCrRisk] = useState("");
+  const [addingCommitReview, setAddingCommitReview] = useState(false);
 
   return (
     <aside className="panel panel--review">
@@ -110,6 +118,107 @@ export function ReviewPanel({ detail, busy, decision, cancelDecision, retryDecis
                         : "No approval decision is pending."
               : "Select a task to review its gate."}
           </p>
+        )}
+      </section>
+
+      <section className="review-section review-section--commit-review">
+        <h3>Safe commit review intake</h3>
+        <p className="evidence-disclaimer">Manual review only — no git command is run.</p>
+
+        <form
+          className="commit-review-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!detail) return;
+            setAddingCommitReview(true);
+            try {
+              await onAddCommitReview(detail.task.id, crSummary, crFiles, crValidation, crRisk);
+              setCrSummary("");
+              setCrFiles("");
+              setCrValidation("");
+              setCrRisk("");
+            } finally {
+              setAddingCommitReview(false);
+            }
+          }}
+        >
+          <textarea
+            className="input input--textarea input--compact"
+            disabled={busy || addingCommitReview}
+            maxLength={10000}
+            onChange={(e) => setCrSummary(e.target.value)}
+            placeholder="Paste implementation report / summary..."
+            rows={3}
+            value={crSummary}
+          />
+          <textarea
+            className="input input--textarea input--compact"
+            disabled={busy || addingCommitReview}
+            maxLength={10000}
+            onChange={(e) => setCrFiles(e.target.value)}
+            placeholder="Paste changed files summary..."
+            rows={2}
+            value={crFiles}
+          />
+          <textarea
+            className="input input--textarea input--compact"
+            disabled={busy || addingCommitReview}
+            maxLength={10000}
+            onChange={(e) => setCrValidation(e.target.value)}
+            placeholder="Paste validation results..."
+            rows={2}
+            value={crValidation}
+          />
+          <textarea
+            className="input input--textarea input--compact"
+            disabled={busy || addingCommitReview}
+            maxLength={10000}
+            onChange={(e) => setCrRisk(e.target.value)}
+            placeholder="Risk notes (optional)..."
+            rows={2}
+            value={crRisk}
+          />
+          <button
+            className="button button--primary button--compact"
+            disabled={busy || addingCommitReview}
+            type="submit"
+          >
+            {addingCommitReview ? "Analyzing..." : "Submit review"}
+          </button>
+        </form>
+
+        {detail?.commit_reviews && detail.commit_reviews.length > 0 && (
+          <div className="commit-review-list">
+            {detail.commit_reviews.map((cr: CommitReview) => (
+              <div key={cr.id} className={`commit-review-card commit-review-card--${cr.verdict}`}>
+                <div className="commit-review-card__header">
+                  <span className={`verdict-badge verdict-badge--${cr.verdict}`}>
+                    {cr.verdict === "blocked" ? "⛔ BLOCKED" : cr.verdict === "needs_review" ? "⚠️ NEEDS REVIEW" : "✅ SAFE TO REVIEW"}
+                  </span>
+                  <time>{new Date(cr.created_at).toLocaleString()}</time>
+                </div>
+                {cr.reasons.length > 0 && (
+                  <ul className="verdict-reasons">
+                    {cr.reasons.map((r, i) => (
+                      <li key={i} className="verdict-reason-item">{r}</li>
+                    ))}
+                  </ul>
+                )}
+                {cr.summary_text && (
+                  <details className="review-detail">
+                    <summary>Summary ({cr.summary_text.length} chars)</summary>
+                    <pre className="validation-output">{cr.summary_text.slice(0, 500)}{cr.summary_text.length > 500 ? "..." : ""}</pre>
+                  </details>
+                )}
+                {cr.changed_files_text && (
+                  <details className="review-detail">
+                    <summary>Changed files ({cr.changed_files_text.length} chars)</summary>
+                    <pre className="validation-output">{cr.changed_files_text.slice(0, 500)}{cr.changed_files_text.length > 500 ? "..." : ""}</pre>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </section>
 

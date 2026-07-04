@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS validation_evidence (
 );
 
 CREATE INDEX IF NOT EXISTS idx_validation_evidence_task_id ON validation_evidence(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS commit_reviews (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES task_intents(id) ON DELETE RESTRICT,
+  summary_text TEXT NOT NULL,
+  changed_files_text TEXT NOT NULL,
+  validation_text TEXT NOT NULL,
+  risk_notes_text TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('blocked', 'needs_review', 'safe_to_review')),
+  reasons TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_commit_reviews_task_id ON commit_reviews(task_id, created_at);
 `;
 
 const validLanes = new Set<string>([

@@ -199,6 +199,7 @@ describe("P0.3 smoke: completed task detail and review", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("task_created")).toBeInTheDocument();
@@ -264,6 +265,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /approve & simulate/i })).toBeInTheDocument();
@@ -280,6 +282,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Decision needed")).toBeInTheDocument();
@@ -304,6 +307,7 @@ describe("P0.3 smoke: rejected state", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText(/task can be retried/i)).toBeInTheDocument();
@@ -488,6 +492,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -503,6 +508,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.queryByText("Cancel task")).not.toBeInTheDocument();
@@ -518,6 +524,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Retry task")).toBeInTheDocument();
@@ -533,6 +540,7 @@ describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.queryByText("Retry task")).not.toBeInTheDocument();
@@ -551,6 +559,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onCancel={cancelSpy}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     const btn = screen.getByText("Cancel task");
@@ -569,6 +578,7 @@ describe("P0.6 smoke: lifecycle actions call correct API", () => {
         onCancel={vi.fn()}
         onRetry={retrySpy}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     const btn = screen.getByText("Retry task");
@@ -589,6 +599,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Cancelling...")).toBeInTheDocument();
@@ -605,6 +616,7 @@ describe("P0.6 smoke: lifecycle controls show busy state", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Retrying...")).toBeInTheDocument();
@@ -622,6 +634,7 @@ describe("P0.6 smoke: no execution controls introduced", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
           onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     const allButtons = screen.getAllByRole("button");
@@ -642,6 +655,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Manual validation")).toBeInTheDocument();
@@ -657,6 +671,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText(/Manual evidence only/i)).toBeInTheDocument();
@@ -673,6 +688,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByPlaceholderText(/npm test/i)).toBeInTheDocument();
@@ -688,6 +704,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     // The select has "Passed" as default option
@@ -711,6 +728,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByRole("button", { name: /add evidence/i })).toBeInTheDocument();
@@ -739,6 +757,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Pass")).toBeInTheDocument();
@@ -764,6 +783,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     expect(screen.getByText("Pass")).toBeInTheDocument();
@@ -781,6 +801,7 @@ describe("P0.7 manual validation evidence intake", () => {
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onAddValidation={vi.fn()}
+          onAddCommitReview={vi.fn()}
       />,
     );
     const section = screen.getByText("Manual validation").closest("section")!;
@@ -790,6 +811,202 @@ describe("P0.7 manual validation evidence intake", () => {
     // Must NOT contain real-execution language
     expect(text).not.toMatch(/execute/i);
     expect(text).not.toMatch(/run command/i);
+    expect(text).not.toMatch(/deploy/i);
+    expect(text).not.toMatch(/codex/i);
+    expect(text).not.toMatch(/ollama/i);
+  });
+});
+
+
+describe("P0.8 safe commit review intake", () => {
+  it("renders commit review form in ReviewPanel", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Safe commit review intake")).toBeInTheDocument();
+  });
+
+  it("renders no-git disclaimer", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Manual review only/i)).toBeInTheDocument();
+    expect(screen.getByText(/no git command is run/i)).toBeInTheDocument();
+  });
+
+  it("renders submit review button", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /submit review/i })).toBeInTheDocument();
+  });
+
+  it("renders BLOCKED verdict badge", () => {
+    const withReview = {
+      ...mockCompletedDetail,
+      commit_reviews: [{
+        id: "cr-001",
+        task_id: "task-001",
+        summary_text: "tests failed",
+        changed_files_text: "5 files",
+        validation_text: "2 tests failing",
+        risk_notes_text: "",
+        verdict: "blocked" as const,
+        reasons: ["Failing tests reported"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withReview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/BLOCKED/i)).toBeInTheDocument();
+  });
+
+  it("renders NEEDS REVIEW verdict badge", () => {
+    const withReview = {
+      ...mockCompletedDetail,
+      commit_reviews: [{
+        id: "cr-002",
+        task_id: "task-001",
+        summary_text: "broad changes",
+        changed_files_text: "15 files",
+        validation_text: "passes",
+        risk_notes_text: "",
+        verdict: "needs_review" as const,
+        reasons: ["High number of changed files"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withReview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/NEEDS REVIEW/i)).toBeInTheDocument();
+  });
+
+  it("renders SAFE TO REVIEW verdict badge", () => {
+    const withReview = {
+      ...mockCompletedDetail,
+      commit_reviews: [{
+        id: "cr-003",
+        task_id: "task-001",
+        summary_text: "clean implementation",
+        changed_files_text: "3 files",
+        validation_text: "all gates pass",
+        risk_notes_text: "",
+        verdict: "safe_to_review" as const,
+        reasons: ["All automated checks pass."],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withReview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/SAFE TO REVIEW/i)).toBeInTheDocument();
+  });
+
+  it("renders verdict reasons", () => {
+    const withReview = {
+      ...mockCompletedDetail,
+      commit_reviews: [{
+        id: "cr-004",
+        task_id: "task-001",
+        summary_text: "test",
+        changed_files_text: "test",
+        validation_text: "test",
+        risk_notes_text: "",
+        verdict: "blocked" as const,
+        reasons: ["Failing tests reported", "Real execution or external API detected"],
+        created_at: new Date().toISOString(),
+      }],
+    };
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={withReview}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Failing tests reported/i)).toBeInTheDocument();
+    expect(screen.getByText(/Real execution or external API detected/i)).toBeInTheDocument();
+  });
+
+  it("no execute/run/deploy/git push wording in commit review section", () => {
+    render(
+      <ReviewPanel
+        busy={false}
+        detail={mockCompletedDetail}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onCancel={vi.fn()}
+        onRetry={vi.fn()}
+        onAddValidation={vi.fn()}
+        onAddCommitReview={vi.fn()}
+      />,
+    );
+    const section = screen.getByText("Safe commit review intake").closest("section")!;
+    const text = section.textContent || "";
+    expect(text).toMatch(/no git command is run/i);
+    expect(text).not.toMatch(/git push/i);
+    expect(text).not.toMatch(/execute/i);
     expect(text).not.toMatch(/deploy/i);
     expect(text).not.toMatch(/codex/i);
     expect(text).not.toMatch(/ollama/i);
