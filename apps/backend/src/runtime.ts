@@ -9,7 +9,12 @@ export function createRuntime() {
   const database = createDatabase(config.databasePath);
   const workspaceRoot = ensureWorkspace(config.workspaceRoot);
   const audit = new AuditLogger(config.auditPath);
-  const service = new OperatorService(database, audit, new MockRunner(), workspaceRoot);
+  const service = new OperatorService(
+    database,
+    audit,
+    new MockRunner(),
+    workspaceRoot,
+    config.runnerWorkspaceRoot,
+  );
   return { database, service };
 }
-

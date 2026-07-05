@@ -77,6 +77,23 @@ CREATE TABLE IF NOT EXISTS runner_policy_previews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_runner_policy_previews_task_id ON runner_policy_previews(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS readonly_command_results (
+  id TEXT PRIMARY KEY,
+  command TEXT NOT NULL,
+  executable TEXT NOT NULL,
+  args TEXT NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('allowed_readonly', 'blocked')),
+  stdout TEXT,
+  stderr TEXT,
+  exit_code INTEGER,
+  duration_ms INTEGER,
+  workspace_root TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_readonly_command_results_timestamp ON readonly_command_results(timestamp);
 `;
 
 const validLanes = new Set<string>([

@@ -124,6 +124,11 @@ export const auditEventTypes = [
   "commit_review_added",
   "evidence_bundle_generated",
   "runner_policy_preview_added",
+  "readonly_command_requested",
+  "readonly_command_allowed",
+  "readonly_command_blocked",
+  "readonly_command_completed",
+  "readonly_command_failed",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];

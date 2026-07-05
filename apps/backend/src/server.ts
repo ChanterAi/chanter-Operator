@@ -5,8 +5,12 @@ import { createRuntime } from "./runtime.js";
 const { database, service } = createRuntime();
 const app = createApp(service);
 const server = app.listen(config.port, config.host, () => {
-  console.log(`CHANTER Operator backend: http://${config.host}:${config.port}`);
-  console.log("Runner mode: mock only (real execution disabled)");
+  console.log("CHANTER Operator backend: http://" + config.host + ":" + config.port);
+  console.log("Runner mode: mock (task workflow) + read-only local runner" + (config.runnerWorkspaceRoot ? "" : " (disabled)"));
+  if (config.runnerWorkspaceRoot) {
+    console.log("Read-only runner workspace: " + config.runnerWorkspaceRoot);
+    console.log("Read-only runner: git status --short, git diff --stat, git diff --check, git show --stat --oneline HEAD, git show --name-only HEAD");
+  }
 });
 
 function shutdown() {
@@ -18,4 +22,3 @@ function shutdown() {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
-

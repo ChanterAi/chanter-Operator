@@ -1,13 +1,14 @@
-import { randomUUID } from "node:crypto";
+﻿import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { requiresApproval } from "../approvals/approvalGate.js";
 import { AuditLogger } from "../audit/auditLogger.js";
-import { mapCommitReview, mapEvidence, mapRunnerPolicyPreview, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
+import { mapCommitReview, mapEvidence, mapReadonlyCommandResult, mapRunnerPolicyPreview, mapStep, mapTask, mapValidationEvidence, withTransaction } from "../db/database.js";
 import { normalizeProductLane } from "../db/schema.js";
 import { runIntegrityCheck } from "../integrity/integrityChecker.js";
 import type { IntegrityReport } from "../integrity/integrityChecker.js";
 import type { Runner } from "../runners/runner.js";
+import { RealReadonlyRunner, type ReadonlyCommandResult } from "../runners/realReadonlyRunner.js";
 import type {
   ActionType,
   Evidence,
@@ -79,7 +80,7 @@ const blockedTriggers: { pattern: RegExp; reason: string }[] = [
 const needsReviewTriggers: { pattern: RegExp; reason: string }[] = [
   { pattern: /vague|unclear|broad/i, reason: "Validation claims appear vague or broad" },
   { pattern: /files.*changed.*\d{2,}[^0-9]/i, reason: "High number of changed files" },
-  { pattern: /readme.*mismatch|doc.*outdated/i, reason: "README or doc mismatch noted" },
+  { pattern: /readme.*mismatch|doc.*outdated/i, reason: "README or README mismatch noted" },
   { pattern: /scope.*unclear|unknown.*limitation|incomplete.*evidence/i, reason: "Scope unclear or evidence incomplete" },
   { pattern: /known.*limitation.*safety|limitation.*affects/i, reason: "Known limitation may affect safety" },
 ];
@@ -90,7 +91,7 @@ function allFourGatesPassed(validationText: string): { allPassed: boolean; missi
   if (!/typecheck.*(?:pass|ok|success|exit\s*0)|(?:pass|ok|success).*typecheck/i.test(validationText)) {
     missing.push("Typecheck not explicitly reported as passing");
   }
-  if (!/tests?\s*(?::|–|—|-)\s*(?:\d+\s*)*pass|all\s+(?:tests|specs).*pass/i.test(validationText)) {
+  if (!/tests?\s*(?::|\u201C|\u201D|-)\s*(?:\d+\s*)*pass|all\s+(?:tests|specs).*pass/i.test(validationText)) {
     missing.push("Tests not explicitly reported as passing");
   }
   if (!/build.*(?:pass|ok|success|exit\s*0)|(?:pass|ok|success).*build/i.test(validationText)) {
@@ -120,21 +121,21 @@ const requiresApprovalCommands = new Set<string>([
 ]);
 
 const blockedPrefixes: { prefix: string; reason: string }[] = [
-  { prefix: "git add", reason: "git add is blocked — no automated staging" },
-  { prefix: "git commit", reason: "git commit is blocked — no automated commits" },
-  { prefix: "git push", reason: "git push is blocked — no remote pushes" },
-  { prefix: "git pull", reason: "git pull is blocked — no remote fetches" },
-  { prefix: "git merge", reason: "git merge is blocked — no automated merges" },
+  { prefix: "git add", reason: "git add is blocked \u2014 no automated staging" },
+  { prefix: "git commit", reason: "git commit is blocked \u2014 no automated commits" },
+  { prefix: "git push", reason: "git push is blocked \u2014 no remote pushes" },
+  { prefix: "git pull", reason: "git pull is blocked \u2014 no remote fetches" },
+  { prefix: "git merge", reason: "git merge is blocked \u2014 no automated merges" },
   { prefix: "git rebase", reason: "git rebase is blocked" },
-  { prefix: "rm ", reason: "rm/del is blocked — no file deletion" },
-  { prefix: "del ", reason: "rm/del is blocked — no file deletion" },
-  { prefix: "rmdir", reason: "rm/del is blocked — no file deletion" },
+  { prefix: "rm ", reason: "rm/del is blocked \u2014 no file deletion" },
+  { prefix: "del ", reason: "rm/del is blocked \u2014 no file deletion" },
+  { prefix: "rmdir", reason: "rm/del is blocked \u2014 no file deletion" },
   { prefix: "cp ", reason: "File copy/move/write is blocked" },
   { prefix: "mv ", reason: "File copy/move/write is blocked" },
   { prefix: "copy ", reason: "File copy/move/write is blocked" },
   { prefix: "move ", reason: "File copy/move/write is blocked" },
-  { prefix: "npm install", reason: "npm install is blocked — no package changes" },
-  { prefix: "npm i ", reason: "npm install is blocked — no package changes" },
+  { prefix: "npm install", reason: "npm install is blocked \u2014 no package changes" },
+  { prefix: "npm i ", reason: "npm install is blocked \u2014 no package changes" },
   { prefix: "curl ", reason: "curl/wget/network commands are blocked" },
   { prefix: "wget ", reason: "curl/wget/network commands are blocked" },
   { prefix: "deploy", reason: "Deploy commands are blocked" },
@@ -157,20 +158,160 @@ const blockedPrefixes: { prefix: string; reason: string }[] = [
   { prefix: ";", reason: "Command separator is blocked" },
 ];
 
+/** Database row type for readonly_command_results */
+export interface ReadonlyCommandResultRow {
+  id: string;
+  command: string;
+  executable: string;
+  args: string;
+  verdict: string;
+  stdout: string | null;
+  stderr: string | null;
+  exit_code: number | null;
+  duration_ms: number | null;
+  workspace_root: string;
+  timestamp: string;
+  error: string | null;
+}
+
 export class OperatorService {
+  private readonly realRunner: RealReadonlyRunner | null;
+
   constructor(
     private readonly database: DatabaseSync,
     private readonly audit: AuditLogger,
     private readonly runner: Runner,
     private readonly workspaceRoot: string,
-  ) {}
+    private readonly runnerWorkspaceRoot?: string,
+  ) {
+    this.realRunner = runnerWorkspaceRoot ? new RealReadonlyRunner(runnerWorkspaceRoot) : null;
+  }
 
   /** Run a read-only integrity check across the database and audit log. Never modifies data. */
   checkIntegrity(): IntegrityReport {
     return runIntegrityCheck(this.database, this.audit.path);
   }
 
-  // â”€â”€ Lifecycle: Cancel task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- P1.0 Read-only Runner ---
+
+  /**
+   * Run a read-only command through the real runner.
+   * Blocks unauthorized commands. Records results in DB and audit log.
+   */
+  async runReadonlyCommand(command: string): Promise<ReadonlyCommandResult> {
+    if (!this.realRunner) {
+      throw new OperatorError("Real runner is not configured. Set OPERATOR_RUNNER_WORKSPACE to enable.", 503);
+    }
+
+    const trimmed = command.trim();
+    if (!trimmed) {
+      throw new OperatorError("Command is required.", 400);
+    }
+    if (trimmed.length > MAX_COMMAND_LENGTH) {
+      throw new OperatorError("Command must be 1,000 characters or fewer.", 400);
+    }
+
+    // Audit: command requested
+    this.audit.append("readonly_command_requested", "p1-runner", undefined, {
+      command: trimmed,
+    });
+
+    // Run the command
+    const result = await this.realRunner.run(trimmed);
+
+    // Audit: verdict
+    if (result.verdict === "allowed_readonly") {
+      this.audit.append("readonly_command_allowed", "p1-runner", undefined, {
+        command: trimmed,
+        result_id: result.id,
+      });
+    } else {
+      this.audit.append("readonly_command_blocked", "p1-runner", undefined, {
+        command: trimmed,
+        reason: result.error,
+        result_id: result.id,
+      });
+    }
+
+    // Audit: execution result (only for allowed commands that actually ran)
+    if (result.verdict === "allowed_readonly" && result.exitCode !== null) {
+      this.audit.append(
+        result.exitCode === 0 ? "readonly_command_completed" : "readonly_command_failed",
+        "p1-runner",
+        undefined,
+        {
+          command: trimmed,
+          result_id: result.id,
+          exit_code: result.exitCode,
+          duration_ms: result.durationMs,
+        },
+      );
+    }
+
+    // Persist to database
+    const now = new Date().toISOString();
+    withTransaction(this.database, () => {
+      this.database
+        .prepare(
+          `INSERT INTO readonly_command_results
+            (id, command, executable, args, verdict, stdout, stderr, exit_code, duration_ms, workspace_root, timestamp, error)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          result.id,
+          result.command,
+          result.executable,
+          JSON.stringify(result.args),
+          result.verdict,
+          result.stdout ?? null,
+          result.stderr ?? null,
+          result.exitCode ?? null,
+          result.durationMs ?? null,
+          result.workspaceRoot,
+          result.timestamp,
+          result.error ?? null,
+        );
+    });
+
+    return result;
+  }
+
+  /**
+   * List recent readonly command results.
+   */
+  listReadonlyCommandResults(limit = 50): ReadonlyCommandResult[] {
+    const rows = this.database
+      .prepare(
+        "SELECT * FROM readonly_command_results ORDER BY timestamp DESC LIMIT ?",
+      )
+      .all(Math.max(1, Math.min(limit, 200)))
+      .map(mapReadonlyCommandResult);
+
+    return rows.map((row) => {
+      let args: string[] = [];
+      try {
+        args = JSON.parse(row.args) as string[];
+      } catch {
+        // keep empty array
+      }
+      return {
+        id: row.id,
+        command: row.command,
+        executable: row.executable,
+        args,
+        verdict: row.verdict as "allowed_readonly" | "blocked",
+        stdout: row.stdout,
+        stderr: row.stderr,
+        exitCode: row.exit_code,
+        durationMs: row.duration_ms,
+        workspaceRoot: row.workspace_root,
+        timestamp: row.timestamp,
+        error: row.error,
+      };
+    });
+  }
+
+  // --- Lifecycle: Cancel task ---
 
   /**
    * Cancel a task that is in a cancellable state.
@@ -183,7 +324,7 @@ export class OperatorService {
 
     if (!cancellableTaskStates.has(task.status)) {
       throw new OperatorError(
-        `Task cannot be cancelled from "${task.status}". Only pending, queued, or awaiting-approval tasks can be cancelled.`,
+        "Task cannot be cancelled from \"" + task.status + "\". Only pending, queued, or awaiting-approval tasks can be cancelled.",
         409,
       );
     }
@@ -194,7 +335,6 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.transitionTask(task, "cancelled", now);
 
-      // Reject any pending-approval steps
       for (const step of steps) {
         if (step.status === "pending_approval") {
           this.transitionStep(step, "rejected", now);
@@ -209,25 +349,22 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-  // â”€â”€ Lifecycle: Retry / reopen task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- Lifecycle: Retry / reopen task ---
 
   /**
    * Retry a task from a terminal state.
    * Allowed from: failed, rejected, cancelled.
-   * Creates a new execution step, reusing the original action payload.
-   * Safe actions execute immediately; guarded actions await approval.
    */
   retryTask(taskId: string): TaskDetail {
     const task = this.requireTask(taskId);
 
     if (!retryableTaskStates.has(task.status)) {
       throw new OperatorError(
-        `Task cannot be retried from "${task.status}". Only failed, rejected, or cancelled tasks can be retried.`,
+        "Task cannot be retried from \"" + task.status + "\". Only failed, rejected, or cancelled tasks can be retried.",
         409,
       );
     }
 
-    // Get the most recent step to reuse its action type and payload
     const steps = this.getStepsForTask(taskId);
     const latestStep = steps[steps.length - 1];
     if (!latestStep) {
@@ -245,9 +382,7 @@ export class OperatorService {
 
       this.database
         .prepare(
-          `INSERT INTO execution_steps
-            (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           stepId,
@@ -282,7 +417,7 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-  // â”€â”€ Task CRUD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- Task CRUD ---
 
   createTask(input: CreateTaskInput): TaskDetail {
     const rawInput = input.rawInput.trim();
@@ -325,17 +460,13 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.database
         .prepare(
-          `INSERT INTO task_intents
-            (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO task_intents (id, raw_input, parsed_description, status, priority, product_lane, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(taskId, rawInput, rawInput.replace(/\s+/g, " "), taskStatus, priority, productLane, now, now);
 
       this.database
         .prepare(
-          `INSERT INTO execution_steps
-            (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at)
-           VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO execution_steps (id, task_id, step_number, action_type, action_payload, status, requires_approval, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           stepId,
@@ -458,7 +589,7 @@ export class OperatorService {
 
   /**
    * Record manual validation evidence for a task.
-   * Does NOT run any command — purely records human-pasted results.
+   * Does NOT run any command - purely records human-pasted results.
    */
   addValidationEvidence(
     taskId: string,
@@ -478,7 +609,7 @@ export class OperatorService {
 
     if (!validationStatuses.has(status)) {
       throw new OperatorError(
-        'Invalid validation status "' + status + '". Must be passed, failed, warning, or not_run.',
+        "Invalid validation status \"" + status + "\". Must be passed, failed, warning, or not_run.",
         400,
       );
     }
@@ -493,9 +624,7 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.database
         .prepare(
-          `INSERT INTO validation_evidence
-            (id, task_id, command_label, status, output, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO validation_evidence (id, task_id, command_label, status, output, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(evidenceId, taskId, trimmedLabel, status, output, now);
 
@@ -542,7 +671,6 @@ export class OperatorService {
       return { verdict: "needs_review", reasons };
     }
 
-    // SAFE_TO_REVIEW requires explicit evidence of all four validation gates
     const gates = allFourGatesPassed(validationText);
     if (!gates.allPassed) {
       return { verdict: "needs_review", reasons: gates.missing };
@@ -553,7 +681,7 @@ export class OperatorService {
 
   /**
    * Record a safe commit review for a task.
-   * Does NOT run git or any command — purely records human-pasted analysis.
+   * Does NOT run git or any command - purely records human-pasted analysis.
    */
   addCommitReview(
     taskId: string,
@@ -562,7 +690,7 @@ export class OperatorService {
     validationText: string,
     riskNotesText: string,
   ): TaskDetail {
-    const task = this.requireTask(taskId);
+    this.requireTask(taskId);
 
     if (summaryText.length > MAX_REVIEW_FIELD_LENGTH) {
       throw new OperatorError("Summary text must be 10,000 characters or fewer.", 400);
@@ -585,9 +713,7 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.database
         .prepare(
-          `INSERT INTO commit_reviews
-            (id, task_id, summary_text, changed_files_text, validation_text, risk_notes_text, verdict, reasons, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO commit_reviews (id, task_id, summary_text, changed_files_text, validation_text, risk_notes_text, verdict, reasons, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(reviewId, taskId, summaryText, changedFilesText, validationText, riskNotesText, verdict, JSON.stringify(reasons), now);
 
@@ -610,7 +736,6 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-
   /**
    * Build a deterministic markdown evidence bundle for a task.
    * Does NOT run any command, git, shell, or file scan.
@@ -620,21 +745,19 @@ export class OperatorService {
     const { task, steps, evidence, validation_evidence, commit_reviews, audit_events } = detail;
 
     const lines: string[] = [];
-    lines.push("# CHANTER Operator — Evidence Bundle", "");
+    lines.push("# CHANTER Operator \u2014 Evidence Bundle", "");
 
-    // Task metadata
     lines.push("## Task", "");
-    lines.push(`- **ID:** \`${task.id}\``);
-    lines.push(`- **Description:** ${task.raw_input}`);
-    lines.push(`- **Status:** ${task.status}`);
-    lines.push(`- **Product lane:** ${task.product_lane}`);
-    lines.push(`- **Priority:** ${task.priority}`);
-    lines.push(`- **Created:** ${task.created_at}`);
-    lines.push(`- **Updated:** ${task.updated_at}`);
-    lines.push(`- **Runner:** mock-only`);
-    lines.push(`- **Mode:** safe/review-only`, "");
+    lines.push("- **ID:** `" + task.id + "`");
+    lines.push("- **Description:** " + task.raw_input);
+    lines.push("- **Status:** " + task.status);
+    lines.push("- **Product lane:** " + task.product_lane);
+    lines.push("- **Priority:** " + task.priority);
+    lines.push("- **Created:** " + task.created_at);
+    lines.push("- **Updated:** " + task.updated_at);
+    lines.push("- **Runner:** mock-only");
+    lines.push("- **Mode:** safe/review-only", "");
 
-    // Execution steps
     lines.push("## Execution Steps", "");
     if (steps.length === 0) {
       lines.push("_No execution steps recorded._", "");
@@ -642,90 +765,83 @@ export class OperatorService {
       lines.push("| # | Action | Status | Created |");
       lines.push("|---|--------|--------|---------|");
       for (const s of steps) {
-        lines.push(`| ${s.step_number} | ${s.action_type} | ${s.status} | ${s.created_at} |`);
+        lines.push("| " + s.step_number + " | " + s.action_type + " | " + s.status + " | " + s.created_at + " |");
       }
       lines.push("");
     }
 
-    // Mock evidence
     lines.push("## Mock Evidence", "");
     if (evidence.length === 0) {
       lines.push("_No execution evidence recorded._", "");
     } else {
       for (const e of evidence) {
-        lines.push(`- **${e.exit_code} exit — \`${e.step_id}\`: _${e.validation_summary}_`);
+        lines.push("- **" + e.exit_code + " exit** \u2014 `" + e.step_id + "`: _" + e.validation_summary + "_");
       }
       lines.push("");
     }
 
-    // Manual validation evidence
     lines.push("## Manual Validation Evidence", "");
     if (validation_evidence.length === 0) {
       lines.push("_No manual validation evidence recorded._", "");
     } else {
       for (const v of validation_evidence) {
         const badge = v.status === "passed" ? "\u2705" : v.status === "failed" ? "\u274c" : v.status === "warning" ? "\u26a0\ufe0f" : "\u23f3";
-        lines.push(`- ${badge} **\`${v.command_label}\`** — ${v.status}`);
+        lines.push("- " + badge + " **`" + v.command_label + "`** \u2014 " + v.status);
         if (v.output) {
-          lines.push("  \`\`\`");
+          lines.push("  ```");
           const outputLines = v.output.split("\n");
           const truncated = outputLines.slice(0, 20).join("\n");
           lines.push(truncated);
           if (outputLines.length > 20) lines.push("  ... (output truncated)");
-          lines.push("  \`\`\`");
+          lines.push("  ```");
         }
       }
       lines.push("");
     }
 
-    // Safe commit review
     lines.push("## Safe Commit Review", "");
     if (commit_reviews.length === 0) {
       lines.push("_No commit reviews recorded._", "");
     } else {
       const latest = commit_reviews[0];
       const badge = latest.verdict === "blocked" ? "\u26d4 BLOCKED" : latest.verdict === "needs_review" ? "\u26a0\ufe0f NEEDS REVIEW" : "\u2705 SAFE TO REVIEW";
-      lines.push(`**Latest verdict:** ${badge}`, "");
+      lines.push("**Latest verdict:** " + badge, "");
       if (latest.reasons.length > 0) {
         lines.push("**Reasons:**");
         for (const r of latest.reasons) {
-          lines.push(`- ${r}`);
+          lines.push("- " + r);
         }
         lines.push("");
       }
       lines.push("### All Reviews", "");
       for (const cr of commit_reviews) {
-        lines.push(`- **${cr.verdict}** — ${cr.created_at}`);
+        lines.push("- **" + cr.verdict + "** \u2014 " + cr.created_at);
       }
       lines.push("");
     }
 
-    // Audit summary
     lines.push("## Audit Summary", "");
-    lines.push(`**Total audit events:** ${audit_events.length}`, "");
+    lines.push("**Total audit events:** " + audit_events.length, "");
     const eventCounts = new Map<string, number>();
     for (const ae of audit_events) {
       eventCounts.set(ae.event_type, (eventCounts.get(ae.event_type) || 0) + 1);
     }
     for (const [type, count] of [...eventCounts].sort()) {
-      lines.push(`- \`${type}\`: ${count}`);
+      lines.push("- `" + type + "`: " + count);
     }
     lines.push("");
 
-    // Safety disclaimer
     lines.push("---");
-    lines.push("> \u26a0\ufe0f **Evidence bundle only — no command was run.**");
+    lines.push("> \u26a0\ufe0f **Evidence bundle only \u2014 no command was run.**");
     lines.push("> Generated by CHANTER Operator (mock-only, local-first).", "");
 
     return { taskId, markdown: lines.join("\n") };
   }
 
-
   classifyRunnerPolicy(command: string): { verdict: "allowed_readonly" | "requires_approval" | "blocked"; reasons: string[] } {
     const normalized = command.trim();
     if (!normalized) return { verdict: "blocked", reasons: ["Empty command is blocked"] };
 
-    // Check exact allowlist matches first
     if (allowedReadonlyCommands.has(normalized)) {
       return { verdict: "allowed_readonly", reasons: ["Exact allowlisted read-only command"] };
     }
@@ -733,7 +849,6 @@ export class OperatorService {
       return { verdict: "requires_approval", reasons: ["Validation/build command requires explicit human approval"] };
     }
 
-    // Check for pipe/chain separators anywhere in the command
     if (normalized.includes(";")) {
       return { verdict: "blocked", reasons: ["Command separator (;) is blocked"] };
     }
@@ -747,7 +862,6 @@ export class OperatorService {
       return { verdict: "blocked", reasons: ["Pipe is blocked"] };
     }
 
-    // Check blocked prefixes
     const lower = normalized.toLowerCase();
     for (const rule of blockedPrefixes) {
       if (lower.startsWith(rule.prefix)) {
@@ -755,16 +869,15 @@ export class OperatorService {
       }
     }
 
-    // Default: blocked
-    return { verdict: "blocked", reasons: ["Command not found in any allowlist — blocked by default"] };
+    return { verdict: "blocked", reasons: ["Command not found in any allowlist \u2014 blocked by default"] };
   }
 
   /**
    * Preview runner policy for a proposed command.
-   * Does NOT run the command — purely deterministic classification.
+   * Does NOT run the command - purely deterministic classification.
    */
   previewRunnerPolicy(taskId: string, input: RunnerPolicyPreviewInput): TaskDetail {
-    const task = this.requireTask(taskId);
+    this.requireTask(taskId);
 
     if (input.proposedCommand.length > MAX_COMMAND_LENGTH) {
       throw new OperatorError("Proposed command must be 1,000 characters or fewer.", 400);
@@ -781,9 +894,7 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.database
         .prepare(
-          `INSERT INTO runner_policy_previews
-            (id, task_id, proposed_command, proposed_purpose, verdict, reasons, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO runner_policy_previews (id, task_id, proposed_command, proposed_purpose, verdict, reasons, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .run(previewId, taskId, input.proposedCommand, input.proposedPurpose, verdict, JSON.stringify(reasons), now);
 
@@ -804,8 +915,7 @@ export class OperatorService {
     return this.getTaskDetail(taskId);
   }
 
-    // ── Private helpers ──
-
+  // --- Private helpers ---
 
   private getStepsForTask(taskId: string): ExecutionStep[] {
     return this.database
@@ -833,7 +943,7 @@ export class OperatorService {
   private transitionStep(step: ExecutionStep, nextStatus: StepStatus, updatedAt: string): void {
     if (!canTransitionStep(step.status, nextStatus)) {
       throw new OperatorError(
-        `Execution step cannot transition from ${step.status} to ${nextStatus}.`,
+        "Execution step cannot transition from " + step.status + " to " + nextStatus + ".",
         409,
       );
     }
@@ -848,7 +958,7 @@ export class OperatorService {
   private transitionTask(task: TaskIntent, nextStatus: TaskStatus, updatedAt: string): void {
     if (!canTransitionTask(task.status, nextStatus)) {
       throw new OperatorError(
-        `Task cannot transition from ${task.status} to ${nextStatus}.`,
+        "Task cannot transition from " + task.status + " to " + nextStatus + ".",
         409,
       );
     }
@@ -911,9 +1021,7 @@ export class OperatorService {
     withTransaction(this.database, () => {
       this.database
         .prepare(
-          `INSERT INTO evidence
-            (id, task_id, step_id, stdout, stderr, exit_code, diff, validation_passed, validation_summary, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          "INSERT INTO evidence (id, task_id, step_id, stdout, stderr, exit_code, diff, validation_passed, validation_summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           evidence.id,

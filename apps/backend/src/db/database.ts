@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { CommitReview, Evidence, ExecutionStep, RunnerPolicyPreview, TaskIntent, ValidationEvidence } from "../types.js";
+import type { ReadonlyCommandResultRow } from "../services/operatorService.js";
 import { schema } from "./schema.js";
 
 type TaskRow = TaskIntent;
@@ -29,26 +30,19 @@ export function createDatabase(databasePath: string): DatabaseSync {
   }
 
   // P0.6 migration: update CHECK constraint to include 'cancelled' status.
-  // SQLite ALTER TABLE cannot modify CHECK constraints, so we recreate the table.
   try {
-    // Test if 'cancelled' is already valid by attempting a dry-run insert into a temp table.
-    // If the existing CHECK rejects it, we need to migrate.
     checkAndMigrateCancelled(database);
   } catch {
-    // Migration failed silently â€” affected databases should be recreated.
-    // This is acceptable for mock-only P0 development.
+    // Migration failed silently - affected databases should be recreated.
   }
 
   return database;
 }
 
 function checkAndMigrateCancelled(database: DatabaseSync): void {
-  // Use PRAGMA table_info to check if migration is needed by trying to create
-  // a temporary table with the updated constraint and copying data.
   try {
     database.exec("BEGIN IMMEDIATE;");
 
-    // Create new table with updated CHECK including 'cancelled'
     database.exec(`
       CREATE TABLE IF NOT EXISTS task_intents_mig (
         id TEXT PRIMARY KEY,
@@ -62,22 +56,13 @@ function checkAndMigrateCancelled(database: DatabaseSync): void {
       );
     `);
 
-    // Copy data from old table
     database.exec("INSERT INTO task_intents_mig SELECT * FROM task_intents;");
-
-    // Swap tables
     database.exec("DROP TABLE task_intents;");
     database.exec("ALTER TABLE task_intents_mig RENAME TO task_intents;");
-
-    // Recreate indexes
     database.exec("CREATE INDEX IF NOT EXISTS idx_steps_task_id ON execution_steps(task_id, step_number);");
     database.exec("CREATE INDEX IF NOT EXISTS idx_evidence_task_id ON evidence(task_id, created_at);");
-
     database.exec("COMMIT;");
   } catch {
-    // If migration fails (e.g., FK references), rollback and continue.
-    // The database will function with the old CHECK, but cancelled status
-    // transitions will be enforced in application logic.
     try { database.exec("ROLLBACK;"); } catch { /* ignore */ }
   }
 }
@@ -112,6 +97,10 @@ export function mapValidationEvidence(row: unknown): ValidationEvidence {
 export function mapEvidence(row: unknown): Evidence {
   const evidence = row as EvidenceRow;
   return { ...evidence, validation_passed: evidence.validation_passed === 1 };
+}
+
+export function mapReadonlyCommandResult(row: unknown): ReadonlyCommandResultRow {
+  return row as ReadonlyCommandResultRow;
 }
 
 export function withTransaction<T>(database: DatabaseSync, operation: () => T): T {

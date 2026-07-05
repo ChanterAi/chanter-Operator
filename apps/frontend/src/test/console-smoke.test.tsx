@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+﻿import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
@@ -17,7 +17,7 @@ import {
   mockTaskIntent,
 } from "./fixtures";
 
-// ── Helpers ──────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function mockAllApi() {
   vi.spyOn(client, "fetchHealth").mockResolvedValue(mockHealthHealthy);
@@ -28,7 +28,7 @@ function mockAllApi() {
   vi.spyOn(client, "rejectStep").mockResolvedValue(mockRejectedDetail);
 }
 
-// ── 1. App shell renders ─────────────────────────────────────────────
+// â”€â”€ 1. App shell renders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: Operator Console shell", () => {
   beforeEach(() => mockAllApi());
@@ -42,16 +42,16 @@ describe("P0.3 smoke: Operator Console shell", () => {
   });
 });
 
-// ── 2. Header agent/mode bar ─────────────────────────────────────────
+// â”€â”€ 2. Header agent/mode bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: header agent/mode bar", () => {
   beforeEach(() => mockAllApi());
 
-  it("displays Runner: Mock Adapter", async () => {
+  it("displays Runner: Mock + Read-only", async () => {
     render(<App />);
     const header = screen.getByRole("banner");
     expect(within(header).getByText("Runner")).toBeInTheDocument();
-    expect(within(header).getByText("Mock Adapter")).toBeInTheDocument();
+    expect(within(header).getByText("Mock + Read-only")).toBeInTheDocument();
   });
 
   it("displays Mode: Safe / Review-only", async () => {
@@ -61,15 +61,15 @@ describe("P0.3 smoke: header agent/mode bar", () => {
     expect(within(header).getByText("Safe / Review-only")).toBeInTheDocument();
   });
 
-  it("displays Execution: Contained Simulation", async () => {
+  it("displays Execution: Contained", async () => {
     render(<App />);
     const header = screen.getByRole("banner");
     expect(within(header).getByText("Execution")).toBeInTheDocument();
-    expect(within(header).getByText("Contained Simulation")).toBeInTheDocument();
+    expect(within(header).getByText("Contained")).toBeInTheDocument();
   });
 });
 
-// ── 3. Task intake form renders ──────────────────────────────────────
+// â”€â”€ 3. Task intake form renders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: task intake form", () => {
   beforeEach(() => mockAllApi());
@@ -90,7 +90,7 @@ describe("P0.3 smoke: task intake form", () => {
   });
 });
 
-// ── 4. Product lane selector ─────────────────────────────────────────
+// â”€â”€ 4. Product lane selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: product lane selector", () => {
   beforeEach(() => mockAllApi());
@@ -112,7 +112,7 @@ describe("P0.3 smoke: product lane selector", () => {
   });
 });
 
-// ── 5. User can create a mock task ───────────────────────────────────
+// â”€â”€ 5. User can create a mock task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: create mock task", () => {
   beforeEach(() => mockAllApi());
@@ -142,7 +142,7 @@ describe("P0.3 smoke: create mock task", () => {
   });
 });
 
-// ── 6. Created task appears in queue ─────────────────────────────────
+// â”€â”€ 6. Created task appears in queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: task appears in queue", () => {
   beforeEach(() => {
@@ -168,7 +168,7 @@ describe("P0.3 smoke: task appears in queue", () => {
   });
 });
 
-// ── 7. Completed flow: status, next action, evidence, audit ─────────
+// â”€â”€ 7. Completed flow: status, next action, evidence, audit â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: completed task detail and review", () => {
   it("shows task status completed in detail panel", async () => {
@@ -208,7 +208,7 @@ describe("P0.3 smoke: completed task detail and review", () => {
   });
 });
 
-// ── 8. No real execution controls ────────────────────────────────────
+// â”€â”€ 8. No real execution controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: no real execution controls", () => {
   beforeEach(() => mockAllApi());
@@ -248,7 +248,7 @@ describe("P0.3 smoke: no real execution controls", () => {
   });
 });
 
-// ── Awaiting approval state ──────────────────────────────────────────
+// â”€â”€ Awaiting approval state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: awaiting approval state", () => {
   it("shows Approve mock simulation as next action", async () => {
@@ -292,7 +292,7 @@ describe("P0.3 smoke: awaiting approval state", () => {
   });
 });
 
-// ── Rejected state ───────────────────────────────────────────────────
+// â”€â”€ Rejected state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: rejected state", () => {
   it("shows Retry available as next action in detail panel", async () => {
@@ -318,7 +318,7 @@ describe("P0.3 smoke: rejected state", () => {
   });
 });
 
-// ── Empty state ──────────────────────────────────────────────────────
+// â”€â”€ Empty state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.3 smoke: empty state", () => {
   it("shows empty state message when no task selected", async () => {
@@ -337,7 +337,7 @@ describe("P0.3 smoke: empty state", () => {
   });
 });
 
-// ── P0.5 Readiness Gate ──────────────────────────────────────────────
+// â”€â”€ P0.5 Readiness Gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.5 smoke: readiness gate renders healthy state", () => {
   beforeEach(() => {
@@ -470,7 +470,7 @@ describe("P0.5 smoke: no new real execution controls or wording", () => {
   });
 });
 
-// ── P0.6 Lifecycle Controls ──────────────────────────────────────────
+// â”€â”€ P0.6 Lifecycle Controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe("P0.6 smoke: lifecycle controls visible for allowed states", () => {
   it("shows Cancel button for awaiting_approval task", async () => {
@@ -1167,7 +1167,7 @@ describe("P0.9 evidence bundle export", () => {
       />,
     );
 
-    // Bundle textarea still not present — bundle was cleared on task switch
+    // Bundle textarea still not present â€” bundle was cleared on task switch
     const section2 = screen.getByText("Evidence bundle").closest("section")!;
     expect(section2.querySelector(".evidence-bundle-textarea")).toBeNull();
   });
@@ -1314,7 +1314,7 @@ describe("P0.10 runner policy preview", () => {
         proposed_command: "git push",
         proposed_purpose: "push",
         verdict: "blocked" as const,
-        reasons: ["git push is blocked — no remote pushes"],
+        reasons: ["git push is blocked â€” no remote pushes"],
         created_at: new Date().toISOString(),
       }],
     };
@@ -1342,7 +1342,7 @@ describe("P0.10 runner policy preview", () => {
         proposed_command: "rm -rf /tmp",
         proposed_purpose: "cleanup",
         verdict: "blocked" as const,
-        reasons: ["rm/del is blocked — no file deletion"],
+        reasons: ["rm/del is blocked â€” no file deletion"],
         created_at: new Date().toISOString(),
       }],
     };

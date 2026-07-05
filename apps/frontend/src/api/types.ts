@@ -1,4 +1,4 @@
-export type ActionType =
+﻿export type ActionType =
   | "analysis"
   | "read_file"
   | "file_write"
@@ -134,33 +134,40 @@ export function recommendNextAction(detail: TaskDetail): RecommendedAction {
   const task = detail.task;
   const step = detail.steps[0];
 
-  // P0.6: terminal retryable states should surface Retry, not "no further action".
   if (canRetryTask(task.status)) return "Retry available";
-
   if (task.status === "completed" && step?.status === "completed") return "Task complete";
-
   if (task.status === "awaiting_approval" && step?.status === "pending_approval") {
     return "Approve mock simulation";
   }
-
   if (task.status === "completed" || task.status === "executing" || task.status === "queued") {
     return "Review evidence";
   }
-
   return "Blocked / invalid";
 }
 
-/** States where cancel is a valid lifecycle action. */
 export function canCancelTask(status: string): boolean {
   return status === "pending" || status === "queued" || status === "awaiting_approval";
 }
 
-/** Terminal states where retry is a valid lifecycle action. */
 export function canRetryTask(status: string): boolean {
   return status === "failed" || status === "rejected" || status === "cancelled";
 }
 
-// â”€â”€ P0.5 Readiness Gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// P1.0 Readonly Command Result
+export interface ReadonlyCommandResult {
+  id: string;
+  command: string;
+  executable: string;
+  args: string[];
+  verdict: "allowed_readonly" | "blocked";
+  stdout: string | null;
+  stderr: string | null;
+  exitCode: number | null;
+  durationMs: number | null;
+  workspaceRoot: string;
+  timestamp: string;
+  error: string | null;
+}
 
 export interface HealthIntegrity {
   healthy: boolean;

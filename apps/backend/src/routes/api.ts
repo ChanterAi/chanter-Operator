@@ -88,8 +88,6 @@ export function createApiRouter(service: OperatorService): Router {
     response.json(service.rejectStep(request.params.stepId, reason));
   });
 
-
-
   router.post("/tasks/:taskId/runner-policy-previews", (request, response) => {
     const proposedCommand = typeof request.body?.proposedCommand === "string" ? request.body.proposedCommand : "";
     const proposedPurpose = typeof request.body?.proposedPurpose === "string" ? request.body.proposedPurpose : "";
@@ -123,6 +121,28 @@ export function createApiRouter(service: OperatorService): Router {
     const parsedLimit = Number(request.query.limit ?? 50);
     const limit = Number.isFinite(parsedLimit) ? parsedLimit : 50;
     response.json({ events: service.listAuditEvents(limit) });
+  });
+
+  // P1.0: Read-only command runner endpoints
+  router.post("/commands/run", async (request, response) => {
+    try {
+      const command = typeof request.body?.command === "string" ? request.body.command : "";
+      const result = await service.runReadonlyCommand(command);
+      response.status(201).json(result);
+    } catch (error) {
+      if (error instanceof Error && "statusCode" in error) {
+        const opErr = error as Error & { statusCode: number };
+        response.status(opErr.statusCode).json({ error: opErr.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  router.get("/commands/results", (request, response) => {
+    const parsedLimit = Number(request.query.limit ?? 50);
+    const limit = Number.isFinite(parsedLimit) ? parsedLimit : 50;
+    response.json({ results: service.listReadonlyCommandResults(limit) });
   });
 
   return router;
