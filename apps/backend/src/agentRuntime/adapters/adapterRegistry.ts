@@ -28,6 +28,40 @@ export interface AdapterSafetyExclusion {
   description: string;
 }
 
+// ── Governance (P1.6) ──
+
+/** Declared risk level for a registered adapter. */
+export const AdapterRiskLevels = ["low", "medium", "high"] as const;
+
+export type AdapterRiskLevel = (typeof AdapterRiskLevels)[number];
+
+/** Declared availability of a registered adapter. */
+export const AdapterAvailabilities = ["available", "blocked", "deprecated"] as const;
+
+export type AdapterAvailability = (typeof AdapterAvailabilities)[number];
+
+/**
+ * Governance declaration for a registered adapter (P1.6).
+ * Purely declarative — consumed by the readiness gate for display.
+ * Nothing here executes, schedules, or authorizes anything.
+ */
+export interface AdapterGovernance {
+  /** Declared risk level of the product this adapter represents. */
+  riskLevel: AdapterRiskLevel;
+  /** Whether runs mapped through this adapter require human approval. */
+  requiresApproval: boolean;
+  /** Contract-level actions the adapter is allowed to perform (mapping only). */
+  allowedActions: string[];
+  /** Actions the adapter must never perform. */
+  forbiddenActions: string[];
+  /** Evidence kinds a run must supply before it can be considered complete. */
+  evidenceRequirements: string[];
+  /** Validation commands the contract expects (declarative — never run by Operator). */
+  validationCommands: string[];
+  /** Declared availability of the adapter. */
+  availability: AdapterAvailability;
+}
+
 /** Metadata for a single registered adapter. */
 export interface AgentRuntimeAdapterMetadata {
   /** Unique adapter identifier. */
@@ -50,6 +84,8 @@ export interface AgentRuntimeAdapterMetadata {
   safetyNotes: string[];
   /** What this adapter explicitly does NOT do. */
   exclusions: AdapterSafetyExclusion[];
+  /** Governance declaration consumed by the P1.6 readiness gate. */
+  governance: AdapterGovernance;
 }
 
 /** The full adapter catalog. */
@@ -100,6 +136,15 @@ const LOOP_GOVERNOR_META: AgentRuntimeAdapterMetadata = {
     { category: "cross-repo", description: "No cross-repo imports" },
     { category: "deployment", description: "No deployment changes" },
   ],
+  governance: {
+    riskLevel: "low",
+    requiresApproval: false,
+    allowedActions: ["map_source_state", "build_manifest", "validate_input", "serialize_manifest"],
+    forbiddenActions: ["execute_loop", "run_agents", "shell_execution", "network_access", "deployment"],
+    evidenceRequirements: ["loop iteration log reference", "git snapshot hash"],
+    validationCommands: ["npm test", "npm run typecheck"],
+    availability: "available",
+  },
 };
 
 const SAFECOMMIT_META: AgentRuntimeAdapterMetadata = {
@@ -132,6 +177,15 @@ const SAFECOMMIT_META: AgentRuntimeAdapterMetadata = {
     { category: "cross-repo", description: "No cross-repo imports" },
     { category: "deployment", description: "No deployment changes" },
   ],
+  governance: {
+    riskLevel: "medium",
+    requiresApproval: true,
+    allowedActions: ["map_source_state", "build_manifest", "validate_input", "serialize_manifest"],
+    forbiddenActions: ["git_add", "git_commit", "git_push", "git_merge", "git_rebase", "shell_execution", "network_access"],
+    evidenceRequirements: ["diff summary reference", "risk classification record", "check run results"],
+    validationCommands: ["npm test", "npm run typecheck"],
+    availability: "available",
+  },
 };
 
 const AUTOPOSTER_META: AgentRuntimeAdapterMetadata = {
@@ -169,6 +223,15 @@ const AUTOPOSTER_META: AgentRuntimeAdapterMetadata = {
     { category: "cross-repo", description: "No cross-repo imports" },
     { category: "deployment", description: "No deployment changes" },
   ],
+  governance: {
+    riskLevel: "high",
+    requiresApproval: true,
+    allowedActions: ["map_source_state", "build_manifest", "validate_input", "serialize_manifest"],
+    forbiddenActions: ["social_posting", "social_api_calls", "scheduler", "token_handling", "network_access"],
+    evidenceRequirements: ["content preview reference", "account scope record", "job record"],
+    validationCommands: ["npm test", "npm run typecheck"],
+    availability: "available",
+  },
 };
 
 // ── Catalog ──
