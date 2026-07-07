@@ -1,9 +1,11 @@
-// ── CHANTER Operator P1A: Operator Runtime Bridge ──
+// ── CHANTER Operator P1A/P2A: Operator Runtime Bridge ──
 //
-// Composes the mirrored chanter-agent-runtime primitives (contract.ts,
-// redaction.ts, tasks.ts, evidence.ts, policy.ts, providerRouting.ts) into
-// the Operator-facing bridge API. This is the module Operator code should
-// import from — everything else in runtimeBridge/ is plumbing.
+// Composes the runtimeBridge primitives — contract.ts, redaction.ts, and
+// policy.ts/providerRouting.ts (now real `chanter-agent-runtime` imports,
+// see contract.ts), plus tasks.ts/evidence.ts (Operator-specific redaction
+// hardening on top of the shared contract) — into the Operator-facing
+// bridge API. This is the module Operator code should import from —
+// everything else in runtimeBridge/ is plumbing.
 //
 // Decision-only, contract-only:
 //   - Represents Operator work as CHANTER runtime tasks.
@@ -16,7 +18,9 @@
 //     vocabulary, without registering into the closed P1.5 adapter catalog
 //     (see the readiness section below for why).
 //
-// No execution. No network. No cross-repo imports. No commits/deploys/posts.
+// No execution. No network. No commits/deploys/posts. (contract/policy/
+// provider-routing/redaction depend on the real chanter-agent-runtime
+// package, but nothing here calls out to another CHANTER product at runtime.)
 
 import type { ActionType } from "../../types.js";
 import type { AdapterReadinessStatus } from "../adapters/adapterReadiness.js";
@@ -267,9 +271,9 @@ const IMPLEMENTED_PRIMITIVES: OperatorRuntimeBridgePrimitive[] = [
   "adapter-contract",
 ];
 
-/** Explicitly out of scope for P1A — decision-only bridge, not an execution engine. */
+/** Explicitly out of scope for P1A/P2A — decision-only bridge, not an execution engine. */
 const NOT_YET_IMPLEMENTED: string[] = [
-  "Direct package dependency on chanter-agent-runtime — this module is a structural mirror; see contract.ts for the cross-repo-import rationale.",
+  "Direct package dependency on chanter-agent-runtime's generic adapter-contract types (RuntimeAdapterInputEnvelope/RuntimeAdapterResult/RuntimeProductAdapter, §5 below) — those remain a structural mirror in this file. The core contract, policy, provider-routing, and redaction modules (contract.ts/policy.ts/providerRouting.ts/redaction.ts) now import the real cross-repo package instead of mirroring it (see P2A).",
   "'delete' action dry-run preview — blocked by default per the shared policy contract (policy.ts).",
   "Real provider/model invocation — selectOperatorProviderRoute is candidate selection only, never a network/model call.",
   "Wiring into Operator's live routes/API — this loop is a backend module addition, not a route or UI change.",
@@ -315,7 +319,7 @@ export function deriveOperatorRuntimeBridgeReadiness(
     usable: true,
     reasons: [
       "All required runtime-bridge primitives are implemented (task mapping, action policy, evidence bundle, provider routing, redaction, adapter contract).",
-      "Contract-only and decision-only: no execution, no network, no cross-repo imports.",
+      "Decision-only: no execution, no network, no calls out to another CHANTER product at runtime.",
     ],
     supportedPrimitives: implementedPrimitives,
     notImplemented,

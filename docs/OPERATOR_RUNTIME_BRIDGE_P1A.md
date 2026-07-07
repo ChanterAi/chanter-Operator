@@ -1,8 +1,14 @@
 # CHANTER Operator — Runtime Bridge (P1A)
 
+> **Superseded in part by [P2A](./OPERATOR_RUNTIME_BRIDGE_P2A.md):** as of P2A, `contract.ts`,
+> `policy.ts`, `providerRouting.ts`, and `redaction.ts` are real imports from the
+> `chanter-agent-runtime` package rather than the hand-mirrored copies described below. This
+> document is kept as the historical record of the P1A decision; see P2A for the current state.
+> `tasks.ts`/`evidence.ts` and the rest of this doc are still accurate.
+
 ## Status
 
-**Contract-only, decision-only bridge.** No execution. No network. No cross-repo imports. Not wired into any route/API/UI.
+**Contract-only, decision-only bridge.** No execution. No network. Not wired into any route/API/UI.
 
 ## Overview
 

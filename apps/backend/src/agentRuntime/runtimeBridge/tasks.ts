@@ -1,11 +1,13 @@
-// ── CHANTER Operator P1A: Runtime Bridge — Task Lifecycle Mirror ──
+// ── CHANTER Operator P1A/P2A: Runtime Bridge — Task Lifecycle ──
 //
-// Structural mirror of chanter-agent-runtime's `src/tasks.ts` (see
-// contract.ts for the "why mirrored, not imported" rationale). Every
-// function here is pure: it takes a RuntimeTask and returns a new
-// RuntimeTask, never mutating its input.
+// Built on top of the shared chanter-agent-runtime contract (contract.ts —
+// now a real import, see P2A) but deliberately NOT a byte-for-byte mirror of
+// upstream's `src/tasks.ts`: this file redacts `objective`/result and
+// validation `summary` fields that upstream doesn't (see redaction.ts for
+// the full rationale). Every function here is pure: it takes a RuntimeTask
+// and returns a new RuntimeTask, never mutating its input.
 //
-// No execution. No network. No cross-repo imports.
+// No execution. No network.
 
 import type {
   JsonValue,

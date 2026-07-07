@@ -1,11 +1,14 @@
-// ── CHANTER Operator P1A: Runtime Bridge — Evidence Bundle Mirror ──
+// ── CHANTER Operator P1A/P2A: Runtime Bridge — Evidence Bundle ──
 //
-// Structural mirror of chanter-agent-runtime's `src/evidence.ts` (see
-// contract.ts for the "why mirrored, not imported" rationale). These are the
-// two "export" shapes the bridge produces for outside consumption: a
-// compact JSON-safe bundle and a human-readable review summary.
+// Built on top of the shared chanter-agent-runtime contract (contract.ts —
+// now a real import, see P2A) but deliberately NOT a byte-for-byte mirror of
+// upstream's `src/evidence.ts`: this file re-redacts `objective`/result and
+// validation `summary` fields that upstream doesn't (see redaction.ts for
+// the full rationale). These are the two "export" shapes the bridge
+// produces for outside consumption: a compact JSON-safe bundle and a
+// human-readable review summary.
 //
-// No execution. No network. No cross-repo imports.
+// No execution. No network.
 
 import type {
   RuntimeEvent,
