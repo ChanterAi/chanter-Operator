@@ -16,7 +16,9 @@
     "release:scan": "node tools/release-operator/release-operator.mjs scan",
     "release:report": "node tools/release-operator/release-operator.mjs report",
     "release:gates": "node tools/release-operator/release-operator.mjs gates",
-    "release:test": "node --test \"tools/release-operator/tests/*.test.mjs\""
+    "release:test": "node --test \"tools/release-operator/tests/*.test.mjs\"",
+    "mission:compile": "node tools/mission-compiler/mission-compiler.mjs",
+    "mission:test": "node --test \"tools/mission-compiler/tests/*.test.mjs\""
   },
   "engines": {
     "node": ">=22.13.0"

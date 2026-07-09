@@ -9,3 +9,4 @@ data/audit.jsonl
 .env
 .DS_Store
 tools/release-operator/reports/
+tools/mission-compiler/reports/
