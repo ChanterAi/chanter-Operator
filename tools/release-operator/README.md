@@ -26,10 +26,17 @@ node tools/release-operator/release-operator.mjs report --out "..\..\CHANTER_REL
 
 ## What it reports
 
+- **Verdict:** a one-line `ALL CLEAR` / `NEEDS ATTENTION` summary at the
+  top of the report (and after the scan table), naming any repo that
+  requires operator review.
 - **Per repo:** branch, latest commit, remote URL, ahead/behind counts,
   dirty files, and a classification:
   `clean-synced | ahead | behind | diverged | dirty | no-remote |
   no-upstream | not-a-git-repo | non-git-expected | missing`
+- **Next actions:** a numbered list of suggested read-only follow-up
+  commands per anomalous repo (e.g. `git -C "<path>" status` for a dirty
+  tree). Suggestions only — the tool never executes them, and every
+  mutating follow-up stays approval-gated.
 - **Warnings:** unexpected branch, remote mismatch, nested-repo toplevel
   mismatch (wrapper folders never inherit a parent repo's state).
 - **Gates:** global blocked actions, per-repo blocked commands, and

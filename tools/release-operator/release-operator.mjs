@@ -20,7 +20,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanAll } from './lib/git-scan.mjs';
 import { checkRootDocs, readFixQueue } from './lib/docs-truth.mjs';
-import { generateReport } from './lib/report.mjs';
+import { generateReport, verdictSummary } from './lib/report.mjs';
 
 const toolDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +75,7 @@ function cmdScan(args) {
     console.log(JSON.stringify(scans, null, 2));
   } else {
     printScanTable(scans);
+    console.log(`\n${verdictSummary(scans)}`);
   }
   if (args.includes('--strict')) {
     const bad = scans.filter((r) => !OK_STATES.has(r.classification.state));

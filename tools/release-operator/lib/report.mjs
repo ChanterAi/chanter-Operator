@@ -12,6 +12,46 @@ function shortCommit(record) {
   return `\`${record.lastCommit.hash}\` ${record.lastCommit.date.slice(0, 10)}`;
 }
 
+// States that need no operator action (mirrors the strict-scan allowlist).
+const OK_STATES = new Set(['clean-synced', 'no-remote', 'non-git-expected']);
+
+// One-line operator verdict: what the whole scan means, before any table.
+export function verdictSummary(scans) {
+  const attention = scans.filter((r) => !OK_STATES.has(r.classification.state));
+  if (attention.length === 0) {
+    return `ALL CLEAR — ${scans.length} repos scanned; every repo is clean-synced, intentionally local-only, or expected non-git.`;
+  }
+  const list = attention.map((r) => `${r.name} (${stateBadge(r.classification)})`).join(', ');
+  return `NEEDS ATTENTION — ${attention.length} of ${scans.length} repos require operator review: ${list}.`;
+}
+
+// Suggested next command per anomalous state. Text only: the Release
+// Operator never executes these — they are for the human operator, and
+// every mutating follow-up (push, deletion, force anything) stays
+// approval-gated exactly as CHANTER_SECURITY_GATES.md defines.
+function nextActionFor(r) {
+  const repoPath = r.path || r.name;
+  const git = (sub) => `\`git -C "${repoPath}" ${sub}\``;
+  switch (r.classification.state) {
+    case 'dirty':
+      return `review the working tree with ${git('status')}, then commit locally or restore; tracked-file deletion and any push remain approval-gated.`;
+    case 'ahead':
+      return `local commits are not on origin — review ${git('log --oneline @{upstream}..HEAD')}; pushing requires explicit approval.`;
+    case 'behind':
+      return `origin has newer commits — review ${git('log --oneline HEAD..@{upstream}')}; fast-forwarding is a user decision.`;
+    case 'diverged':
+      return `local and origin histories diverged — review both sides with ${git('log --oneline --left-right @{upstream}...HEAD')}; force-push is never an option (approval-gated).`;
+    case 'no-upstream':
+      return `branch has no upstream — inspect ${git('branch -vv')}; setting a tracking branch is a user decision.`;
+    case 'missing':
+      return 'path not found — verify the entry in `tools/release-operator/chanter.repos.json` against the workspace.';
+    case 'not-a-git-repo':
+      return 'expected a git repo but none found — verify the catalog entry or mark it `"git": false` if intentional.';
+    default:
+      return null;
+  }
+}
+
 export function summaryTable(scans) {
   const lines = [
     '| Repo | Branch | Last commit | State | Remote |',
@@ -38,6 +78,11 @@ export function generateReport({ scans, config, rootDocs, fixQueue, generatedAt 
   out.push('> READ-ONLY GUARANTEE: this report was produced by allowlisted read-only git');
   out.push('> commands (`status`, `log`, `rev-parse`, `remote`) plus root-doc reads.');
   out.push('> Nothing was pushed, deployed, published, migrated, installed, or mutated.');
+  out.push('');
+
+  out.push('## Verdict');
+  out.push('');
+  out.push(`**${verdictSummary(scans)}**`);
   out.push('');
 
   out.push('## Repo state summary');
@@ -67,6 +112,19 @@ export function generateReport({ scans, config, rootDocs, fixQueue, generatedAt 
       }
       for (const w of r.warnings) out.push(`  - warning: ${w}`);
     }
+  }
+  out.push('');
+
+  out.push('## Next actions (suggestions only — this tool never runs them)');
+  out.push('');
+  const actions = scans
+    .map((r) => ({ r, action: nextActionFor(r) }))
+    .filter((entry) => entry.action);
+  if (actions.length === 0) {
+    out.push('None — no repo needs operator action. After the next change, regenerate evidence with `npm run release:scan -- --strict` and `npm run release:report`.');
+  } else {
+    actions.forEach(({ r, action }, i) => out.push(`${i + 1}. **${r.name}** — ${action}`));
+    out.push(`${actions.length + 1}. Re-run \`npm run release:scan -- --strict\` until it reports every repo clean.`);
   }
   out.push('');
 

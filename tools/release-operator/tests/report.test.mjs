@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateReport, summaryTable } from '../lib/report.mjs';
+import { generateReport, summaryTable, verdictSummary } from '../lib/report.mjs';
 
 const fakeScans = [
   {
@@ -20,6 +20,16 @@ const fakeScans = [
     hasRemote: false,
     warnings: ["branch is 'master', expected 'main'"],
     classification: { state: 'dirty', flags: ['ahead 1'] },
+  },
+  {
+    name: 'repo-ahead',
+    path: 'apps/repo-ahead',
+    status: { branch: 'main', dirtyFiles: [] },
+    lastCommit: { hash: 'aaa9999', date: '2026-07-09 11:00:00 +0300', subject: 'local only' },
+    remoteUrl: 'https://github.com/example/repo-ahead.git',
+    hasRemote: true,
+    warnings: [],
+    classification: { state: 'ahead', flags: ['ahead 2'] },
   },
 ];
 
@@ -87,4 +97,42 @@ test('report notes when all repos are clean', () => {
     generatedAt: '2026-07-09T12:00:00.000Z',
   });
   assert.match(report, /None\. All repos are clean\/synced/);
+});
+
+test('verdict summarizes attention repos with their states', () => {
+  assert.match(
+    verdictSummary(fakeScans),
+    /^NEEDS ATTENTION — 2 of 3 repos require operator review: repo-dirty \(dirty \(ahead 1\)\), repo-ahead \(ahead \(ahead 2\)\)\.$/
+  );
+  assert.match(
+    verdictSummary([fakeScans[0]]),
+    /^ALL CLEAR — 1 repos scanned/
+  );
+});
+
+test('report leads with the verdict and suggests read-only next actions', () => {
+  const report = generateReport({
+    scans: fakeScans,
+    config: fakeConfig,
+    rootDocs: fakeRootDocs,
+    fixQueue: fakeFixQueue,
+    generatedAt: '2026-07-09T12:00:00.000Z',
+  });
+  assert.match(report, /## Verdict\n\n\*\*NEEDS ATTENTION — 2 of 3 repos/);
+  assert.match(report, /## Next actions \(suggestions only — this tool never runs them\)/);
+  assert.match(report, /\*\*repo-dirty\*\* — review the working tree with `git -C "repo-dirty" status`/);
+  assert.match(report, /\*\*repo-ahead\*\* — local commits are not on origin — review `git -C "apps\/repo-ahead" log --oneline @\{upstream\}\.\.HEAD`; pushing requires explicit approval\./);
+  assert.match(report, /Re-run `npm run release:scan -- --strict` until it reports every repo clean\./);
+});
+
+test('all-clean report says no next actions are needed', () => {
+  const report = generateReport({
+    scans: [fakeScans[0]],
+    config: fakeConfig,
+    rootDocs: fakeRootDocs,
+    fixQueue: fakeFixQueue,
+    generatedAt: '2026-07-09T12:00:00.000Z',
+  });
+  assert.match(report, /## Verdict\n\n\*\*ALL CLEAR — 1 repos scanned/);
+  assert.match(report, /None — no repo needs operator action\./);
 });
