@@ -1,0 +1,179 @@
+{
+  "_comment": "CHANTER repo catalog for Release Operator P0. Mirrors CHANTER_PRODUCT_REGISTRY.md and CHANTER_SECURITY_GATES.md (those root docs are authoritative). chanterRoot is relative to this file's directory. Read-only scanning only — this config never authorizes push/deploy/publish/migration.",
+  "chanterRoot": "../../../..",
+  "rootDocs": [
+    "CHANTER_PRODUCT_REGISTRY.md",
+    "CHANTER_FULL_STACK_STATUS.md",
+    "CHANTER_SECURITY_GATES.md",
+    "CHANTER_DATABASE_STATE_MAP.md",
+    "CHANTER_RELEASE_CHECKLIST.md",
+    "CHANTER_FIX_QUEUE.md",
+    "CHANTER_MAX_FINALIZATION_REPORT.md"
+  ],
+  "livePublishPhrase": "I approve the controlled live publish test.",
+  "globalGates": [
+    "No `git push` / force push (all repos) without approval",
+    "No deploy (Render/Vercel/Firebase/…) without approval",
+    "No TikTok/Instagram live publish without the exact approval phrase",
+    "No migration (`migrate:firestore*` etc.) without approval",
+    "No `scheduler:ping`",
+    "No MCP `insert-p3b.js` / `insert-p3b.mjs` execution (one-time inserts already executed — re-run corrupts state)",
+    "No Firestore/SQLite/export production-state mutation",
+    "No dependency installs/updates or lockfile churn without approval",
+    "No secret exposure: never print `.env` values or inspect credentials/tokens",
+    "No auth/OAuth/CORS/CSP/cookie model weakening",
+    "No deletion/archive of tracked files without approval",
+    "No real trading integration (CryptoRadar is PAPER TRADING ONLY)",
+    "No Loop Governor danger/full-access modes",
+    "No uncontrolled external write APIs"
+  ],
+  "repos": [
+    {
+      "name": "chanter-auto-poster",
+      "path": "apps/chanter-auto-poster",
+      "defaultBranch": "main",
+      "expectedRemote": "github.com/cchanter1-art/chanter-auto-poster.git",
+      "role": "Public product — TikTok/Instagram scheduling/publishing",
+      "deployTarget": "Render (poster.chanterr.com)",
+      "blockedCommands": [
+        "npm run scheduler:ping",
+        "npm run migrate:firestore",
+        "npm run migrate:firestore:dry-run",
+        "any TikTok/Instagram live publish script",
+        "deploy",
+        "git push"
+      ],
+      "approvalPending": [
+        "Controlled live publish test — requires the exact approval phrase"
+      ]
+    },
+    {
+      "name": "chanter-premium-site",
+      "path": "apps/chanter-premium-site",
+      "defaultBranch": "main",
+      "expectedRemote": "github.com/cchanter1-art/chanter-site.git",
+      "role": "Brand surface — public site",
+      "deployTarget": "Vercel",
+      "blockedCommands": ["deploy", "git push", "enabling orphaned API routes"],
+      "approvalPending": [
+        "Orphaned API routes (api/creator-kit.js, api/subtitle-engine.js) — secure or remove before any deploy that activates them"
+      ]
+    },
+    {
+      "name": "chanter-mcp-server",
+      "path": "apps/chanter-mcp-server",
+      "defaultBranch": "main",
+      "expectedRemote": "github.com/cchanter1-art/chanter-mcp-server.git",
+      "role": "Control layer — MCP server",
+      "blockedCommands": [
+        "node insert-p3b.js",
+        "node insert-p3b.mjs",
+        "git push"
+      ],
+      "approvalPending": [
+        "Archive/delete insert-p3b.js / insert-p3b.mjs (landmine scripts at repo root — DO NOT RUN)"
+      ]
+    },
+    {
+      "name": "chanter-loop.governor",
+      "path": "apps/chanter-loop.governor",
+      "defaultBranch": "main",
+      "expectedRemote": "github.com/cchanter1-art/chanter-loop-governor.git",
+      "role": "Control layer — loop governor CLI",
+      "blockedCommands": [
+        "any danger/full-access mode (--sandbox danger-full-access)",
+        "real external agent execution",
+        "git push"
+      ],
+      "approvalPending": [
+        "default_agent decision: set to 'mock' OR deliberately enable codex (currently mismatched)"
+      ]
+    },
+    {
+      "name": "chanter-Operator",
+      "path": "apps/chanter-Operator",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Control layer — operator console (local-only, no auth; must never be exposed)",
+      "blockedCommands": ["exposing to network as-is", "live external control"],
+      "approvalPending": []
+    },
+    {
+      "name": "chanter-agent-runtime",
+      "path": "apps/chanter-agent-runtime",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Runtime library — agent runtime foundation",
+      "blockedCommands": [],
+      "approvalPending": []
+    },
+    {
+      "name": "chanter-SafeCommit",
+      "path": "apps/chanter-SafeCommit",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Control layer — commit-safety CLI (advisory scope by design)",
+      "blockedCommands": [],
+      "approvalPending": ["Delete stray tracked file `t` (P3)"]
+    },
+    {
+      "name": "chanter-memory-vault",
+      "path": "apps/chanter-memory-vault",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Memory layer — durable memory vault CLI",
+      "blockedCommands": [
+        "any mutation of memory/vault.sqlite outside the CLI's tested paths",
+        "committing vault contents/raw/exports",
+        "schema changes (blocked until backup/migration/rollback docs exist)"
+      ],
+      "approvalPending": []
+    },
+    {
+      "name": "chanter-clean.engine",
+      "path": "apps/chanter-clean.engine",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Public product candidate — photo restoration engine (local dev)",
+      "blockedCommands": ["web exposure without prior security review"],
+      "approvalPending": []
+    },
+    {
+      "name": "chanter-crypto-radar",
+      "path": "apps/chanter-CryptoRadar/chanter-crypto-radar",
+      "defaultBranch": "main",
+      "expectedRemote": "github.com/cchanter1-art/chanter-crypto-radar.git",
+      "role": "Parked experiment — crypto radar (PAPER TRADING ONLY)",
+      "blockedCommands": [
+        "ANY real trading integration",
+        "API-key introduction",
+        "deploy (vercel.json exists but no live evidence)",
+        "git push"
+      ],
+      "approvalPending": [
+        "Remove src_old/ legacy tree (P2)",
+        "Refresh stale status doc (P2)"
+      ]
+    },
+    {
+      "name": "CinemaForge",
+      "path": "apps/chanter-cinemaforge/CinemaForge",
+      "defaultBranch": "master",
+      "expectedRemote": null,
+      "role": "Desktop tool — video editor (PARKED)",
+      "blockedCommands": ["committing new binaries"],
+      "approvalPending": [
+        "Dedupe FFmpeg binaries (tracked twice, ~614MB) (P2)",
+        "Archive 3 loose incident files in wrapper (P2)"
+      ]
+    },
+    {
+      "name": "_scratch_safecommit_agentRuntime",
+      "path": "apps/_scratch_safecommit_agentRuntime",
+      "git": false,
+      "role": "Parked experiment — scratch prototype (ARCHIVE, non-git)",
+      "blockedCommands": [],
+      "approvalPending": ["Formal archive/move decision (P3)"]
+    }
+  ]
+}

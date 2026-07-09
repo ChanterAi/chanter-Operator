@@ -8,3 +8,4 @@ data/*.sqlite-*
 data/audit.jsonl
 .env
 .DS_Store
+tools/release-operator/reports/

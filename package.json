@@ -12,7 +12,11 @@
     "test": "npm run test --workspace @chanter/operator-backend && npm run test --workspace @chanter/operator-frontend",
     "test:backend": "npm run test --workspace @chanter/operator-backend",
     "test:frontend": "npm run test --workspace @chanter/operator-frontend",
-    "typecheck": "npm run typecheck --workspace @chanter/operator-backend && npm run typecheck --workspace @chanter/operator-frontend"
+    "typecheck": "npm run typecheck --workspace @chanter/operator-backend && npm run typecheck --workspace @chanter/operator-frontend",
+    "release:scan": "node tools/release-operator/release-operator.mjs scan",
+    "release:report": "node tools/release-operator/release-operator.mjs report",
+    "release:gates": "node tools/release-operator/release-operator.mjs gates",
+    "release:test": "node --test \"tools/release-operator/tests/*.test.mjs\""
   },
   "engines": {
     "node": ">=22.13.0"
