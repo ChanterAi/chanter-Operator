@@ -3,12 +3,16 @@ import { AuditStorageError } from "./audit/auditLogger.js";
 import type { OperatorService } from "./services/operatorService.js";
 import { OperatorError } from "./services/operatorService.js";
 import { createApiRouter } from "./routes/api.js";
+import type { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
 
-export function createApp(service: OperatorService) {
+export function createApp(
+  service: OperatorService,
+  runtimeMissionService?: AutoPosterMissionService,
+) {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "32kb" }));
-  app.use("/api", createApiRouter(service));
+  app.use("/api", createApiRouter(service, runtimeMissionService));
 
   app.use((_request, response) => {
     response.status(404).json({ error: "Route was not found." });

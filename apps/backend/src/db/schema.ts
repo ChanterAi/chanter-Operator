@@ -94,6 +94,33 @@ CREATE TABLE IF NOT EXISTS readonly_command_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_readonly_command_results_timestamp ON readonly_command_results(timestamp);
+
+CREATE TABLE IF NOT EXISTS autoposter_runtime_missions (
+  mission_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  product TEXT NOT NULL CHECK (product = 'auto_poster'),
+  action TEXT NOT NULL CHECK (action = 'autoposter.post.schedule'),
+  actor_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('tiktok', 'youtube')),
+  media_url TEXT NOT NULL,
+  caption TEXT NOT NULL,
+  hashtags TEXT NOT NULL,
+  title TEXT,
+  description TEXT,
+  scheduled_at TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('approval_required', 'executing', 'succeeded', 'failed', 'denied', 'validation_failed', 'duplicate', 'unavailable')),
+  approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required = 1),
+  approved_by TEXT,
+  runtime_result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_autoposter_runtime_missions_created_at
+  ON autoposter_runtime_missions(created_at DESC);
 `;
 
 const validLanes = new Set<string>([

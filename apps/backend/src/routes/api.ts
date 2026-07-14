@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { productLanes } from "../types.js";
 import { actionTypes, type ActionType } from "../types.js";
-import { OperatorService } from "../services/operatorService.js";
+import { OperatorError, OperatorService } from "../services/operatorService.js";
+import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
 
 function normalizeActionType(value: unknown): ActionType {
   return typeof value === "string" && actionTypes.includes(value as ActionType)
@@ -9,8 +10,18 @@ function normalizeActionType(value: unknown): ActionType {
     : "unknown";
 }
 
-export function createApiRouter(service: OperatorService): Router {
+export function createApiRouter(
+  service: OperatorService,
+  runtimeMissionService?: AutoPosterMissionService,
+): Router {
   const router = Router();
+
+  const requireRuntimeMissionService = (): AutoPosterMissionService => {
+    if (!runtimeMissionService) {
+      throw new OperatorError("AutoPoster runtime missions are unavailable.", 503);
+    }
+    return runtimeMissionService;
+  };
 
   router.get("/health", (_request, response) => {
     const integrity = service.checkIntegrity();
@@ -21,6 +32,14 @@ export function createApiRouter(service: OperatorService): Router {
       execution: "contained_simulation",
       real_execution_enabled: false,
       network_execution_enabled: false,
+      runtimeMissions: {
+        autoposter: runtimeMissionService?.getReadiness() ?? {
+          configured: false,
+          executionScope: "schedule_unapproved_draft_only",
+          actions: ["autoposter.post.schedule"],
+          publishingEnabled: false,
+        },
+      },
       integrity: {
         healthy: integrity.healthy,
         database: {
@@ -44,6 +63,35 @@ export function createApiRouter(service: OperatorService): Router {
 
   router.get("/lanes", (_request, response) => {
     response.json({ lanes: productLanes });
+  });
+
+  router.get("/runtime-missions", (request, response) => {
+    const parsedLimit = Number(request.query.limit ?? 50);
+    response.json({ missions: requireRuntimeMissionService().listMissions(parsedLimit) });
+  });
+
+  router.get("/runtime-missions/:missionId", (request, response) => {
+    response.json(requireRuntimeMissionService().getMission(request.params.missionId));
+  });
+
+  router.post("/runtime-missions/autoposter/schedule", (request, response) => {
+    response
+      .status(201)
+      .json(requireRuntimeMissionService().createScheduleMission(request.body));
+  });
+
+  router.post("/runtime-missions/:missionId/approve", (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    try {
+      missions = requireRuntimeMissionService();
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions
+      .approveAndExecute(request.params.missionId, request.body?.approvedBy)
+      .then((mission) => response.json(mission))
+      .catch(next);
   });
 
   router.get("/tasks", (_request, response) => {

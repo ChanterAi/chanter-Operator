@@ -2,8 +2,8 @@ import { createApp } from "./app.js";
 import { config } from "./config.js";
 import { createRuntime } from "./runtime.js";
 
-const { database, service } = createRuntime();
-const app = createApp(service);
+const { database, service, runtimeMissionService } = createRuntime();
+const app = createApp(service, runtimeMissionService);
 const server = app.listen(config.port, config.host, () => {
   console.log("CHANTER Operator backend: http://" + config.host + ":" + config.port);
   console.log("Runner mode: mock (task workflow) + read-only local runner" + (config.runnerWorkspaceRoot ? "" : " (disabled)"));
@@ -11,6 +11,12 @@ const server = app.listen(config.port, config.host, () => {
     console.log("Read-only runner workspace: " + config.runnerWorkspaceRoot);
     console.log("Read-only runner: git status --short, git diff --stat, git diff --check, git show --stat --oneline HEAD, git show --name-only HEAD");
   }
+  console.log(
+    "AutoPoster runtime missions: " +
+      (runtimeMissionService.getReadiness().configured
+        ? "configured (unapproved schedule drafts only)"
+        : "unconfigured"),
+  );
 });
 
 function shutdown() {
