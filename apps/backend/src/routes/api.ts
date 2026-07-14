@@ -116,6 +116,40 @@ export function createApiRouter(
       .catch(next);
   });
 
+  router.post("/runtime-missions/:missionId/reconcile", (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    try {
+      missions = requireRuntimeMissionService();
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions.reconcileMission(request.params.missionId)
+      .then((mission) => response.json(mission))
+      .catch(next);
+  });
+
+  router.post("/runtime-missions/:missionId/resume", (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    try {
+      missions = requireRuntimeMissionService();
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions.resumeSafely(request.params.missionId)
+      .then((mission) => response.json(mission))
+      .catch(next);
+  });
+
+  router.post("/runtime-missions/:missionId/stop", (request, response, next) => {
+    try {
+      response.json(requireRuntimeMissionService().stopAndEscalate(request.params.missionId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get("/tasks", (_request, response) => {
     response.json({ tasks: service.listTasks() });
   });

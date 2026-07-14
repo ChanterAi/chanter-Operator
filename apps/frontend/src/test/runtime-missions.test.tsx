@@ -35,6 +35,23 @@ const pendingMission: RuntimeMission = {
   createdAt: "2026-07-14T08:00:00.000Z",
   updatedAt: "2026-07-14T08:00:00.000Z",
   runtimeResult: null,
+  execution: {
+    state: "approval_required",
+    executionAttemptId: "attempt-001",
+    missionPayloadHash: "a".repeat(64),
+    downstreamOperationType: "autoposter.queue.create_unapproved_draft",
+    lastConfirmedBoundary: "approval_required",
+    recoveryReason: "",
+    recoveryClassification: "NONE",
+    reconciliationOutcome: "not_started",
+    downstreamQueueJobExists: false,
+    authoritativeQueueId: null,
+    retryCount: 0,
+    nextPermittedActions: [],
+    evidenceStatus: "pending",
+    typedError: null,
+  },
+  executionJournal: [],
   evidenceSummary: {
     missionId: "mission-001",
     traceId: "trace-001",
@@ -48,6 +65,14 @@ const pendingMission: RuntimeMission = {
     operatorApprovalState: "required",
     releaseApprovalState: "not_started",
     publishingState: "not_started",
+    currentDurableState: "approval_required",
+    lastConfirmedBoundary: "approval_required",
+    recoveryReason: "",
+    recoveryClassification: "NONE",
+    downstreamQueueJobExists: false,
+    authoritativeQueueId: null,
+    nextPermittedActions: [],
+    evidenceStatus: "pending",
     typedError: null,
   },
 };
@@ -125,6 +150,14 @@ const succeededMission: RuntimeMission = {
       },
     },
   },
+  execution: {
+    ...pendingMission.execution!,
+    state: "completed",
+    lastConfirmedBoundary: "completed",
+    downstreamQueueJobExists: true,
+    authoritativeQueueId: "queue-draft-001",
+    evidenceStatus: "authoritative",
+  },
   evidenceSummary: {
     ...pendingMission.evidenceSummary,
     policyDecision: "allowed",
@@ -134,6 +167,40 @@ const succeededMission: RuntimeMission = {
     operatorApprovalState: "approved",
     releaseApprovalState: "required",
     publishingState: "blocked_until_human_approval",
+    currentDurableState: "completed",
+    lastConfirmedBoundary: "completed",
+    downstreamQueueJobExists: true,
+    authoritativeQueueId: "queue-draft-001",
+    evidenceStatus: "authoritative",
+  },
+};
+
+const recoverableMission: RuntimeMission = {
+  ...pendingMission,
+  status: "unavailable",
+  approvedBy: "founder",
+  runtimeResult: {
+    ...runtimeResult("unavailable"),
+    errors: [{ code: "RECOVERY_DOWNSTREAM_UNAVAILABLE", message: "Downstream truth is uncertain." }],
+  },
+  execution: {
+    ...pendingMission.execution!,
+    state: "failed_recoverable",
+    lastConfirmedBoundary: "downstream_request_prepared",
+    recoveryReason: "Process interruption requires exact downstream reconciliation.",
+    recoveryClassification: "RECOVERY_DOWNSTREAM_UNAVAILABLE",
+    nextPermittedActions: ["Reconcile", "Stop / escalate"],
+    typedError: { code: "RECOVERY_DOWNSTREAM_UNAVAILABLE", message: "Downstream truth is uncertain." },
+  },
+  evidenceSummary: {
+    ...pendingMission.evidenceSummary,
+    operatorApprovalState: "approved",
+    currentDurableState: "failed_recoverable",
+    lastConfirmedBoundary: "downstream_request_prepared",
+    recoveryReason: "Process interruption requires exact downstream reconciliation.",
+    recoveryClassification: "RECOVERY_DOWNSTREAM_UNAVAILABLE",
+    nextPermittedActions: ["Reconcile", "Stop / escalate"],
+    typedError: { code: "RECOVERY_DOWNSTREAM_UNAVAILABLE", message: "Downstream truth is uncertain." },
   },
 };
 
@@ -249,6 +316,106 @@ describe("AutoPoster runtime mission panel", () => {
     expect(summary).toHaveTextContent("#one #two");
     expect(summary).toHaveTextContent("2030-07-15T15:50:00.000Z");
     expect(screen.getByRole("button", { name: "Approve and schedule draft" })).toBeDisabled();
+  });
+
+  it("shows truthful recovery state and enables only bounded reconcile/resume controls", async () => {
+    const user = userEvent.setup();
+    const reconciledMission: RuntimeMission = {
+      ...recoverableMission,
+      execution: {
+        ...recoverableMission.execution!,
+        reconciliationOutcome: "not_found",
+        recoveryClassification: "SAFE_RETRY_AVAILABLE",
+        nextPermittedActions: ["Reconcile", "Resume safely", "Stop / escalate"],
+        typedError: null,
+      },
+      evidenceSummary: {
+        ...recoverableMission.evidenceSummary,
+        recoveryClassification: "SAFE_RETRY_AVAILABLE",
+        nextPermittedActions: ["Reconcile", "Resume safely", "Stop / escalate"],
+        typedError: null,
+      },
+    };
+    vi.mocked(client.listRuntimeMissions).mockResolvedValue([recoverableMission]);
+    const reconcileSpy = vi.spyOn(client, "reconcileRuntimeMission").mockResolvedValue(reconciledMission);
+    const resumeSpy = vi.spyOn(client, "resumeRuntimeMission").mockResolvedValue(succeededMission);
+    render(<AutoPosterMissionPanel />);
+
+    const recovery = (await screen.findByRole("heading", { name: "Recovery supervision" })).parentElement;
+    expect(recovery).toHaveTextContent("failed recoverable");
+    expect(recovery).toHaveTextContent("downstream request prepared");
+    expect(recovery).toHaveTextContent("Process interruption requires exact downstream reconciliation.");
+    expect(recovery).toHaveTextContent("Not confirmed");
+    expect(screen.queryByRole("button", { name: /^Retry$/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Reconcile" }));
+    expect(reconcileSpy).toHaveBeenCalledWith("mission-001");
+    const resume = await screen.findByRole("button", { name: "Resume safely" });
+    await user.click(resume);
+    expect(resumeSpy).toHaveBeenCalledWith("mission-001");
+    expect((await screen.findAllByText("Draft scheduled")).length).toBeGreaterThan(0);
+  });
+
+  it("shows conflict evidence and wires the explicit stop/escalate action", async () => {
+    const user = userEvent.setup();
+    const conflictMission: RuntimeMission = {
+      ...recoverableMission,
+      execution: {
+        ...recoverableMission.execution!,
+        state: "reconciliation_required",
+        reconciliationOutcome: "conflict",
+        recoveryClassification: "RECONCILIATION_REQUIRED",
+        nextPermittedActions: ["Stop / escalate"],
+        evidenceStatus: "reconciliation_required",
+        typedError: { code: "RECONCILIATION_REQUIRED", message: "Two conflicting queue records exist." },
+      },
+      evidenceSummary: {
+        ...recoverableMission.evidenceSummary,
+        currentDurableState: "reconciliation_required",
+        recoveryClassification: "RECONCILIATION_REQUIRED",
+        nextPermittedActions: ["Stop / escalate"],
+        evidenceStatus: "reconciliation_required",
+        typedError: { code: "RECONCILIATION_REQUIRED", message: "Two conflicting queue records exist." },
+      },
+    };
+    vi.mocked(client.listRuntimeMissions).mockResolvedValue([conflictMission]);
+    const stopped = {
+      ...conflictMission,
+      execution: { ...conflictMission.execution!, state: "failed_terminal" as const, nextPermittedActions: [] },
+    };
+    const stopSpy = vi.spyOn(client, "stopRuntimeMission").mockResolvedValue(stopped);
+    render(<AutoPosterMissionPanel />);
+
+    expect((await screen.findAllByText("RECONCILIATION_REQUIRED")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Reconcile" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop / escalate" }));
+    expect(stopSpy).toHaveBeenCalledWith("mission-001");
+  });
+
+  it("renders exactly the backend-permitted action for an observed downstream result", async () => {
+    const observedMission: RuntimeMission = {
+      ...recoverableMission,
+      execution: {
+        ...recoverableMission.execution!,
+        state: "downstream_result_observed",
+        reconciliationOutcome: "unique",
+        authoritativeQueueId: "queue-observed-1",
+        nextPermittedActions: ["Resume safely"],
+      },
+      evidenceSummary: {
+        ...recoverableMission.evidenceSummary,
+        currentDurableState: "downstream_result_observed",
+        authoritativeQueueId: "queue-observed-1",
+        nextPermittedActions: ["Resume safely"],
+      },
+    };
+    vi.mocked(client.listRuntimeMissions).mockResolvedValue([observedMission]);
+    vi.spyOn(client, "resumeRuntimeMission").mockResolvedValue(succeededMission);
+    render(<AutoPosterMissionPanel />);
+
+    expect(await screen.findByRole("button", { name: "Resume safely" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reconcile" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop / escalate" })).not.toBeInTheDocument();
   });
 
   it("requires an approver and disables the explicit approval action while scheduling", async () => {

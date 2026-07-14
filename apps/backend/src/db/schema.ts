@@ -121,6 +121,57 @@ CREATE TABLE IF NOT EXISTS autoposter_runtime_missions (
 
 CREATE INDEX IF NOT EXISTS idx_autoposter_runtime_missions_created_at
   ON autoposter_runtime_missions(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS autoposter_mission_executions (
+  mission_id TEXT PRIMARY KEY REFERENCES autoposter_runtime_missions(mission_id) ON DELETE RESTRICT,
+  execution_attempt_id TEXT NOT NULL,
+  mission_payload_hash TEXT NOT NULL,
+  downstream_operation_type TEXT NOT NULL CHECK (downstream_operation_type = 'autoposter.queue.create_unapproved_draft'),
+  current_state TEXT NOT NULL CHECK (current_state IN (
+    'approval_required', 'approved', 'execution_started',
+    'downstream_request_prepared', 'downstream_result_observed',
+    'result_persisted', 'completed', 'failed_recoverable',
+    'failed_terminal', 'reconciliation_required', 'recovery_in_progress'
+  )),
+  last_confirmed_boundary TEXT NOT NULL,
+  recovery_reason TEXT NOT NULL DEFAULT '',
+  recovery_classification TEXT NOT NULL DEFAULT 'NONE',
+  reconciliation_outcome TEXT NOT NULL DEFAULT 'not_started' CHECK (reconciliation_outcome IN (
+    'not_started', 'not_found', 'unique', 'conflict', 'unavailable',
+    'scope_mismatch', 'idempotency_mismatch', 'payload_mismatch', 'invalid'
+  )),
+  downstream_queue_id TEXT,
+  final_result_status TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0 AND retry_count <= 1),
+  typed_error_json TEXT,
+  reconciliation_result_json TEXT,
+  runtime_observation_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autoposter_mission_journal (
+  transition_id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES autoposter_runtime_missions(mission_id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  execution_attempt_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action = 'autoposter.post.schedule'),
+  workspace_id TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('tiktok', 'youtube')),
+  account_id TEXT NOT NULL,
+  previous_state TEXT,
+  new_state TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  typed_error_json TEXT,
+  UNIQUE(mission_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autoposter_mission_journal_mission
+  ON autoposter_mission_journal(mission_id, sequence);
 `;
 
 const validLanes = new Set<string>([

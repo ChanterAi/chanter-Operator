@@ -606,13 +606,21 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       created.missionId,
       "founder",
     );
-    const second = await harness.missionService.approveAndExecute(
+    await expect(harness.missionService.approveAndExecute(
       created.missionId,
       "another-founder",
+    )).rejects.toMatchObject({ code: "OPERATOR_APPROVAL_BINDING_MISMATCH" });
+    const second = await harness.missionService.approveAndExecute(
+      created.missionId,
+      "founder",
     );
 
     expect(scheduleCalls).toHaveLength(1);
-    expect(second).toEqual(first);
+    expect(second.runtimeResult).toEqual(first.runtimeResult);
+    expect(second.execution?.state).toBe("completed");
+    expect(second.execution?.authoritativeQueueId).toBe("queue-draft-1");
+    expect(second.execution?.recoveryClassification).toBe("DURABLE_REPLAY");
+    expect(second.executionJournal).toHaveLength(first.executionJournal.length + 1);
     expect(second.approvedBy).toBe("founder");
   });
 
@@ -802,6 +810,106 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     expect(listed.body.missions[0].missionId).toBe(second.missionId);
     expect(attemptedUpdate.status).toBe(404);
     expect(harness.missionService.getMission(first.missionId).caption).toBe("first");
+  });
+
+  it("exposes bounded reconcile, resume safely, and stop/escalate recovery controls", async () => {
+    let scheduleAttempts = 0;
+    let durablePost: {
+      id: string;
+      accountId: string;
+      provider: string;
+      status: string;
+      scheduledAt: string;
+      approved: boolean;
+    } | null = null;
+    const reconciliationCalls: unknown[] = [];
+    const { port } = makePort({
+      async schedulePost(params) {
+        scheduleAttempts += 1;
+        durablePost = {
+          id: `recovered-queue-${scheduleAttempts}`,
+          accountId: params.accountId,
+          provider: params.provider ?? "tiktok",
+          status: "scheduled",
+          scheduledAt: params.scheduledAt,
+          approved: false,
+        };
+        throw new Error("Simulated Runtime interruption after durable queue creation.");
+      },
+      async reconcileSchedule(params) {
+        reconciliationCalls.push(params);
+        if (!durablePost) throw new Error("Expected durable downstream truth.");
+        return {
+          ok: true,
+          outcome: "unique",
+          count: 1,
+          unique: true,
+          safeToReuse: true,
+          approvalState: "required",
+          publishingState: "blocked_until_human_approval",
+          evidenceStatus: "authoritative",
+          post: durablePost,
+        };
+      },
+    });
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+
+    const created = await request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule")
+      .send(validInput());
+    const interrupted = await request(harness.app)
+      .post(`/api/runtime-missions/${created.body.missionId}/approve`)
+      .send({ approvedBy: "founder" });
+    expect(interrupted.status).toBe(200);
+    expect(interrupted.body.execution).toMatchObject({
+      state: "failed_recoverable",
+      nextPermittedActions: ["Reconcile", "Stop / escalate"],
+    });
+
+    const reconciled = await request(harness.app)
+      .post(`/api/runtime-missions/${created.body.missionId}/reconcile`)
+      .send({});
+    expect(reconciled.status).toBe(200);
+    expect(reconciled.body.execution).toMatchObject({
+      state: "downstream_result_observed",
+      authoritativeQueueId: "recovered-queue-1",
+      nextPermittedActions: ["Resume safely"],
+    });
+    expect(reconciliationCalls).toHaveLength(1);
+
+    const rejectedStop = await request(harness.app)
+      .post(`/api/runtime-missions/${created.body.missionId}/stop`)
+      .send({});
+    expect(rejectedStop.status).toBe(409);
+    expect(rejectedStop.body.code).toBe("RECOVERY_ACTION_NOT_PERMITTED");
+
+    const resumed = await request(harness.app)
+      .post(`/api/runtime-missions/${created.body.missionId}/resume`)
+      .send({});
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.execution).toMatchObject({
+      state: "completed",
+      authoritativeQueueId: "recovered-queue-1",
+      recoveryClassification: "RECOVERED_EXISTING_DOWNSTREAM_RESULT",
+    });
+    expect(scheduleAttempts).toBe(1);
+
+    const second = await request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule")
+      .send(validInput({ caption: "stop this recovery" }));
+    await request(harness.app)
+      .post(`/api/runtime-missions/${second.body.missionId}/approve`)
+      .send({ approvedBy: "founder" });
+    const stopped = await request(harness.app)
+      .post(`/api/runtime-missions/${second.body.missionId}/stop`)
+      .send({});
+    expect(stopped.status).toBe(200);
+    expect(stopped.body.execution).toMatchObject({
+      state: "failed_terminal",
+      recoveryClassification: "STOPPED_FOR_ESCALATION",
+      nextPermittedActions: [],
+    });
   });
 
   it("keeps route and mission service source free of direct HTTP and AutoPoster routes", () => {

@@ -1148,6 +1148,17 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
   margin-top: 10px;
 }
 
+.runtime-mission-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runtime-mission-recovery-actions .button--primary {
+  width: auto;
+}
+
 .runtime-mission-approved-by {
   margin: 0;
   color: #8d97a8;

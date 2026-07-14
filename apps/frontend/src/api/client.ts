@@ -142,3 +142,24 @@ export function approveRuntimeMission(
     body: JSON.stringify({ approvedBy }),
   });
 }
+
+export function reconcileRuntimeMission(missionId: string): Promise<RuntimeMission> {
+  return request<RuntimeMission>(`/api/runtime-missions/${missionId}/reconcile`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function resumeRuntimeMission(missionId: string): Promise<RuntimeMission> {
+  return request<RuntimeMission>(`/api/runtime-missions/${missionId}/resume`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function stopRuntimeMission(missionId: string): Promise<RuntimeMission> {
+  return request<RuntimeMission>(`/api/runtime-missions/${missionId}/stop`, {
+    method: "POST",
+    body: "{}",
+  });
+}

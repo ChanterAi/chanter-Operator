@@ -1,13 +1,16 @@
 import {
+  AUTOPOSTER_ACTIONS,
   createAutoPosterHttpPort,
   createAutoPosterMissionAdapter,
   createInMemoryIdempotencyStore,
+  createRuntimeMissionPayloadHash,
   createMissionAdapterRegistry,
   executeMission,
   type AutoPosterConnectedAccountListSuccess,
   type AutoPosterConnectedAccountValidationSuccess,
   type AutoPosterOperationsPort,
   type AutoPosterPortFailure,
+  type AutoPosterScheduleReconciliationSuccess,
   type RuntimeMissionIdempotencyStore,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
@@ -33,11 +36,25 @@ export interface AutoPosterRuntimeMissionExecutor {
     provider: "tiktok" | "youtube";
   }): Promise<AutoPosterConnectedAccountValidationSuccess | AutoPosterPortFailure>;
   execute(request: RuntimeMissionRequest): Promise<RuntimeMissionResult>;
+  reconcileSchedule(
+    request: RuntimeMissionRequest,
+  ): Promise<AutoPosterScheduleReconciliationSuccess | AutoPosterPortFailure>;
+  executeRecovered(
+    request: RuntimeMissionRequest,
+    reconciliation: AutoPosterScheduleReconciliationSuccess,
+  ): Promise<RuntimeMissionResult>;
 }
 
 interface AutoPosterRuntimeDependencies {
   port?: AutoPosterOperationsPort;
   idempotencyStore?: RuntimeMissionIdempotencyStore;
+  failureInjector?: (
+    boundary:
+      | "after_runtime_receives_queue_id_before_result_persistence"
+      | "after_runtime_result_persistence",
+    request: RuntimeMissionRequest,
+    result?: RuntimeMissionResult,
+  ) => void;
 }
 
 function isSafeBaseUrl(value: string): boolean {
@@ -71,6 +88,7 @@ function createUnavailablePort(): AutoPosterOperationsPort {
     getPostStatus: unavailable,
     validateMedia: unavailable,
     schedulePost: unavailable,
+    reconcileSchedule: unavailable,
   };
 }
 
@@ -109,6 +127,19 @@ export function createAutoPosterRuntimeMissionExecutor(
   const idempotencyStore =
     dependencies.idempotencyStore ?? createInMemoryIdempotencyStore();
 
+  const reconciliationParams = (request: RuntimeMissionRequest) => ({
+    userId,
+    workspaceId: request.tenant.workspaceId ?? "",
+    accountId: request.tenant.accountId ?? "",
+    provider: request.input.provider as "tiktok" | "youtube",
+    scheduledAt: String(request.input.scheduledAt ?? ""),
+    idempotencyKey: request.idempotencyKey ?? "",
+    missionId: request.missionId,
+    action: AUTOPOSTER_ACTIONS.postSchedule,
+    missionPayloadHash: createRuntimeMissionPayloadHash(request),
+    traceId: request.traceId?.trim() || request.missionId,
+  });
+
   return {
     configured,
     tenantUserId: userId || "operator-runtime-unconfigured",
@@ -120,6 +151,40 @@ export function createAutoPosterRuntimeMissionExecutor(
       port.validateConnectedAccount
         ? port.validateConnectedAccount({ userId, workspaceId, accountId, provider })
         : Promise.resolve(unavailableResult()),
-    execute: (request) => executeMission(request, { registry, idempotencyStore }),
+    execute: (request) => executeMission(request, {
+      registry,
+      idempotencyStore,
+      failureInjector: dependencies.failureInjector,
+    }),
+    reconcileSchedule: (request) =>
+      port.reconcileSchedule
+        ? port.reconcileSchedule(reconciliationParams(request))
+        : Promise.resolve(unavailableResult()),
+    executeRecovered: (request, reconciliation) => {
+      const recoveredPost = reconciliation.post;
+      if (
+        reconciliation.outcome !== "unique" ||
+        !reconciliation.safeToReuse ||
+        !recoveredPost
+      ) {
+        throw new Error("Recovered execution requires one authoritative queue result.");
+      }
+      const recoveredPort: AutoPosterOperationsPort = {
+        ...port,
+        schedulePost: async () => ({
+          ok: true,
+          duplicate: true,
+          post: recoveredPost,
+        }),
+      };
+      const recoveredRegistry = createMissionAdapterRegistry([
+        createAutoPosterMissionAdapter(recoveredPort),
+      ]);
+      return executeMission(request, {
+        registry: recoveredRegistry,
+        idempotencyStore: createInMemoryIdempotencyStore(),
+        failureInjector: dependencies.failureInjector,
+      });
+    },
   };
 }

@@ -4,6 +4,9 @@ import {
   createAutoPosterScheduleMission,
   listAutoPosterConnectedAccounts,
   listRuntimeMissions,
+  reconcileRuntimeMission,
+  resumeRuntimeMission,
+  stopRuntimeMission,
 } from "../api/client";
 import type {
   AutoPosterConnectedAccount,
@@ -14,7 +17,14 @@ import type {
   RuntimeMissionResult,
 } from "../api/types";
 
-type MissionOperation = "loading" | "loading_accounts" | "creating" | "approving";
+type MissionOperation =
+  | "loading"
+  | "loading_accounts"
+  | "creating"
+  | "approving"
+  | "reconciling"
+  | "resuming"
+  | "stopping";
 
 interface VerifiedQueueDraft {
   id: string;
@@ -90,6 +100,7 @@ function missionStatusLabel(mission: RuntimeMission): string {
   const status = mission.runtimeResult?.status ?? mission.status;
   if (status === "approval_required" || status === "pending_approval") return "Approval required";
   if (status === "succeeded" || status === "duplicate") {
+    if (mission.execution && mission.execution.state !== "completed") return "Result persistence pending";
     if (
       !getVerifiedQueueDraft(
         mission.runtimeResult,
@@ -107,6 +118,9 @@ function missionStatusLabel(mission: RuntimeMission): string {
 
 function missionStatusClass(mission: RuntimeMission): string {
   const status = mission.runtimeResult?.status ?? mission.status;
+  if (mission.execution && mission.execution.state !== "completed" && (status === "succeeded" || status === "duplicate")) {
+    return "executing";
+  }
   if (
     (status === "succeeded" || status === "duplicate") &&
     !getVerifiedQueueDraft(
@@ -259,6 +273,27 @@ export function AutoPosterMissionPanel() {
       setSelectedMissionId(mission.missionId);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not schedule the draft.");
+    } finally {
+      setOperation(undefined);
+    }
+  }
+
+  async function handleRecoveryAction(
+    nextOperation: "reconciling" | "resuming" | "stopping",
+  ): Promise<void> {
+    if (missionBusy || !selectedMission) return;
+    setOperation(nextOperation);
+    setError("");
+    try {
+      const mission = nextOperation === "reconciling"
+        ? await reconcileRuntimeMission(selectedMission.missionId)
+        : nextOperation === "resuming"
+          ? await resumeRuntimeMission(selectedMission.missionId)
+          : await stopRuntimeMission(selectedMission.missionId);
+      setMissions((current) => upsertMission(current, mission));
+      setSelectedMissionId(mission.missionId);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update mission recovery state.");
     } finally {
       setOperation(undefined);
     }
@@ -534,6 +569,47 @@ export function AutoPosterMissionPanel() {
                 <p className="runtime-mission-approved-by">Approved by {selectedMission.approvedBy}</p>
               )}
 
+              {selectedMission.execution &&
+                selectedMission.execution.state !== "approval_required" &&
+                selectedMission.execution.state !== "completed" && (
+                <section className="runtime-mission-summary" aria-labelledby="mission-recovery-heading">
+                  <h3 id="mission-recovery-heading">Recovery supervision</h3>
+                  <dl>
+                    <div><dt>Durable state</dt><dd>{selectedMission.execution.state.replaceAll("_", " ")}</dd></div>
+                    <div><dt>Last confirmed boundary</dt><dd>{selectedMission.execution.lastConfirmedBoundary.replaceAll("_", " ")}</dd></div>
+                    <div><dt>Recovery reason</dt><dd>{selectedMission.execution.recoveryReason || "No recovery decision recorded"}</dd></div>
+                    <div><dt>Downstream queue job</dt><dd>{selectedMission.execution.downstreamQueueJobExists ? "Exists" : "Not confirmed"}</dd></div>
+                    <div><dt>Authoritative queue ID</dt><dd>{selectedMission.execution.authoritativeQueueId ?? "Not confirmed"}</dd></div>
+                    <div><dt>Evidence status</dt><dd>{selectedMission.execution.evidenceStatus.replaceAll("_", " ")}</dd></div>
+                    {selectedMission.execution.typedError && (
+                      <div className="runtime-mission-evidence-summary__error">
+                        <dt>Typed recovery error</dt>
+                        <dd><code>{selectedMission.execution.typedError.code}</code> {selectedMission.execution.typedError.message}</dd>
+                      </div>
+                    )}
+                  </dl>
+                  {selectedMission.execution.nextPermittedActions.length ? (
+                    <div className="runtime-mission-recovery-actions" aria-label="Recovery actions">
+                      {selectedMission.execution.nextPermittedActions.includes("Reconcile") && (
+                        <button className="button" type="button" disabled={missionBusy} onClick={() => handleRecoveryAction("reconciling")}>
+                          {operation === "reconciling" ? "Reconciling..." : "Reconcile"}
+                        </button>
+                      )}
+                      {selectedMission.execution.nextPermittedActions.includes("Resume safely") && (
+                        <button className="button button--primary" type="button" disabled={missionBusy} onClick={() => handleRecoveryAction("resuming")}>
+                          {operation === "resuming" ? "Resuming safely..." : "Resume safely"}
+                        </button>
+                      )}
+                      {selectedMission.execution.nextPermittedActions.includes("Stop / escalate") && (
+                        <button className="button" type="button" disabled={missionBusy} onClick={() => handleRecoveryAction("stopping")}>
+                          {operation === "stopping" ? "Stopping..." : "Stop / escalate"}
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              )}
+
               {selectedMission.runtimeResult && (
                 <section className="runtime-mission-decisions" aria-labelledby="runtime-decisions-heading">
                   <h3 id="runtime-decisions-heading">Runtime decisions</h3>
@@ -640,6 +716,10 @@ export function AutoPosterMissionPanel() {
                   <div><dt>Operator approval</dt><dd>{selectedMission.evidenceSummary.operatorApprovalState}</dd></div>
                   <div><dt>Release approval</dt><dd>{selectedMission.evidenceSummary.releaseApprovalState.replaceAll("_", " ")}</dd></div>
                   <div><dt>Publishing</dt><dd>{selectedMission.evidenceSummary.publishingState.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Durable state</dt><dd>{selectedMission.evidenceSummary.currentDurableState.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Last boundary</dt><dd>{selectedMission.evidenceSummary.lastConfirmedBoundary.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Recovery classification</dt><dd>{selectedMission.evidenceSummary.recoveryClassification}</dd></div>
+                  <div><dt>Evidence status</dt><dd>{selectedMission.evidenceSummary.evidenceStatus.replaceAll("_", " ")}</dd></div>
                   {selectedMission.evidenceSummary.typedError && (
                     <div className="runtime-mission-evidence-summary__error">
                       <dt>Typed error</dt>

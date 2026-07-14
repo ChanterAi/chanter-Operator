@@ -312,12 +312,64 @@ export interface RuntimeMissionEvidenceSummary {
   provider: AutoPosterProvider;
   canonicalAccountReference: string;
   policyDecision: "not_evaluated" | "allowed" | "blocked" | "approval_required";
-  idempotencyOutcome: "not_applicable" | "first_execution" | "duplicate";
+  idempotencyOutcome: "not_applicable" | "first_execution" | "duplicate" | "mismatch";
   queueDraftId: string | null;
   persistedDraftStatus: string | null;
   operatorApprovalState: "required" | "approved";
   releaseApprovalState: "not_started" | "required";
   publishingState: "not_started" | "blocked_until_human_approval";
+  currentDurableState: RuntimeMissionExecutionState | "legacy_unjournaled";
+  lastConfirmedBoundary: RuntimeMissionExecutionState | "legacy_unjournaled";
+  recoveryReason: string;
+  recoveryClassification: string;
+  downstreamQueueJobExists: boolean;
+  authoritativeQueueId: string | null;
+  nextPermittedActions: RuntimeMissionRecoveryAction[];
+  evidenceStatus: "pending" | "authoritative" | "failed" | "reconciliation_required";
+  typedError: { code: string; message: string } | null;
+}
+
+export type RuntimeMissionExecutionState =
+  | "approval_required"
+  | "approved"
+  | "execution_started"
+  | "downstream_request_prepared"
+  | "downstream_result_observed"
+  | "result_persisted"
+  | "completed"
+  | "failed_recoverable"
+  | "failed_terminal"
+  | "reconciliation_required"
+  | "recovery_in_progress";
+
+export type RuntimeMissionRecoveryAction = "Reconcile" | "Resume safely" | "Stop / escalate";
+
+export interface RuntimeMissionExecution {
+  state: RuntimeMissionExecutionState;
+  executionAttemptId: string;
+  missionPayloadHash: string;
+  downstreamOperationType: string;
+  lastConfirmedBoundary: RuntimeMissionExecutionState;
+  recoveryReason: string;
+  recoveryClassification: string;
+  reconciliationOutcome: string;
+  downstreamQueueJobExists: boolean;
+  authoritativeQueueId: string | null;
+  retryCount: number;
+  nextPermittedActions: RuntimeMissionRecoveryAction[];
+  evidenceStatus: "pending" | "authoritative" | "failed" | "reconciliation_required";
+  typedError: { code: string; message: string } | null;
+}
+
+export interface RuntimeMissionJournalTransition {
+  transitionId: string;
+  sequence: number;
+  previousState: RuntimeMissionExecutionState | null;
+  newState: RuntimeMissionExecutionState;
+  timestamp: string;
+  actor: string;
+  reason: string;
+  evidenceReferences: string[];
   typedError: { code: string; message: string } | null;
 }
 
@@ -343,6 +395,8 @@ export interface RuntimeMission {
   createdAt: string;
   updatedAt: string;
   runtimeResult: RuntimeMissionResult | null;
+  execution: RuntimeMissionExecution | null;
+  executionJournal: RuntimeMissionJournalTransition[];
   evidenceSummary: RuntimeMissionEvidenceSummary;
 }
 

@@ -18,7 +18,9 @@
     "release:gates": "node tools/release-operator/release-operator.mjs gates",
     "release:test": "node --test \"tools/release-operator/tests/*.test.mjs\"",
     "mission:compile": "node tools/mission-compiler/mission-compiler.mjs",
-    "mission:test": "node --test \"tools/mission-compiler/tests/*.test.mjs\""
+    "mission:test": "node --test \"tools/mission-compiler/tests/*.test.mjs\"",
+    "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
+    "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests"
   },
   "engines": {
     "node": ">=22.13.0"
