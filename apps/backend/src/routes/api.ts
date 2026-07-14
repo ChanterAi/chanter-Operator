@@ -3,6 +3,7 @@ import { productLanes } from "../types.js";
 import { actionTypes, type ActionType } from "../types.js";
 import { OperatorError, OperatorService } from "../services/operatorService.js";
 import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
+import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 
 function normalizeActionType(value: unknown): ActionType {
   return typeof value === "string" && actionTypes.includes(value as ActionType)
@@ -13,6 +14,7 @@ function normalizeActionType(value: unknown): ActionType {
 export function createApiRouter(
   service: OperatorService,
   runtimeMissionService?: AutoPosterMissionService,
+  agentRunLedgerService?: AgentRunLedgerService,
 ): Router {
   const router = Router();
 
@@ -21,6 +23,13 @@ export function createApiRouter(
       throw new OperatorError("AutoPoster runtime missions are unavailable.", 503);
     }
     return runtimeMissionService;
+  };
+
+  const requireAgentRunLedgerService = (): AgentRunLedgerService => {
+    if (!agentRunLedgerService) {
+      throw new OperatorError("Agent Run Ledger is unavailable.", 503, "AGENT_RUN_LEDGER_UNAVAILABLE");
+    }
+    return agentRunLedgerService;
   };
 
   router.get("/health", (_request, response) => {
@@ -63,6 +72,31 @@ export function createApiRouter(
 
   router.get("/lanes", (_request, response) => {
     response.json({ lanes: productLanes });
+  });
+
+  router.post("/agent-run-ledger/entries", (request, response) => {
+    const result = requireAgentRunLedgerService().appendEntry(request.body);
+    response.status(result.replayed ? 200 : 201).json(result);
+  });
+
+  router.get("/agent-run-ledger/runs", (request, response) => {
+    response.json(requireAgentRunLedgerService().listRuns({
+      product: request.query.product,
+      workflow: request.query.workflow,
+      provider: request.query.provider,
+      model: request.query.model,
+      status: request.query.status,
+      approvalStatus: request.query.approvalStatus,
+      validationResult: request.query.validationResult,
+      outcome: request.query.outcome,
+      from: request.query.from,
+      to: request.query.to,
+      limit: request.query.limit,
+    }));
+  });
+
+  router.get("/agent-run-ledger/runs/:runId", (request, response) => {
+    response.json(requireAgentRunLedgerService().getRun(request.params.runId));
   });
 
   router.get("/runtime-missions", (request, response) => {

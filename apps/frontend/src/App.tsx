@@ -7,6 +7,7 @@ import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { ReadonlyRunnerPanel } from "./components/ReadonlyRunnerPanel";
 import { AutoPosterMissionPanel } from "./components/AutoPosterMissionPanel";
+import { AgentRunLedgerPanel } from "./components/AgentRunLedgerPanel";
 
 type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying" | "adding-evidence" | "adding-commit-review";
 
@@ -21,7 +22,7 @@ export default function App() {
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
-  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission">("cockpit");
+  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "agent-run-ledger">("cockpit");
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -138,6 +139,14 @@ export default function App() {
         >
           AutoPoster Mission
         </button>
+        <a
+          className={"tab-nav__button" + (activeTab === "agent-run-ledger" ? " tab-nav__button--active" : "")}
+          href="#agent-run-ledger"
+          onClick={() => setActiveTab("agent-run-ledger")}
+          aria-current={activeTab === "agent-run-ledger" ? "page" : undefined}
+        >
+          Agent Run Ledger
+        </a>
       </nav>
 
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} type="button" aria-label="Dismiss error">&times;</button></div>}
@@ -199,8 +208,10 @@ export default function App() {
             </div>
           </div>
         </div>
-      ) : (
+      ) : activeTab === "autoposter-mission" ? (
         <AutoPosterMissionPanel />
+      ) : (
+        <AgentRunLedgerPanel />
       )}
     </div>
   );

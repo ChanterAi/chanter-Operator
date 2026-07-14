@@ -172,6 +172,85 @@ CREATE TABLE IF NOT EXISTS autoposter_mission_journal (
 
 CREATE INDEX IF NOT EXISTS idx_autoposter_mission_journal_mission
   ON autoposter_mission_journal(mission_id, sequence);
+
+CREATE TABLE IF NOT EXISTS agent_run_ledger_runs (
+  run_id TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL CHECK (schema_version = '1.0'),
+  current_event_id TEXT NOT NULL UNIQUE,
+  current_sequence INTEGER NOT NULL CHECK (current_sequence > 0),
+  product_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  parent_run_id TEXT,
+  trace_id TEXT,
+  status TEXT NOT NULL CHECK (status IN (
+    'created', 'approval_required', 'approved', 'running', 'validating',
+    'completed', 'failed', 'cancelled', 'blocked', 'reconciliation_required'
+  )),
+  outcome TEXT NOT NULL CHECK (outcome IN (
+    'pending', 'success', 'failure', 'cancelled', 'blocked', 'reconciliation_required'
+  )),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  approval_status TEXT NOT NULL CHECK (approval_status IN (
+    'not_required', 'required', 'approved', 'rejected'
+  )),
+  validation_result TEXT NOT NULL CHECK (validation_result IN (
+    'not_run', 'passed', 'failed'
+  )),
+  failure_reason TEXT,
+  failure_code TEXT,
+  evidence_count INTEGER NOT NULL CHECK (evidence_count >= 0),
+  evidence_integrity_status TEXT NOT NULL CHECK (evidence_integrity_status IN (
+    'not_present', 'unverified', 'verified', 'invalid'
+  )),
+  production_impact INTEGER NOT NULL CHECK (production_impact IN (0, 1)),
+  payload_hash TEXT NOT NULL,
+  scope_hash TEXT NOT NULL,
+  entry_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_started_at
+  ON agent_run_ledger_runs(started_at DESC, run_id ASC);
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_product_workflow
+  ON agent_run_ledger_runs(product_id, workflow_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_provider_model
+  ON agent_run_ledger_runs(provider, model, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_governance
+  ON agent_run_ledger_runs(status, approval_status, validation_result, outcome, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_run_ledger_transitions (
+  event_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES agent_run_ledger_runs(run_id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  attempt_id TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'created', 'approval_required', 'approved', 'running', 'validating',
+    'completed', 'failed', 'cancelled', 'blocked', 'reconciliation_required'
+  )),
+  outcome TEXT NOT NULL CHECK (outcome IN (
+    'pending', 'success', 'failure', 'cancelled', 'blocked', 'reconciliation_required'
+  )),
+  payload_hash TEXT NOT NULL,
+  scope_hash TEXT NOT NULL,
+  entry_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(run_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_transitions_run
+  ON agent_run_ledger_transitions(run_id, sequence ASC);
 `;
 
 const validLanes = new Set<string>([

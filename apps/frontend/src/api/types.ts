@@ -411,3 +411,119 @@ export interface CreateAutoPosterScheduleMissionInput {
   description?: string;
   scheduledAt: string;
 }
+
+export type AgentRunLedgerStatus =
+  | "created"
+  | "approval_required"
+  | "approved"
+  | "running"
+  | "validating"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "blocked"
+  | "reconciliation_required";
+
+export type AgentRunLedgerOutcome =
+  | "pending"
+  | "success"
+  | "failure"
+  | "cancelled"
+  | "blocked"
+  | "reconciliation_required";
+
+export type AgentRunLedgerApprovalStatus = "not_required" | "required" | "approved" | "rejected";
+export type AgentRunLedgerValidationResult = "not_run" | "passed" | "failed";
+export type AgentRunLedgerEvidenceIntegrityStatus = "not_present" | "unverified" | "verified" | "invalid";
+
+export interface AgentRunLedgerAction {
+  action_id: string;
+  action_type: string;
+  summary: string;
+  outcome: "pending" | "succeeded" | "failed" | "blocked" | "not_applicable";
+}
+
+export interface AgentRunLedgerTool {
+  tool_id: string;
+  name: string;
+  version: string | null;
+}
+
+export interface AgentRunLedgerEvidenceRef {
+  evidence_id: string;
+  kind: "file" | "log" | "artifact" | "command_output" | "url" | "note";
+  uri: string;
+  sha256: string | null;
+  captured_at: string;
+}
+
+export interface AgentRunLedgerCostEstimate {
+  kind: "known" | "unknown" | "not_applicable";
+  amount_micros: number | null;
+  currency: string | null;
+}
+
+export interface AgentRunLedgerEntry {
+  schema_version: "1.0";
+  run_id: string;
+  event_id: string;
+  sequence: number;
+  product_id: string;
+  workflow_id: string;
+  agent_id: string;
+  attempt_id: string;
+  parent_run_id: string | null;
+  trace_id: string | null;
+  status: AgentRunLedgerStatus;
+  outcome: AgentRunLedgerOutcome;
+  started_at: string;
+  completed_at: string | null;
+  provider: string;
+  model: string;
+  input_summary: string;
+  actions_taken: AgentRunLedgerAction[];
+  tools_used: AgentRunLedgerTool[];
+  latency_ms: number | null;
+  cost_estimate: AgentRunLedgerCostEstimate;
+  approval_status: AgentRunLedgerApprovalStatus;
+  approval_actor: string | null;
+  approval_timestamp: string | null;
+  risk_level: "low" | "medium" | "high" | "critical";
+  production_impact: boolean;
+  validation_result: AgentRunLedgerValidationResult;
+  validation_summary: string | null;
+  failure_reason: string | null;
+  failure_code: string | null;
+  evidence_refs: AgentRunLedgerEvidenceRef[];
+  evidence_count: number;
+  evidence_integrity_status: AgentRunLedgerEvidenceIntegrityStatus;
+  payload_hash: string;
+  scope_hash: string;
+  created_at: string;
+  updated_at: string;
+  source_subsystem: string;
+}
+
+export interface AgentRunLedgerFilters {
+  product?: string;
+  workflow?: string;
+  provider?: string;
+  model?: string;
+  status?: AgentRunLedgerStatus | "";
+  approvalStatus?: AgentRunLedgerApprovalStatus | "";
+  validationResult?: AgentRunLedgerValidationResult | "";
+  outcome?: AgentRunLedgerOutcome | "";
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+export interface AgentRunLedgerListResponse {
+  runs: AgentRunLedgerEntry[];
+  filters: AgentRunLedgerFilters & { limit: number };
+}
+
+export interface AgentRunLedgerRunDetail {
+  entry: AgentRunLedgerEntry;
+  transitions: AgentRunLedgerEntry[];
+}

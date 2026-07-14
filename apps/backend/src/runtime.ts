@@ -6,6 +6,7 @@ import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionSer
 import { createAutoPosterRuntimeMissionExecutor } from "./runtimeMissions/autoPosterRuntime.js";
 import { OperatorService } from "./services/operatorService.js";
 import { ensureWorkspace } from "./workspace/pathGuard.js";
+import { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
 
 export function createRuntime() {
   const database = createDatabase(config.databasePath);
@@ -26,5 +27,6 @@ export function createRuntime() {
     runtimeMissionExecutor,
     { protectedValues: [config.autoPosterRuntime.serviceToken] },
   );
-  return { database, service, runtimeMissionService };
+  const agentRunLedgerService = new AgentRunLedgerService(database);
+  return { database, service, runtimeMissionService, agentRunLedgerService };
 }

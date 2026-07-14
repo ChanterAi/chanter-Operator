@@ -1,6 +1,9 @@
 import type {
   AddCommitReviewInput,
   AddValidationInput,
+  AgentRunLedgerFilters,
+  AgentRunLedgerListResponse,
+  AgentRunLedgerRunDetail,
   AutoPosterConnectedAccountsResponse,
   CreateAutoPosterScheduleMissionInput,
   CreateTaskInput,
@@ -162,4 +165,34 @@ export function stopRuntimeMission(missionId: string): Promise<RuntimeMission> {
     method: "POST",
     body: "{}",
   });
+}
+
+export function listAgentRunLedgerRuns(
+  filters: AgentRunLedgerFilters = {},
+): Promise<AgentRunLedgerListResponse> {
+  const query = new URLSearchParams();
+  const values: Array<[string, string | number | undefined]> = [
+    ["product", filters.product],
+    ["workflow", filters.workflow],
+    ["provider", filters.provider],
+    ["model", filters.model],
+    ["status", filters.status],
+    ["approvalStatus", filters.approvalStatus],
+    ["validationResult", filters.validationResult],
+    ["outcome", filters.outcome],
+    ["from", filters.from],
+    ["to", filters.to],
+    ["limit", filters.limit],
+  ];
+  for (const [name, value] of values) {
+    if (value !== undefined && value !== "") query.set(name, String(value));
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return request<AgentRunLedgerListResponse>(`/api/agent-run-ledger/runs${suffix}`);
+}
+
+export function getAgentRunLedgerRun(runId: string): Promise<AgentRunLedgerRunDetail> {
+  return request<AgentRunLedgerRunDetail>(
+    `/api/agent-run-ledger/runs/${encodeURIComponent(runId)}`,
+  );
 }
