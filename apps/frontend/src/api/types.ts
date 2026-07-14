@@ -195,6 +195,14 @@ export interface HealthResponse {
   execution: string;
   real_execution_enabled: boolean;
   network_execution_enabled: boolean;
+  runtimeMissions: {
+    autoposter: {
+      configured: boolean;
+      executionScope: "schedule_unapproved_draft_only";
+      actions: ["autoposter.post.schedule"];
+      publishingEnabled: false;
+    };
+  };
   integrity: HealthIntegrity;
 }
 
@@ -208,4 +216,107 @@ export type ReadinessState =
 export interface EvidenceBundleResponse {
   taskId: string;
   markdown: string;
+}
+
+export type AutoPosterProvider = "tiktok" | "youtube";
+
+export type RuntimeMissionStatus =
+  | "approval_required"
+  | "pending_approval"
+  | "executing"
+  | "succeeded"
+  | "duplicate"
+  | "denied"
+  | "validation_failed"
+  | "unavailable"
+  | "failed";
+
+export type RuntimeJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | RuntimeJsonValue[]
+  | { [key: string]: RuntimeJsonValue };
+
+export interface RuntimeMissionEvidenceItem {
+  id: string;
+  type: string;
+  label: string;
+  detail: string;
+  source?: string;
+  createdAt: string;
+}
+
+export interface RuntimeMissionEvidenceBundle {
+  evidence: RuntimeMissionEvidenceItem[];
+  validationResult?: {
+    passed: boolean;
+    summary: string;
+  } | null;
+  result?: {
+    success: boolean;
+    summary: string;
+  } | null;
+}
+
+export interface RuntimeMissionResult {
+  status: RuntimeMissionStatus;
+  output: RuntimeJsonValue | null;
+  evidence: RuntimeMissionEvidenceBundle | null;
+  warnings: string[];
+  errors: Array<{ code: string; message: string }>;
+  policyDecision: {
+    allowed: boolean;
+    approvalRequired: boolean;
+    blocked: boolean;
+    reasons: string[];
+    requiredPolicy?: string;
+  } | null;
+  approvalDecision: {
+    required: boolean;
+    approved: boolean;
+    approvedBy: string | null;
+  };
+  idempotency: {
+    key: string | null;
+    outcome: "not_applicable" | "first_execution" | "duplicate";
+    originalMissionId?: string;
+  };
+}
+
+export interface RuntimeMission {
+  missionId: string;
+  traceId: string;
+  product: string;
+  action: string;
+  actorId: string;
+  workspaceId: string;
+  accountId: string;
+  provider: AutoPosterProvider;
+  mediaUrl: string;
+  caption: string;
+  hashtags: string;
+  title: string | null;
+  description: string | null;
+  scheduledAt: string;
+  idempotencyKey: string;
+  status: RuntimeMissionStatus;
+  approvalRequired: boolean;
+  approvedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  runtimeResult: RuntimeMissionResult | null;
+}
+
+export interface CreateAutoPosterScheduleMissionInput {
+  workspaceId: string;
+  accountId: string;
+  provider: AutoPosterProvider;
+  mediaUrl: string;
+  caption: string;
+  hashtags: string;
+  title?: string;
+  description?: string;
+  scheduledAt: string;
 }

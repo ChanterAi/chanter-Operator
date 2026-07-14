@@ -29,6 +29,7 @@ export function ReadinessBar({ state }: Props) {
   const ok = integrity.healthy && state.kind === "healthy";
   const dbIssueCount = integrity.database.issues;
   const auditIssueCount = integrity.audit.parseErrors + integrity.audit.missingFieldErrors + integrity.audit.invalidTypeErrors + integrity.audit.crossRefIssues;
+  const autoPosterReadiness = health.runtimeMissions.autoposter;
 
   return (
     <div className={`readiness-bar${ok ? " readiness-bar--ok" : " readiness-bar--unhealthy"}`} role="status" aria-live="polite">
@@ -55,6 +56,18 @@ export function ReadinessBar({ state }: Props) {
       <span className="readiness-bar__item">
         <span className="readiness-bar__label">Records</span>
         {integrity.database.tasks}T / {integrity.database.steps}S / {integrity.database.evidence}E
+      </span>
+      <span className="readiness-bar__sep" />
+
+      <span className="readiness-bar__item">
+        <span className="readiness-bar__label">AutoPoster drafts</span>
+        {autoPosterReadiness.configured ? "Configured" : "Unavailable"}
+      </span>
+      <span className="readiness-bar__sep" />
+
+      <span className="readiness-bar__item">
+        <span className="readiness-bar__label">Publishing</span>
+        {autoPosterReadiness.publishingEnabled ? "WARNING" : "Disabled"}
       </span>
 
       {!ok && (

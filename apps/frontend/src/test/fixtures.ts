@@ -116,6 +116,14 @@ export const mockHealthHealthy: HealthResponse = {
   execution: "contained_simulation",
   real_execution_enabled: false,
   network_execution_enabled: false,
+  runtimeMissions: {
+    autoposter: {
+      configured: true,
+      executionScope: "schedule_unapproved_draft_only",
+      actions: ["autoposter.post.schedule"],
+      publishingEnabled: false,
+    },
+  },
   integrity: {
     healthy: true,
     database: { tasks: 3, steps: 3, evidence: 2, issues: 0 },
@@ -138,6 +146,14 @@ export const mockHealthUnhealthy: HealthResponse = {
   execution: "contained_simulation",
   real_execution_enabled: false,
   network_execution_enabled: false,
+  runtimeMissions: {
+    autoposter: {
+      configured: false,
+      executionScope: "schedule_unapproved_draft_only",
+      actions: ["autoposter.post.schedule"],
+      publishingEnabled: false,
+    },
+  },
   integrity: {
     healthy: false,
     database: { tasks: 5, steps: 5, evidence: 3, issues: 2 },

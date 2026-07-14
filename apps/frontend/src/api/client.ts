@@ -1,4 +1,14 @@
-import type { AddCommitReviewInput, AddValidationInput, CreateTaskInput, EvidenceBundleResponse, HealthResponse, TaskDetail, TaskIntent } from "./types";
+import type {
+  AddCommitReviewInput,
+  AddValidationInput,
+  CreateAutoPosterScheduleMissionInput,
+  CreateTaskInput,
+  EvidenceBundleResponse,
+  HealthResponse,
+  RuntimeMission,
+  TaskDetail,
+  TaskIntent,
+} from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -84,5 +94,29 @@ export function rejectStep(stepId: string): Promise<TaskDetail> {
   return request<TaskDetail>(`/api/steps/${stepId}/reject`, {
     method: "POST",
     body: JSON.stringify({ reason: "Rejected from cockpit review." }),
+  });
+}
+
+export async function listRuntimeMissions(): Promise<RuntimeMission[]> {
+  const result = await request<{ missions: RuntimeMission[] }>("/api/runtime-missions");
+  return result.missions;
+}
+
+export function createAutoPosterScheduleMission(
+  input: CreateAutoPosterScheduleMissionInput,
+): Promise<RuntimeMission> {
+  return request<RuntimeMission>("/api/runtime-missions/autoposter/schedule", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function approveRuntimeMission(
+  missionId: string,
+  approvedBy: string,
+): Promise<RuntimeMission> {
+  return request<RuntimeMission>(`/api/runtime-missions/${missionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ approvedBy }),
   });
 }

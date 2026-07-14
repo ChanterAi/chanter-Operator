@@ -6,6 +6,7 @@ import { ReviewPanel } from "./components/ReviewPanel";
 import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { ReadonlyRunnerPanel } from "./components/ReadonlyRunnerPanel";
+import { AutoPosterMissionPanel } from "./components/AutoPosterMissionPanel";
 
 type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying" | "adding-evidence" | "adding-commit-review";
 
@@ -20,7 +21,7 @@ export default function App() {
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
-  const [activeTab, setActiveTab] = useState<"cockpit" | "runner">("cockpit");
+  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission">("cockpit");
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -117,6 +118,7 @@ export default function App() {
           className={"tab-nav__button" + (activeTab === "cockpit" ? " tab-nav__button--active" : "")}
           onClick={() => setActiveTab("cockpit")}
           type="button"
+          aria-pressed={activeTab === "cockpit"}
         >
           Cockpit
         </button>
@@ -124,8 +126,17 @@ export default function App() {
           className={"tab-nav__button" + (activeTab === "runner" ? " tab-nav__button--active" : "")}
           onClick={() => setActiveTab("runner")}
           type="button"
+          aria-pressed={activeTab === "runner"}
         >
           Read-only Runner
+        </button>
+        <button
+          className={"tab-nav__button" + (activeTab === "autoposter-mission" ? " tab-nav__button--active" : "")}
+          onClick={() => setActiveTab("autoposter-mission")}
+          type="button"
+          aria-pressed={activeTab === "autoposter-mission"}
+        >
+          AutoPoster Mission
         </button>
       </nav>
 
@@ -158,7 +169,7 @@ export default function App() {
             onAddCommitReview={async (taskId, summaryText, changedFilesText, validationText, riskNotesText) => { await runAction("adding-commit-review", () => addCommitReview(taskId, { summaryText, changedFilesText, validationText, riskNotesText })); }}
           />
         </div>
-      ) : (
+      ) : activeTab === "runner" ? (
         <div className="cockpit runner-tab-layout">
           <div className="panel panel--queue" style={{ borderRight: "1px solid #20242c" }}>
             <ReadonlyRunnerPanel busy={busy} />
@@ -188,6 +199,8 @@ export default function App() {
             </div>
           </div>
         </div>
+      ) : (
+        <AutoPosterMissionPanel />
       )}
     </div>
   );

@@ -1,10 +1,10 @@
 # CHANTER Operator
 
-Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, read-only workspace scanning, mission compilation, and audit history. Operator is CHANTER's internal control layer — it has no customer-facing surface or business model of its own.
+Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, read-only workspace scanning, mission compilation, one bounded AutoPoster runtime mission, and audit history. Operator is CHANTER's internal control layer — it has no customer-facing surface or business model of its own.
 
 ## What Operator is
 
-Operator gives the founder one place to: intake and review proposed work as structured tasks, gate risky actions behind explicit approval, run a small allowlisted set of real read-only commands against a configured workspace, scan every CHANTER repo's git state without mutating anything, and compile a high-level founder intent into a structured, safe execution mission package for a supervised coding agent to carry out elsewhere. Every one of those capabilities is mock, read-only, or decision-only — see "What Operator does not execute" below.
+Operator gives the founder one place to: intake and review proposed work as structured tasks, gate risky actions behind explicit approval, run a small allowlisted set of real read-only commands against a configured workspace, scan every CHANTER repo's git state without mutating anything, and compile a high-level founder intent into a structured, safe execution mission package for a supervised coding agent to carry out elsewhere. Separately, one explicit runtime mission can schedule an unapproved AutoPoster queue draft after founder approval; it cannot publish or approve that draft for release.
 
 ## Founder intent → mission package flow
 
@@ -48,6 +48,8 @@ Full detail and test coverage: `reviews/operator-p1-readonly-runner-report.md` (
 
 As of P2A, four of its files (`contract.ts`, `policy.ts`, `providerRouting.ts`, `redaction.ts`) are real re-exports from a `file:` dependency on `chanter-agent-runtime`, declared in `apps/backend/package.json` (`"chanter-agent-runtime": "file:../../../chanter-agent-runtime"`). `tasks.ts` and `evidence.ts` remain Operator-local, with additional redaction hardening beyond the upstream source (three fields upstream leaves unredacted are covered here). **This bridge is not wired into any HTTP route, API, or UI** — it is a decision/evaluation layer only, with no live execution effect today.
 
+The bounded AutoPoster mission capability is deliberately separate from that generic bridge. `apps/backend/src/runtimeMissions/` invokes the Runtime package's real `executeMission()` orchestration for only `autoposter.post.schedule`, persists the request/result, and requires explicit approval before the token-guarded AutoPoster call.
+
 Full detail: `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md` and `docs/OPERATOR_RUNTIME_BRIDGE_P2A.md`.
 
 ## What Operator executes today
@@ -56,19 +58,22 @@ Full detail: `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md` and `docs/OPERATOR_RUNTIME_BR
 - Five allowlisted **real, read-only** git commands via the local runner described above
 - Read-only git scanning across the workspace via the Release Operator
 - Mission compilation (text/JSON assembly only — no execution)
+- One explicitly approved `autoposter.post.schedule` mission that creates an unapproved queue draft through `chanter-agent-runtime`
 
 ## What Operator does not execute
 
-- No write, shell, deploy, publish, or migration action of any kind
+- No generic write, shell, deploy, publish, or migration runner capability
+- No AutoPoster publish action and no AutoPoster draft-approval action
 - No Loop Governor, Codex, or Ollama integration
 - No git `add` / `commit` / `push`, or any other git write command
-- No external network calls, authentication, billing, or remote access
+- No arbitrary network calls, end-user authentication surface, billing, or remote-access feature; the only product call is the configured token-guarded AutoPoster schedule-draft route
 - No autonomous or unsupervised operation
 
 ## Approval and mutation boundaries
 
 - Task steps classified as `file_write`, `file_edit`, `shell_command`, or `unknown` wait for explicit approval before the mock runner simulates them; `analysis` and `read_file` previews simulate immediately as safe actions.
 - The real read-only runner requires an explicit workspace opt-in (`OPERATOR_RUNNER_WORKSPACE`) and, even then, only ever runs the five allowlisted commands above.
+- AutoPoster mission creation never calls the product. A named approver must separately release Runtime execution, and the resulting queue item remains unapproved for publishing in AutoPoster.
 - The Release Operator and Mission Compiler never mutate anything — they read root docs and git state, and write evidence/report artifacts only to their own gitignored `reports/` folders or an explicit `--out` path.
 - Push, deploy, live publish, and migration remain **human-approval decisions** everywhere in Operator; no code path in this repo performs any of them today.
 
@@ -91,6 +96,7 @@ npm run mission:compile -- --intent "..."   # Mission Compiler
 - `tools/release-operator/README.md`
 - `tools/mission-compiler/README.md`
 - `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md`, `docs/OPERATOR_RUNTIME_BRIDGE_P2A.md`
+- `docs/OPERATOR_AUTOPOSTER_MISSION_LOOP_P0.md`
 - `reviews/operator-p1-readonly-runner-report.md` (workspace root `reviews/`, not inside this repo)
 
 ---
