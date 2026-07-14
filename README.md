@@ -1,3 +1,99 @@
+# CHANTER Operator
+
+Local-first founder cockpit for reviewable task intake, approval gates, mock execution, evidence, read-only workspace scanning, mission compilation, and audit history. Operator is CHANTER's internal control layer — it has no customer-facing surface or business model of its own.
+
+## What Operator is
+
+Operator gives the founder one place to: intake and review proposed work as structured tasks, gate risky actions behind explicit approval, run a small allowlisted set of real read-only commands against a configured workspace, scan every CHANTER repo's git state without mutating anything, and compile a high-level founder intent into a structured, safe execution mission package for a supervised coding agent to carry out elsewhere. Every one of those capabilities is mock, read-only, or decision-only — see "What Operator does not execute" below.
+
+## Founder intent → mission package flow
+
+1. The founder states an intent in plain language (e.g. "get CHANTER to release readiness").
+2. The Mission Compiler (`tools/mission-compiler/`) classifies the intent, resolves target CHANTER apps by priority, pulls live repo truth from the Release Operator scanner, and assembles a mission package: objectives, non-targets, risk/approval gates, a validation plan, per-system connection plans, and a final execution prompt.
+3. The compiled mission is a handoff artifact for a human or a separately supervised coding agent to execute — the Mission Compiler itself never runs the mission.
+
+See `tools/mission-compiler/README.md` for full detail.
+
+## Release Operator — read-only scanner
+
+`tools/release-operator/` scans every repo listed in `chanter.repos.json` (mirroring the CHANTER root docs) and classifies each repo's release state (`clean-synced | ahead | behind | diverged | dirty | no-remote | no-upstream | not-a-git-repo | non-git-expected | missing`). Git access is limited to an allowlist — `status`, `log`, `rev-parse`, `remote` — enforced and test-locked in `tools/release-operator/tests/git-scan.test.mjs`. It never pushes, deploys, publishes, migrates, or installs anything; it only reports and suggests read-only follow-up commands, which it never executes itself.
+
+See `tools/release-operator/README.md`.
+
+## Mission Compiler
+
+`tools/mission-compiler/` turns one high-level founder message into a mission package (see flow above). It does not call any LLM API, use the network, or install anything, and it does not execute the compiled mission — push, deploy, publish, migration, and other state-mutating decisions all stay with a human.
+
+See `tools/mission-compiler/README.md`.
+
+## Local read-only runner and its command allowlist
+
+The backend (`apps/backend/src/runners/realReadonlyRunner.ts`) executes exactly five pre-approved, read-only git commands inside a configured workspace, via `execFile` with `shell: false` (no shell interpolation, no injection surface):
+
+```
+git status --short
+git diff --stat
+git diff --check
+git show --stat --oneline HEAD
+git show --name-only HEAD
+```
+
+Every other command, and any injection attempt (`;`, `&&`, `||`, `|`, backticks, `$()`, etc.), is rejected before execution. The runner is opt-in — it requires the `OPERATOR_RUNNER_WORKSPACE` environment variable; without it, `POST /api/commands/run` returns `503`. Every execution, allowed or blocked, is written to the audit log and to the `readonly_command_results` table. The frontend exposes this as the "Read-only Runner" tab (`ReadonlyRunnerPanel.tsx`).
+
+Full detail and test coverage: `reviews/operator-p1-readonly-runner-report.md` (workspace root, outside this repo).
+
+## Agent Runtime dependency / integration boundary
+
+`apps/backend/src/agentRuntime/runtimeBridge/` lets Operator represent its own work using the shared `chanter-agent-runtime` contract (`RuntimeTask` lifecycle, action-policy evaluation, redacted evidence export, provider-route selection). Every function in this module is pure and synchronous — it performs no I/O and executes nothing it evaluates.
+
+As of P2A, four of its files (`contract.ts`, `policy.ts`, `providerRouting.ts`, `redaction.ts`) are real re-exports from a `file:` dependency on `chanter-agent-runtime`, declared in `apps/backend/package.json` (`"chanter-agent-runtime": "file:../../../chanter-agent-runtime"`). `tasks.ts` and `evidence.ts` remain Operator-local, with additional redaction hardening beyond the upstream source (three fields upstream leaves unredacted are covered here). **This bridge is not wired into any HTTP route, API, or UI** — it is a decision/evaluation layer only, with no live execution effect today.
+
+Full detail: `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md` and `docs/OPERATOR_RUNTIME_BRIDGE_P2A.md`.
+
+## What Operator executes today
+
+- A deterministic **mock** task/step runner for the cockpit workflow (never reads, writes, shells out, or calls a network service)
+- Five allowlisted **real, read-only** git commands via the local runner described above
+- Read-only git scanning across the workspace via the Release Operator
+- Mission compilation (text/JSON assembly only — no execution)
+
+## What Operator does not execute
+
+- No write, shell, deploy, publish, or migration action of any kind
+- No Loop Governor, Codex, or Ollama integration
+- No git `add` / `commit` / `push`, or any other git write command
+- No external network calls, authentication, billing, or remote access
+- No autonomous or unsupervised operation
+
+## Approval and mutation boundaries
+
+- Task steps classified as `file_write`, `file_edit`, `shell_command`, or `unknown` wait for explicit approval before the mock runner simulates them; `analysis` and `read_file` previews simulate immediately as safe actions.
+- The real read-only runner requires an explicit workspace opt-in (`OPERATOR_RUNNER_WORKSPACE`) and, even then, only ever runs the five allowlisted commands above.
+- The Release Operator and Mission Compiler never mutate anything — they read root docs and git state, and write evidence/report artifacts only to their own gitignored `reports/` folders or an explicit `--out` path.
+- Push, deploy, live publish, and migration remain **human-approval decisions** everywhere in Operator; no code path in this repo performs any of them today.
+
+## Quick-start commands
+
+From `apps/chanter-Operator` (verified against `package.json`):
+
+```powershell
+npm install
+npm run dev              # cockpit backend (127.0.0.1:3001) + frontend (127.0.0.1:5173)
+npm run typecheck
+npm test                 # backend + frontend suites
+npm run release:scan     # Release Operator: repo state table
+npm run release:report   # Release Operator: write evidence report
+npm run mission:compile -- --intent "..."   # Mission Compiler
+```
+
+## Related in-repo docs
+
+- `tools/release-operator/README.md`
+- `tools/mission-compiler/README.md`
+- `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md`, `docs/OPERATOR_RUNTIME_BRIDGE_P2A.md`
+- `reviews/operator-p1-readonly-runner-report.md` (workspace root `reviews/`, not inside this repo)
+
+---
 
 ## What changed in P0.4
 
@@ -30,7 +126,7 @@ The integrity checker is read-only. It never rewrites, deletes, or "fixes" data.
 
 ## What changed in P0.5
 
-- Added etchHealth() to the API client — fetches GET /api/health on app mount
+- Added etchHealth() to the API client — fetches GET /api/health on app mount
 - Added HealthResponse, HealthIntegrity, and ReadinessState types
 - Created ReadinessBar component — a compact readiness strip below the header
 - Wired readiness fetch into App.tsx on mount, independent of task loading
@@ -222,4 +318,6 @@ The integrity checker is read-only. It never rewrites, deletes, or "fixes" data.
 
 ## Remaining P1 blockers
 
-P1 remains intentionally unimplemented. Before any real runner integration, it needs a separate reviewed design for process isolation, operation-scoped filesystem capabilities, path revalidation at execution time, command allowlisting, timeouts, output limits, cancellation, idempotency, retry/recovery, and an atomic audit/state persistence strategy. Authentication, remote access, git automation, deployment, Loop Governor, YOLO Mode, and autonomous operation remain outside P0.3.
+> **Superseded in part:** this paragraph reflects the P0.3 checkpoint, written before P1.0. P1.0 since shipped the bounded, allowlisted, read-only local runner described in "Local read-only runner and its command allowlist" above (`apps/backend/src/runners/realReadonlyRunner.ts`, `reviews/operator-p1-readonly-runner-report.md`) — process isolation via `execFile`/`shell: false`, a fixed 5-command allowlist, timeouts, output limits, and audit/DB persistence are implemented for that narrow read-only surface. The blockers below still apply to any *broader* runner integration (write/shell/deploy capability, autonomous operation) — none of that has shipped.
+
+P1 remains intentionally unimplemented beyond the P1.0 read-only runner. Before any broader real runner integration (write, shell, or deploy capability), it needs a separate reviewed design for process isolation, operation-scoped filesystem capabilities, path revalidation at execution time, command allowlisting, timeouts, output limits, cancellation, idempotency, retry/recovery, and an atomic audit/state persistence strategy. Authentication, remote access, git automation, deployment, Loop Governor, YOLO Mode, and autonomous operation remain outside scope.
