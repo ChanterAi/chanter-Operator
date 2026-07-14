@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import {
   AUTOPOSTER_ACTIONS,
+  type AutoPosterConnectedAccountListSuccess,
+  type AutoPosterConnectedAccountView,
+  type AutoPosterPortFailure,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
   type RuntimeMissionStatus,
@@ -18,6 +21,16 @@ const ISO_WITH_ZONE_PATTERN =
 const SENSITIVE_QUERY_KEY_PATTERN =
   /(?:token|secret|password|credential|api[-_]?key|signature)/i;
 const REDACTED_VALUE = "[REDACTED]";
+const ACCOUNT_VALIDATION_ERROR_CODES = new Set([
+  "unknown_account_id",
+  "account_id_case_mismatch",
+  "account_id_non_canonical",
+  "account_workspace_mismatch",
+  "provider_account_mismatch",
+  "account_disconnected",
+  "account_not_publishing_ready",
+  "workspace_not_found",
+]);
 
 export type AutoPosterMissionStatus =
   | "approval_required"
@@ -46,6 +59,23 @@ export interface AutoPosterRuntimeMission {
   createdAt: string;
   updatedAt: string;
   runtimeResult: RuntimeMissionResult | null;
+  evidenceSummary: AutoPosterMissionEvidenceSummary;
+}
+
+export interface AutoPosterMissionEvidenceSummary {
+  missionId: string;
+  traceId: string;
+  workspaceId: string;
+  provider: "tiktok" | "youtube";
+  canonicalAccountReference: string;
+  policyDecision: "not_evaluated" | "allowed" | "blocked" | "approval_required";
+  idempotencyOutcome: "not_applicable" | "first_execution" | "duplicate";
+  queueDraftId: string | null;
+  persistedDraftStatus: string | null;
+  operatorApprovalState: "required" | "approved";
+  releaseApprovalState: "not_started" | "required";
+  publishingState: "not_started" | "blocked_until_human_approval";
+  typedError: { code: string; message: string } | null;
 }
 
 export interface AutoPosterRuntimeReadiness {
@@ -129,6 +159,34 @@ function requireBoundedString(
   return normalized;
 }
 
+function requireOpaqueAccountId(
+  input: Record<string, unknown>,
+  maxLength: number,
+): string {
+  const value = input.accountId;
+  if (typeof value !== "string") {
+    throw new OperatorError("accountId must be a string.", 400, "unknown_account_id");
+  }
+  if (!value) {
+    throw new OperatorError("accountId is required.", 400, "unknown_account_id");
+  }
+  if (value.length > maxLength) {
+    throw new OperatorError(
+      `accountId must be at most ${maxLength} characters.`,
+      400,
+      "account_id_non_canonical",
+    );
+  }
+  if (value !== value.trim()) {
+    throw new OperatorError(
+      "accountId must match the exact canonical connected-account ID; surrounding whitespace is not normalized.",
+      409,
+      "account_id_non_canonical",
+    );
+  }
+  return value;
+}
+
 function optionalBoundedString(
   input: Record<string, unknown>,
   field: string,
@@ -169,7 +227,71 @@ function validateMediaUrl(value: string): void {
   }
 }
 
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function buildEvidenceSummary(
+  row: MissionRow,
+  runtimeResult: RuntimeMissionResult | null,
+): AutoPosterMissionEvidenceSummary {
+  const output = jsonObject(runtimeResult?.output);
+  const post = jsonObject(output?.post);
+  const postId = post && typeof post.id === "string" ? post.id : "";
+  const postScheduledAt = post && typeof post.scheduledAt === "string" ? post.scheduledAt : "";
+  const verifiedQueueDraft = Boolean(
+    runtimeResult &&
+    (runtimeResult.status === "succeeded" || runtimeResult.status === "duplicate") &&
+    post &&
+    postId.trim() &&
+    postId === postId.trim() &&
+    post.accountId === row.account_id &&
+    post.provider === row.provider &&
+    post.status === "scheduled" &&
+    post.approved === false &&
+    postScheduledAt.trim() &&
+    Number.isFinite(Date.parse(postScheduledAt)) &&
+    Date.parse(postScheduledAt) === Date.parse(row.scheduled_at) &&
+    output?.publishing === "blocked_until_human_approval"
+  );
+  const queueDraftId =
+    verifiedQueueDraft ? postId : null;
+  const persistedDraftStatus = verifiedQueueDraft ? "scheduled" : null;
+  const policyDecision = runtimeResult?.policyDecision
+    ? runtimeResult.policyDecision.allowed
+      ? "allowed"
+      : runtimeResult.policyDecision.blocked
+        ? "blocked"
+        : "approval_required"
+    : "not_evaluated";
+  const publishingState = verifiedQueueDraft
+    ? "blocked_until_human_approval"
+    : "not_started";
+  const firstError = runtimeResult?.errors[0];
+
+  return {
+    missionId: row.mission_id,
+    traceId: row.trace_id,
+    workspaceId: row.workspace_id,
+    provider: row.provider,
+    canonicalAccountReference: `${row.provider}:${row.account_id}`,
+    policyDecision,
+    idempotencyOutcome: runtimeResult?.idempotency.outcome ?? "not_applicable",
+    queueDraftId,
+    persistedDraftStatus,
+    operatorApprovalState: row.approved_by ? "approved" : "required",
+    releaseApprovalState: queueDraftId ? "required" : "not_started",
+    publishingState,
+    typedError: firstError ? { code: firstError.code, message: firstError.message } : null,
+  };
+}
+
 function mapMission(row: MissionRow): AutoPosterRuntimeMission {
+  const runtimeResult = row.runtime_result_json
+    ? (JSON.parse(row.runtime_result_json) as RuntimeMissionResult)
+    : null;
   return {
     missionId: row.mission_id,
     traceId: row.trace_id,
@@ -191,9 +313,48 @@ function mapMission(row: MissionRow): AutoPosterRuntimeMission {
     approvedBy: row.approved_by,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    runtimeResult: row.runtime_result_json
-      ? (JSON.parse(row.runtime_result_json) as RuntimeMissionResult)
-      : null,
+    runtimeResult,
+    evidenceSummary: buildEvidenceSummary(row, runtimeResult),
+  };
+}
+
+function isConnectedAccountView(value: unknown): value is AutoPosterConnectedAccountView {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const account = value as Record<string, unknown>;
+  const provider = account.provider;
+  const accountId = account.accountId;
+  return (
+    (provider === "tiktok" || provider === "youtube") &&
+    typeof accountId === "string" &&
+    accountId.length > 0 &&
+    account.connectedAccountId === `${provider}:${accountId}` &&
+    typeof account.providerDisplayName === "string" &&
+    typeof account.username === "string" &&
+    typeof account.displayName === "string" &&
+    (account.connectionStatus === "connected" ||
+      account.connectionStatus === "reauthorization_required" ||
+      account.connectionStatus === "disconnected") &&
+    typeof account.publishingReady === "boolean" &&
+    Array.isArray(account.readinessBlockers) &&
+    account.readinessBlockers.every((blocker) => typeof blocker === "string") &&
+    (account.lastVerifiedAt === null || typeof account.lastVerifiedAt === "string")
+  );
+}
+
+function projectConnectedAccount(
+  account: AutoPosterConnectedAccountView,
+): AutoPosterConnectedAccountView {
+  return {
+    connectedAccountId: account.connectedAccountId,
+    accountId: account.accountId,
+    provider: account.provider,
+    providerDisplayName: account.providerDisplayName,
+    username: account.username,
+    displayName: account.displayName,
+    connectionStatus: account.connectionStatus,
+    publishingReady: account.publishingReady,
+    readinessBlockers: [...account.readinessBlockers],
+    lastVerifiedAt: account.lastVerifiedAt,
   };
 }
 
@@ -227,6 +388,29 @@ export class AutoPosterMissionService {
     }
   }
 
+  private throwPortFailure(failure: AutoPosterPortFailure): never {
+    const reasonCode = failure.reasonCode ?? failure.details?.reasonCode;
+    const code =
+      typeof reasonCode === "string" && ACCOUNT_VALIDATION_ERROR_CODES.has(reasonCode)
+        ? reasonCode
+        : `autoposter_${failure.code}`;
+    const statusCode =
+      code === "unknown_account_id" || code === "workspace_not_found"
+        ? 404
+        : failure.code === "unavailable"
+          ? 503
+          : failure.code === "unauthorized"
+            ? 502
+            : failure.code === "internal"
+              ? 502
+              : 409;
+    throw new OperatorError(
+      redactProtectedValues(failure.message, this.protectedValues) as string,
+      statusCode,
+      code,
+    );
+  }
+
   getReadiness(): AutoPosterRuntimeReadiness {
     return {
       configured: this.executor.configured,
@@ -236,13 +420,40 @@ export class AutoPosterMissionService {
     };
   }
 
-  createScheduleMission(inputValue: unknown): AutoPosterRuntimeMission {
+  async listConnectedAccounts(workspaceIdValue: unknown): Promise<AutoPosterConnectedAccountListSuccess> {
+    const workspaceId = requireBoundedString(
+      { workspaceId: workspaceIdValue },
+      "workspaceId",
+      160,
+    );
+    this.assertContainsNoProtectedValue([workspaceId]);
+    const result = await this.executor.listConnectedAccounts(workspaceId);
+    if (!result.ok) this.throwPortFailure(result);
+    if (
+      result.workspaceId !== workspaceId ||
+      !Array.isArray(result.accounts) ||
+      !result.accounts.every(isConnectedAccountView) ||
+      result.count !== result.accounts.length
+    ) {
+      throw new OperatorError(
+        "AutoPoster returned an invalid connected-account registry response.",
+        502,
+        "autoposter_account_registry_invalid",
+      );
+    }
+    return {
+      ...result,
+      accounts: result.accounts.map(projectConnectedAccount),
+    };
+  }
+
+  async createScheduleMission(inputValue: unknown): Promise<AutoPosterRuntimeMission> {
     if (!inputValue || typeof inputValue !== "object" || Array.isArray(inputValue)) {
       throw new OperatorError("Request body must be an object.", 400);
     }
     const input = inputValue as Record<string, unknown>;
     const workspaceId = requireBoundedString(input, "workspaceId", 160);
-    const accountId = requireBoundedString(input, "accountId", 256);
+    const requestedAccountId = requireOpaqueAccountId(input, 256);
     const providerValue = requireBoundedString(input, "provider", 16).toLowerCase();
     if (providerValue !== "tiktok" && providerValue !== "youtube") {
       throw new OperatorError("provider must be either tiktok or youtube.", 400);
@@ -277,7 +488,7 @@ export class AutoPosterMissionService {
 
     this.assertContainsNoProtectedValue([
       workspaceId,
-      accountId,
+      requestedAccountId,
       provider,
       mediaUrl,
       caption,
@@ -286,6 +497,29 @@ export class AutoPosterMissionService {
       description,
       scheduledAt,
     ]);
+
+    const accountValidation = await this.executor.validateConnectedAccount({
+      workspaceId,
+      accountId: requestedAccountId,
+      provider,
+    });
+    if (!accountValidation.ok) this.throwPortFailure(accountValidation);
+    const account = accountValidation.account;
+    if (
+      accountValidation.workspaceId !== workspaceId ||
+      !isConnectedAccountView(account) ||
+      account.accountId !== requestedAccountId ||
+      account.provider !== provider ||
+      account.connectionStatus !== "connected" ||
+      account.publishingReady !== true
+    ) {
+      throw new OperatorError(
+        "AutoPoster did not confirm the exact publishing-ready connected account.",
+        409,
+        "autoposter_account_validation_invalid",
+      );
+    }
+    const accountId = account.accountId;
 
     const missionId = this.idFactory();
     const traceId = this.idFactory();

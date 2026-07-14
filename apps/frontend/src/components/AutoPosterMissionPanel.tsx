@@ -2,9 +2,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import {
   approveRuntimeMission,
   createAutoPosterScheduleMission,
+  listAutoPosterConnectedAccounts,
   listRuntimeMissions,
 } from "../api/client";
 import type {
+  AutoPosterConnectedAccount,
   AutoPosterProvider,
   CreateAutoPosterScheduleMissionInput,
   RuntimeJsonValue,
@@ -12,7 +14,7 @@ import type {
   RuntimeMissionResult,
 } from "../api/types";
 
-type MissionOperation = "loading" | "creating" | "approving";
+type MissionOperation = "loading" | "loading_accounts" | "creating" | "approving";
 
 interface VerifiedQueueDraft {
   id: string;
@@ -23,6 +25,15 @@ interface VerifiedQueueDraft {
 
 function upsertMission(missions: RuntimeMission[], nextMission: RuntimeMission): RuntimeMission[] {
   return [nextMission, ...missions.filter((mission) => mission.missionId !== nextMission.missionId)];
+}
+
+function connectedAccountName(account: AutoPosterConnectedAccount): string {
+  return account.displayName || account.username || "Unnamed channel";
+}
+
+function connectedAccountOptionLabel(account: AutoPosterConnectedAccount): string {
+  const readiness = account.publishingReady ? "publishing ready" : "publishing blocked";
+  return `${account.providerDisplayName} · ${connectedAccountName(account)} · ${account.connectionStatus.replaceAll("_", " ")} · ${readiness} · ${account.accountId}`;
 }
 
 function isJsonObject(
@@ -48,13 +59,14 @@ function getVerifiedQueueDraft(
   if (!isJsonObject(postValue)) return null;
 
   const post = postValue;
-  const id = typeof post.id === "string" ? post.id.trim() : "";
-  const accountId = typeof post.accountId === "string" ? post.accountId.trim() : "";
+  const id = typeof post.id === "string" ? post.id : "";
+  const accountId = typeof post.accountId === "string" ? post.accountId : "";
   const provider = typeof post.provider === "string" ? post.provider.trim() : "";
   const status = typeof post.status === "string" ? post.status.trim() : "";
   const scheduledAt = typeof post.scheduledAt === "string" ? post.scheduledAt.trim() : "";
   if (
-    !id ||
+    !id.trim() ||
+    id !== id.trim() ||
     accountId !== expectedAccountId ||
     provider !== expectedProvider ||
     status !== "scheduled" ||
@@ -124,8 +136,8 @@ export function AutoPosterMissionPanel() {
   const [error, setError] = useState("");
 
   const [workspaceId, setWorkspaceId] = useState("");
-  const [accountId, setAccountId] = useState("");
-  const [provider, setProvider] = useState<AutoPosterProvider>("tiktok");
+  const [selectedConnectionId, setSelectedConnectionId] = useState("");
+  const [connectedAccounts, setConnectedAccounts] = useState<AutoPosterConnectedAccount[]>([]);
   const [mediaUrl, setMediaUrl] = useState("");
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
@@ -136,6 +148,9 @@ export function AutoPosterMissionPanel() {
 
   const selectedMission =
     missions.find((mission) => mission.missionId === selectedMissionId) ?? null;
+  const selectedConnectedAccount =
+    connectedAccounts.find((account) => account.connectedAccountId === selectedConnectionId) ?? null;
+  const provider: AutoPosterProvider = selectedConnectedAccount?.provider ?? "tiktok";
   const verifiedQueueDraft = selectedMission
     ? getVerifiedQueueDraft(
         selectedMission.runtimeResult,
@@ -146,6 +161,7 @@ export function AutoPosterMissionPanel() {
     : null;
   const missionBusy = operation !== undefined;
   const formBusy = operation === "creating";
+  const accountsBusy = operation === "loading_accounts";
   const approvalBusy = operation === "approving";
 
   useEffect(() => {
@@ -172,16 +188,44 @@ export function AutoPosterMissionPanel() {
     };
   }, []);
 
+  async function handleLoadConnectedAccounts(): Promise<void> {
+    if (missionBusy) return;
+    const requestedWorkspaceId = workspaceId.trim();
+    if (!requestedWorkspaceId) {
+      setError("workspaceId is required before loading connected accounts.");
+      return;
+    }
+    setOperation("loading_accounts");
+    setError("");
+    setConnectedAccounts([]);
+    setSelectedConnectionId("");
+
+    try {
+      const result = await listAutoPosterConnectedAccounts(requestedWorkspaceId);
+      setConnectedAccounts(result.accounts);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not load connected accounts.");
+    } finally {
+      setOperation(undefined);
+    }
+  }
+
   async function handleCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (missionBusy) return;
     setOperation("creating");
     setError("");
 
+    if (!selectedConnectedAccount) {
+      setOperation(undefined);
+      setError("Select a canonical connected account before creating the mission.");
+      return;
+    }
+
     const input: CreateAutoPosterScheduleMissionInput = {
       workspaceId: workspaceId.trim(),
-      accountId: accountId.trim(),
-      provider,
+      accountId: selectedConnectedAccount.accountId,
+      provider: selectedConnectedAccount.provider,
       mediaUrl: mediaUrl.trim(),
       caption: caption.trim(),
       hashtags: hashtags.trim(),
@@ -260,34 +304,48 @@ export function AutoPosterMissionPanel() {
                 <input
                   className="text-input"
                   value={workspaceId}
-                  onChange={(event) => setWorkspaceId(event.target.value)}
-                  required
-                />
-              </label>
-              <label>
-                Account ID
-                <input
-                  className="text-input"
-                  value={accountId}
-                  onChange={(event) => setAccountId(event.target.value)}
-                  required
-                />
-              </label>
-              <label>
-                Provider
-                <select
-                  value={provider}
                   onChange={(event) => {
-                    const nextProvider = event.target.value;
-                    if (nextProvider === "tiktok" || nextProvider === "youtube") {
-                      setProvider(nextProvider);
-                    }
+                    setWorkspaceId(event.target.value);
+                    setConnectedAccounts([]);
+                    setSelectedConnectionId("");
                   }}
+                  required
+                />
+              </label>
+              <button
+                className="button runtime-mission-account-refresh"
+                type="button"
+                onClick={handleLoadConnectedAccounts}
+                disabled={!workspaceId.trim() || missionBusy}
+              >
+                {accountsBusy ? "Loading accounts..." : "Load connected accounts"}
+              </button>
+              <label>
+                Connected account
+                <select
+                  value={selectedConnectionId}
+                  onChange={(event) => setSelectedConnectionId(event.target.value)}
+                  required
                 >
-                  <option value="tiktok">TikTok</option>
-                  <option value="youtube">YouTube</option>
+                  <option value="">Select an exact canonical account</option>
+                  {connectedAccounts.map((account) => (
+                    <option key={account.connectedAccountId} value={account.connectedAccountId}>
+                      {connectedAccountOptionLabel(account)}
+                    </option>
+                  ))}
                 </select>
               </label>
+              {selectedConnectedAccount && (
+                <dl className="runtime-mission-account-summary" aria-label="Selected connected account">
+                  <div><dt>Provider</dt><dd>{selectedConnectedAccount.providerDisplayName}</dd></div>
+                  <div><dt>Account</dt><dd>{connectedAccountName(selectedConnectedAccount)}</dd></div>
+                  <div><dt>Connection</dt><dd>{selectedConnectedAccount.connectionStatus.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Publishing</dt><dd>{selectedConnectedAccount.publishingReady ? "Ready" : "Blocked"}</dd></div>
+                  <div className="runtime-mission-account-summary__canonical">
+                    <dt>Exact canonical ID</dt><dd><code>{selectedConnectedAccount.accountId}</code></dd>
+                  </div>
+                </dl>
+              )}
               <label>
                 Media URL
                 <input
@@ -350,11 +408,16 @@ export function AutoPosterMissionPanel() {
                 />
               </label>
               <p className="form-note">
-                Include <code>Z</code> or an offset such as <code>+03:00</code>. Creating the mission
-                does not contact AutoPoster.
+                Include <code>Z</code> or an offset such as <code>+03:00</code>. Account loading and
+                mission creation perform read-only AutoPoster registry validation; only a later
+                explicit approval may create an unapproved queue draft.
               </p>
 
-              <button className="button button--primary" type="submit">
+              <button
+                className="button button--primary"
+                type="submit"
+                disabled={!selectedConnectedAccount}
+              >
                 {formBusy ? "Creating mission..." : "Create schedule mission"}
               </button>
             </fieldset>
@@ -564,6 +627,26 @@ export function AutoPosterMissionPanel() {
 
               <section className="runtime-mission-evidence" aria-labelledby="mission-evidence-heading">
                 <h3 id="mission-evidence-heading">Evidence summary</h3>
+                <dl className="runtime-mission-evidence-summary">
+                  <div><dt>Mission ID</dt><dd><code>{selectedMission.evidenceSummary.missionId}</code></dd></div>
+                  <div><dt>Trace ID</dt><dd><code>{selectedMission.evidenceSummary.traceId}</code></dd></div>
+                  <div><dt>Workspace</dt><dd>{selectedMission.evidenceSummary.workspaceId}</dd></div>
+                  <div><dt>Provider</dt><dd>{selectedMission.evidenceSummary.provider}</dd></div>
+                  <div><dt>Canonical account</dt><dd><code>{selectedMission.evidenceSummary.canonicalAccountReference}</code></dd></div>
+                  <div><dt>Policy</dt><dd>{selectedMission.evidenceSummary.policyDecision.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Idempotency</dt><dd>{selectedMission.evidenceSummary.idempotencyOutcome.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Queue draft ID</dt><dd>{selectedMission.evidenceSummary.queueDraftId ?? "Not created"}</dd></div>
+                  <div><dt>Draft status</dt><dd>{selectedMission.evidenceSummary.persistedDraftStatus ?? "Not created"}</dd></div>
+                  <div><dt>Operator approval</dt><dd>{selectedMission.evidenceSummary.operatorApprovalState}</dd></div>
+                  <div><dt>Release approval</dt><dd>{selectedMission.evidenceSummary.releaseApprovalState.replaceAll("_", " ")}</dd></div>
+                  <div><dt>Publishing</dt><dd>{selectedMission.evidenceSummary.publishingState.replaceAll("_", " ")}</dd></div>
+                  {selectedMission.evidenceSummary.typedError && (
+                    <div className="runtime-mission-evidence-summary__error">
+                      <dt>Typed error</dt>
+                      <dd><code>{selectedMission.evidenceSummary.typedError.code}</code> {selectedMission.evidenceSummary.typedError.message}</dd>
+                    </div>
+                  )}
+                </dl>
                 {selectedMission.runtimeResult?.evidence?.evidence.length ? (
                   <ul>
                     {selectedMission.runtimeResult.evidence.evidence.map((evidence) => (

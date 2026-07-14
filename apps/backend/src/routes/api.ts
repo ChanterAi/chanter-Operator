@@ -74,10 +74,32 @@ export function createApiRouter(
     response.json(requireRuntimeMissionService().getMission(request.params.missionId));
   });
 
-  router.post("/runtime-missions/autoposter/schedule", (request, response) => {
-    response
-      .status(201)
-      .json(requireRuntimeMissionService().createScheduleMission(request.body));
+  router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    try {
+      missions = requireRuntimeMissionService();
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions
+      .listConnectedAccounts(request.query.workspaceId)
+      .then((result) => response.json(result))
+      .catch(next);
+  });
+
+  router.post("/runtime-missions/autoposter/schedule", (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    try {
+      missions = requireRuntimeMissionService();
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions
+      .createScheduleMission(request.body)
+      .then((mission) => response.status(201).json(mission))
+      .catch(next);
   });
 
   router.post("/runtime-missions/:missionId/approve", (request, response, next) => {

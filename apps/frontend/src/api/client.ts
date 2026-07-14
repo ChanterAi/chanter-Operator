@@ -1,6 +1,7 @@
 import type {
   AddCommitReviewInput,
   AddValidationInput,
+  AutoPosterConnectedAccountsResponse,
   CreateAutoPosterScheduleMissionInput,
   CreateTaskInput,
   EvidenceBundleResponse,
@@ -9,6 +10,15 @@ import type {
   TaskDetail,
   TaskIntent,
 } from "./types";
+
+export class OperatorApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+  ) {
+    super(code ? `${code}: ${message}` : message);
+  }
+}
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response;
@@ -21,14 +31,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new Error("Could not reach the local Operator API.");
   }
 
-  let payload: T & { error?: string };
+  let payload: T & { error?: string; code?: string };
   try {
-    payload = (await response.json()) as T & { error?: string };
+    payload = (await response.json()) as T & { error?: string; code?: string };
   } catch {
     throw new Error("The local Operator API returned an unreadable response.");
   }
   if (!response.ok) {
-    throw new Error(payload.error || "The local operator request failed.");
+    throw new OperatorApiError(
+      payload.error || "The local operator request failed.",
+      payload.code,
+    );
   }
   return payload;
 }
@@ -100,6 +113,15 @@ export function rejectStep(stepId: string): Promise<TaskDetail> {
 export async function listRuntimeMissions(): Promise<RuntimeMission[]> {
   const result = await request<{ missions: RuntimeMission[] }>("/api/runtime-missions");
   return result.missions;
+}
+
+export function listAutoPosterConnectedAccounts(
+  workspaceId: string,
+): Promise<AutoPosterConnectedAccountsResponse> {
+  const query = new URLSearchParams({ workspaceId });
+  return request<AutoPosterConnectedAccountsResponse>(
+    `/api/runtime-missions/autoposter/connected-accounts?${query.toString()}`,
+  );
 }
 
 export function createAutoPosterScheduleMission(

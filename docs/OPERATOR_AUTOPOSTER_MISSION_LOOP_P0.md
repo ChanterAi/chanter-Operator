@@ -14,7 +14,10 @@ It creates one scheduled AutoPoster queue draft after explicit Operator approval
 
 ```text
 Operator AutoPoster Mission tab
+  -> GET /api/runtime-missions/autoposter/connected-accounts
+  -> token-guarded AutoPoster registry lookup
   -> POST /api/runtime-missions/autoposter/schedule
+  -> exact account/workspace/provider/readiness preflight
   -> autoposter_runtime_missions (approval_required)
   -> POST /api/runtime-missions/:missionId/approve
   -> SQLite compare-and-set claim (executing)
@@ -42,7 +45,7 @@ Operator reads four environment variables:
 | `OPERATOR_RUNTIME_USER_ID` | Yes | Runtime tenant identity. It should represent the same logical owner as AutoPoster's `APP_DEFAULT_USER_ID`. |
 | `AUTOPOSTER_RUNTIME_TIMEOUT_MS` | No | One-attempt request timeout. Integer from 100 through 120000 milliseconds; Runtime defaults to 10000 when omitted. |
 
-Missing or invalid configuration does not stop Operator startup or its generic workflow. Health reports the mission capability as `configured: false`; an approved mission runs through the normal Runtime adapter over a fail-closed unavailable port and persists an `unavailable` result. Configuration readiness does not claim AutoPoster reachability, workspace access, entitlement, or account readiness.
+Missing or invalid configuration does not stop Operator startup or its generic workflow. Health reports the mission capability as `configured: false`; account discovery and mission creation fail closed before mission persistence because canonical account validation is unavailable. Configuration readiness does not claim AutoPoster reachability, workspace access, entitlement, or account readiness.
 
 The service token is held only in process memory by configuration, the HTTP-port closure, and an exact configured-value containment guard that rejects accidental token pastes before persistence. Runtime rejects downstream payloads that echo it, and Operator exact-redacts protected values again before result persistence. It is never placed in a mission request, database row, Runtime result, audit record, API response, or UI field.
 
@@ -66,7 +69,7 @@ The service token is held only in process memory by configuration, the HTTP-port
 
 For `provider: "youtube"`, `title` is required and `description` is optional. TikTok requests reject YouTube-only fields. The server validates bounded strings, an explicit timezone and future time, and an HTTPS media URL without embedded credentials, fragments, or credential/signature query parameters. AutoPoster remains authoritative for media eligibility.
 
-The server creates `missionId`, `traceId`, and `idempotencyKey`, then persists `status: "approval_required"`. Creation never invokes Runtime or AutoPoster.
+The normal UI loads the existing workspace-scoped AutoPoster connected-account registry and requires an exact canonical selection. Before persistence, the server revalidates that exact ID, provider, workspace ownership, connection state, and publishing readiness through the existing Runtime/AutoPoster control seam. This preflight is read-only and never creates a queue item. Only after that validation succeeds does Operator create `missionId`, `traceId`, and `idempotencyKey` and persist `status: "approval_required"`.
 
 ### Approve and execute
 
@@ -82,6 +85,7 @@ The server creates `missionId`, `traceId`, and `idempotencyKey`, then persists `
 
 ### Read
 
+- `GET /api/runtime-missions/autoposter/connected-accounts?workspaceId=...` returns the safe workspace-scoped canonical account projection used by the selector.
 - `GET /api/runtime-missions?limit=50` returns `{ "missions": [...] }`, bounded to 100 and newest-first.
 - `GET /api/runtime-missions/:missionId` returns one mission.
 
@@ -107,7 +111,7 @@ There is deliberately no automatic retry after `unavailable` or after an ambiguo
 
 ## Evidence and redaction
 
-Operator persists only `RuntimeMissionResult`, not raw HTTP failures. Runtime redacts outputs, warnings, errors, validation messages, and evidence before export. The UI displays the mission ID, trace ID, policy/approval/idempotency decisions, safe errors and warnings, evidence labels, and queue draft ID.
+Operator persists only `RuntimeMissionResult`, not raw HTTP failures. Runtime redacts outputs, warnings, errors, validation messages, and evidence before export. The API derives a concise allowlisted summary containing mission/trace/workspace identity, canonical provider/account reference, policy and idempotency decisions, draft identity/status, both approval states, publishing state, and the first typed error. The UI displays that summary alongside the detailed safe Runtime evidence.
 
 The generic JSONL audit model is task/step-specific and is not reused for mission IDs. Reusing it would make integrity cross-references dishonest. The mission row atomically owns its approval identity, state, result, and Runtime evidence.
 

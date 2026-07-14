@@ -893,9 +893,66 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
 
 .runtime-mission-form .form-note code,
 .runtime-mission-identifiers code,
-.runtime-mission-result code {
+.runtime-mission-result code,
+.runtime-mission-account-summary code,
+.runtime-mission-evidence-summary code {
   color: #b7c3d6;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.runtime-mission-account-refresh {
+  width: 100%;
+  border-color: #354052;
+  background: #121720;
+  color: #b7c3d6;
+}
+
+.runtime-mission-account-summary,
+.runtime-mission-evidence-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.runtime-mission-account-summary div,
+.runtime-mission-evidence-summary div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid #202630;
+  border-radius: 6px;
+  background: #0a0d12;
+}
+
+.runtime-mission-account-summary__canonical,
+.runtime-mission-evidence-summary__error {
+  grid-column: 1 / -1;
+}
+
+.runtime-mission-account-summary dt,
+.runtime-mission-evidence-summary dt {
+  color: #697487;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.runtime-mission-account-summary dd,
+.runtime-mission-evidence-summary dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: #c8ced8;
+  font-size: 10px;
+}
+
+.runtime-mission-evidence-summary {
+  margin-bottom: 11px;
+}
+
+.runtime-mission-evidence-summary__error {
+  border-color: #653741 !important;
+  background: #1c1014 !important;
 }
 
 .runtime-mission-empty {
@@ -1194,7 +1251,9 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
   .runtime-mission-summary dl,
   .runtime-mission-decisions dl,
   .runtime-mission-identifiers,
-  .runtime-mission-result dl {
+  .runtime-mission-result dl,
+  .runtime-mission-account-summary,
+  .runtime-mission-evidence-summary {
     grid-template-columns: 1fr;
   }
 

@@ -220,6 +220,26 @@ export interface EvidenceBundleResponse {
 
 export type AutoPosterProvider = "tiktok" | "youtube";
 
+export interface AutoPosterConnectedAccount {
+  connectedAccountId: string;
+  accountId: string;
+  provider: AutoPosterProvider;
+  providerDisplayName: string;
+  username: string;
+  displayName: string;
+  connectionStatus: "connected" | "reauthorization_required" | "disconnected";
+  publishingReady: boolean;
+  readinessBlockers: string[];
+  lastVerifiedAt: string | null;
+}
+
+export interface AutoPosterConnectedAccountsResponse {
+  ok: true;
+  workspaceId: string;
+  accounts: AutoPosterConnectedAccount[];
+  count: number;
+}
+
 export type RuntimeMissionStatus =
   | "approval_required"
   | "pending_approval"
@@ -285,6 +305,22 @@ export interface RuntimeMissionResult {
   };
 }
 
+export interface RuntimeMissionEvidenceSummary {
+  missionId: string;
+  traceId: string;
+  workspaceId: string;
+  provider: AutoPosterProvider;
+  canonicalAccountReference: string;
+  policyDecision: "not_evaluated" | "allowed" | "blocked" | "approval_required";
+  idempotencyOutcome: "not_applicable" | "first_execution" | "duplicate";
+  queueDraftId: string | null;
+  persistedDraftStatus: string | null;
+  operatorApprovalState: "required" | "approved";
+  releaseApprovalState: "not_started" | "required";
+  publishingState: "not_started" | "blocked_until_human_approval";
+  typedError: { code: string; message: string } | null;
+}
+
 export interface RuntimeMission {
   missionId: string;
   traceId: string;
@@ -307,6 +343,7 @@ export interface RuntimeMission {
   createdAt: string;
   updatedAt: string;
   runtimeResult: RuntimeMissionResult | null;
+  evidenceSummary: RuntimeMissionEvidenceSummary;
 }
 
 export interface CreateAutoPosterScheduleMissionInput {

@@ -73,7 +73,7 @@ Full detail: `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md` and `docs/OPERATOR_RUNTIME_BR
 
 - Task steps classified as `file_write`, `file_edit`, `shell_command`, or `unknown` wait for explicit approval before the mock runner simulates them; `analysis` and `read_file` previews simulate immediately as safe actions.
 - The real read-only runner requires an explicit workspace opt-in (`OPERATOR_RUNNER_WORKSPACE`) and, even then, only ever runs the five allowlisted commands above.
-- AutoPoster mission creation never calls the product. A named approver must separately release Runtime execution, and the resulting queue item remains unapproved for publishing in AutoPoster.
+- AutoPoster mission creation performs one read-only, workspace-scoped connected-account validation through the existing Runtime/AutoPoster control seam before persistence. It does not create a queue item. A named approver must separately release Runtime execution, and the resulting queue item remains unapproved for publishing in AutoPoster.
 - The Release Operator and Mission Compiler never mutate anything — they read root docs and git state, and write evidence/report artifacts only to their own gitignored `reports/` folders or an explicit `--out` path.
 - Push, deploy, live publish, and migration remain **human-approval decisions** everywhere in Operator; no code path in this repo performs any of them today.
 

@@ -5,6 +5,8 @@ import type { DatabaseSync } from "node:sqlite";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
+  AutoPosterConnectedAccountListParams,
+  AutoPosterConnectedAccountValidationParams,
   AutoPosterOperationsPort,
   AutoPosterScheduleParams,
 } from "chanter-agent-runtime";
@@ -57,9 +59,38 @@ function validInput(overrides: Record<string, unknown> = {}): Record<string, unk
 function makePort(overrides: Partial<AutoPosterOperationsPort> = {}): {
   port: AutoPosterOperationsPort;
   scheduleCalls: AutoPosterScheduleParams[];
+  accountListCalls: AutoPosterConnectedAccountListParams[];
+  accountValidationCalls: AutoPosterConnectedAccountValidationParams[];
 } {
   const scheduleCalls: AutoPosterScheduleParams[] = [];
+  const accountListCalls: AutoPosterConnectedAccountListParams[] = [];
+  const accountValidationCalls: AutoPosterConnectedAccountValidationParams[] = [];
+  const accountView = (accountId: string, provider: "tiktok" | "youtube") => ({
+    connectedAccountId: `${provider}:${accountId}`,
+    accountId,
+    provider,
+    providerDisplayName: provider === "youtube" ? "YouTube" : "TikTok",
+    username: "creator",
+    displayName: "Creator",
+    connectionStatus: "connected" as const,
+    publishingReady: true,
+    readinessBlockers: [],
+    lastVerifiedAt: "2026-07-14T08:00:00.000Z",
+  });
   const port: AutoPosterOperationsPort = {
+    async listConnectedAccounts(params) {
+      accountListCalls.push(params);
+      const accounts = [accountView("account-a", "tiktok"), accountView("UC-ExactCase", "youtube")];
+      return { ok: true, workspaceId: params.workspaceId, accounts, count: accounts.length };
+    },
+    async validateConnectedAccount(params) {
+      accountValidationCalls.push(params);
+      return {
+        ok: true,
+        workspaceId: params.workspaceId,
+        account: accountView(params.accountId, params.provider as "tiktok" | "youtube"),
+      };
+    },
     async listQueue() {
       return { ok: true, items: [], count: 0, scope: { accountId: "all" } };
     },
@@ -111,7 +142,7 @@ function makePort(overrides: Partial<AutoPosterOperationsPort> = {}): {
     },
     ...overrides,
   };
-  return { port, scheduleCalls };
+  return { port, scheduleCalls, accountListCalls, accountValidationCalls };
 }
 
 interface Harness {
@@ -161,8 +192,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     rmSync(temporaryRoot, { recursive: true, force: true });
   });
 
-  it("persists an approval-required mission without invoking AutoPoster", async () => {
-    const { port, scheduleCalls } = makePort();
+  it("validates the canonical account before persisting an approval-required mission", async () => {
+    const { port, scheduleCalls, accountValidationCalls } = makePort();
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
 
@@ -178,18 +209,123 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       approvalRequired: true,
       approvedBy: null,
       runtimeResult: null,
+      evidenceSummary: {
+        canonicalAccountReference: "tiktok:account-a",
+        policyDecision: "not_evaluated",
+        idempotencyOutcome: "not_applicable",
+        queueDraftId: null,
+        operatorApprovalState: "required",
+        releaseApprovalState: "not_started",
+        publishingState: "not_started",
+        typedError: null,
+      },
     });
     expect(response.body.missionId).toBeTruthy();
     expect(response.body.traceId).toBeTruthy();
     expect(response.body.idempotencyKey).toBe(
       `operator-autoposter:${response.body.missionId}`,
     );
+    expect(accountValidationCalls).toEqual([
+      {
+        userId: "owner",
+        workspaceId: "workspace-a-00000001",
+        accountId: "account-a",
+        provider: "tiktok",
+      },
+    ]);
     expect(scheduleCalls).toHaveLength(0);
 
     const stored = harness.database
       .prepare("SELECT status, runtime_result_json FROM autoposter_runtime_missions")
       .get() as { status: string; runtime_result_json: string | null };
     expect(stored).toEqual({ status: "approval_required", runtime_result_json: null });
+  });
+
+  it("loads the workspace-scoped canonical account registry through the existing Runtime port", async () => {
+    const { port, accountListCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+
+    const response = await request(harness.app)
+      .get("/api/runtime-missions/autoposter/connected-accounts")
+      .query({ workspaceId: "workspace-a-00000001" });
+
+    expect(response.status).toBe(200);
+    expect(accountListCalls).toEqual([
+      { userId: "owner", workspaceId: "workspace-a-00000001" },
+    ]);
+    expect(response.body).toMatchObject({
+      ok: true,
+      workspaceId: "workspace-a-00000001",
+      count: 2,
+      accounts: [
+        {
+          connectedAccountId: "tiktok:account-a",
+          provider: "tiktok",
+          accountId: "account-a",
+          connectionStatus: "connected",
+          publishingReady: true,
+        },
+        {
+          connectedAccountId: "youtube:UC-ExactCase",
+          provider: "youtube",
+          accountId: "UC-ExactCase",
+          connectionStatus: "connected",
+          publishingReady: true,
+        },
+      ],
+    });
+    expect(JSON.stringify(response.body)).not.toMatch(/access.?token|refresh.?token|credential/i);
+  });
+
+  it.each([
+    ["ACCOUNT-A", "account_id_case_mismatch", 409],
+    ["missing-account", "unknown_account_id", 404],
+    ["account-a", "account_workspace_mismatch", 409],
+    ["account-a", "provider_account_mismatch", 409],
+    ["account-a", "account_disconnected", 409],
+    ["account-a", "account_not_publishing_ready", 409],
+  ] as const)(
+    "rejects %s with typed %s before any approval-ready mission is persisted",
+    async (accountId, reasonCode, expectedStatus) => {
+      const { port, scheduleCalls } = makePort({
+        async validateConnectedAccount() {
+          return {
+            ok: false,
+            code: reasonCode === "unknown_account_id" ? "not_found" : "validation_failed",
+            message: `Rejected with ${reasonCode}.`,
+            details: { reasonCode },
+          };
+        },
+      });
+      const harness = createHarness(path.join(temporaryRoot, reasonCode), port);
+
+      const response = await request(harness.app)
+        .post("/api/runtime-missions/autoposter/schedule")
+        .send(validInput({ accountId }));
+
+      expect(response.status).toBe(expectedStatus);
+      expect(response.body).toMatchObject({ code: reasonCode });
+      expect(scheduleCalls).toHaveLength(0);
+      expect(harness.missionService.listMissions()).toHaveLength(0);
+      harness.database.close();
+    },
+  );
+
+  it("rejects whitespace-changing account IDs locally instead of normalizing opaque identity", async () => {
+    const { port, accountValidationCalls, scheduleCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+
+    const response = await request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule")
+      .send(validInput({ accountId: " account-a " }));
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("account_id_non_canonical");
+    expect(accountValidationCalls).toHaveLength(0);
+    expect(scheduleCalls).toHaveLength(0);
+    expect(harness.missionService.listMissions()).toHaveLength(0);
   });
 
   it("validates the bounded provider, media URL, YouTube metadata, and schedule shape", async () => {
@@ -292,6 +428,21 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
           publishing: "blocked_until_human_approval",
         },
       },
+      evidenceSummary: {
+        missionId: created.missionId,
+        traceId: created.traceId,
+        workspaceId: created.workspaceId,
+        provider: "youtube",
+        canonicalAccountReference: `youtube:${created.accountId}`,
+        policyDecision: "allowed",
+        idempotencyOutcome: "first_execution",
+        queueDraftId: "queue-draft-1",
+        persistedDraftStatus: "scheduled",
+        operatorApprovalState: "approved",
+        releaseApprovalState: "required",
+        publishingState: "blocked_until_human_approval",
+        typedError: null,
+      },
     });
     expect(approved.body.runtimeResult.evidence).toBeTruthy();
   });
@@ -315,7 +466,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     });
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
-    const mission = harness.missionService.createScheduleMission(validInput());
+    const mission = await harness.missionService.createScheduleMission(validInput());
 
     const result = await harness.missionService.approveAndExecute(
       mission.missionId,
@@ -328,6 +479,13 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       output: null,
       errors: [{ code: "AUTOPOSTER_UNSAFE_SCHEDULE_RESPONSE" }],
       evidence: { result: { success: false } },
+    });
+    expect(result.evidenceSummary).toMatchObject({
+      queueDraftId: null,
+      persistedDraftStatus: null,
+      releaseApprovalState: "not_started",
+      publishingState: "not_started",
+      typedError: { code: "AUTOPOSTER_UNSAFE_SCHEDULE_RESPONSE" },
     });
   });
 
@@ -370,7 +528,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         },
       });
       const harness = createHarness(scenarioRoot, port);
-      const created = harness.missionService.createScheduleMission(validInput());
+      const created = await harness.missionService.createScheduleMission(validInput());
       const result = await harness.missionService.approveAndExecute(
         created.missionId,
         "founder",
@@ -378,6 +536,12 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       expect(result.status).toBe(scenario.expected);
       expect(result.runtimeResult?.status).toBe(scenario.expected);
       expect(result.runtimeResult?.evidence).toBeTruthy();
+      expect(result.evidenceSummary).toMatchObject({
+        operatorApprovalState: "approved",
+        releaseApprovalState: "not_started",
+        publishingState: "not_started",
+        typedError: { code: expect.stringMatching(/^AUTOPOSTER_/) },
+      });
       if (scenario.expected === "denied") {
         expect(result.runtimeResult?.output).toMatchObject({
           reasonCode: "runtime_scheduling_not_allowed",
@@ -388,7 +552,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     }
   });
 
-  it("returns a persisted unavailable result when runtime wiring is unconfigured", async () => {
+  it("refuses to persist an approval-ready mission when account validation is unconfigured", async () => {
     const { port } = makePort();
     const harness = createHarness(temporaryRoot, port, {
       baseUrl: "",
@@ -398,18 +562,11 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     });
     database = harness.database;
     expect(harness.missionService.getReadiness().configured).toBe(false);
-    const created = harness.missionService.createScheduleMission(validInput());
-
-    const result = await harness.missionService.approveAndExecute(
-      created.missionId,
-      "founder",
-    );
-
-    expect(result.status).toBe("unavailable");
-    expect(result.runtimeResult).toMatchObject({
-      status: "unavailable",
-      errors: [{ code: "AUTOPOSTER_UNAVAILABLE" }],
+    await expect(harness.missionService.createScheduleMission(validInput())).rejects.toMatchObject({
+      statusCode: 503,
+      code: "autoposter_unavailable",
     });
+    expect(harness.missionService.listMissions()).toHaveLength(0);
   });
 
   it("fails closed for each missing or invalid configuration field", async () => {
@@ -428,15 +585,13 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         port,
         configuration,
       );
-      const created = harness.missionService.createScheduleMission(validInput());
-      const result = await harness.missionService.approveAndExecute(
-        created.missionId,
-        "founder",
-      );
+      await expect(harness.missionService.createScheduleMission(validInput())).rejects.toMatchObject({
+        code: "autoposter_unavailable",
+      });
 
       expect(harness.missionService.getReadiness().configured).toBe(false);
-      expect(result.status).toBe("unavailable");
       expect(scheduleCalls).toHaveLength(0);
+      expect(harness.missionService.listMissions()).toHaveLength(0);
       harness.database.close();
     }
   });
@@ -445,7 +600,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const { port, scheduleCalls } = makePort();
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
-    const created = harness.missionService.createScheduleMission(validInput());
+    const created = await harness.missionService.createScheduleMission(validInput());
 
     const first = await harness.missionService.approveAndExecute(
       created.missionId,
@@ -492,7 +647,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     });
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
-    const created = harness.missionService.createScheduleMission(validInput());
+    const created = await harness.missionService.createScheduleMission(validInput());
 
     const firstPromise = request(harness.app)
       .post(`/api/runtime-missions/${created.missionId}/approve`)
@@ -517,7 +672,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const firstDatabase = createDatabase(databasePath);
     const executor = createAutoPosterRuntimeMissionExecutor(validConfiguration(), { port });
     const firstService = new AutoPosterMissionService(firstDatabase, executor);
-    const created = firstService.createScheduleMission(validInput());
+    const created = await firstService.createScheduleMission(validInput());
     const completed = await firstService.approveAndExecute(created.missionId, "founder");
     firstDatabase.close();
 
@@ -546,7 +701,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     });
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
-    const created = harness.missionService.createScheduleMission(validInput({
+    const created = await harness.missionService.createScheduleMission(validInput({
       ignoredToken: TOKEN_CANARY,
       planId: "caller-supplied-plan",
     }));
@@ -575,7 +730,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const rejectedCreation = await request(harness.app)
       .post("/api/runtime-missions/autoposter/schedule")
       .send(validInput({ caption: `Never store ${TOKEN_CANARY}` }));
-    const mission = harness.missionService.createScheduleMission(validInput());
+    const mission = await harness.missionService.createScheduleMission(validInput());
     const rejectedApproval = await request(harness.app)
       .post(`/api/runtime-missions/${mission.missionId}/approve`)
       .send({ approvedBy: TOKEN_CANARY });
@@ -628,8 +783,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const { port } = makePort();
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
-    const first = harness.missionService.createScheduleMission(validInput({ caption: "first" }));
-    const second = harness.missionService.createScheduleMission(validInput({ caption: "second" }));
+    const first = await harness.missionService.createScheduleMission(validInput({ caption: "first" }));
+    const second = await harness.missionService.createScheduleMission(validInput({ caption: "second" }));
     harness.database
       .prepare("UPDATE autoposter_runtime_missions SET created_at = ? WHERE mission_id = ?")
       .run("2026-01-01T00:00:00.000Z", first.missionId);

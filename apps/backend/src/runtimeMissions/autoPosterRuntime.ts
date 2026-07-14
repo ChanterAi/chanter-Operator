@@ -4,7 +4,10 @@ import {
   createInMemoryIdempotencyStore,
   createMissionAdapterRegistry,
   executeMission,
+  type AutoPosterConnectedAccountListSuccess,
+  type AutoPosterConnectedAccountValidationSuccess,
   type AutoPosterOperationsPort,
+  type AutoPosterPortFailure,
   type RuntimeMissionIdempotencyStore,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
@@ -21,6 +24,14 @@ export interface AutoPosterRuntimeConfiguration {
 export interface AutoPosterRuntimeMissionExecutor {
   readonly configured: boolean;
   readonly tenantUserId: string;
+  listConnectedAccounts(
+    workspaceId: string,
+  ): Promise<AutoPosterConnectedAccountListSuccess | AutoPosterPortFailure>;
+  validateConnectedAccount(input: {
+    workspaceId: string;
+    accountId: string;
+    provider: "tiktok" | "youtube";
+  }): Promise<AutoPosterConnectedAccountValidationSuccess | AutoPosterPortFailure>;
   execute(request: RuntimeMissionRequest): Promise<RuntimeMissionResult>;
 }
 
@@ -44,12 +55,16 @@ function isSafeBaseUrl(value: string): boolean {
   }
 }
 
-function createUnavailablePort(): AutoPosterOperationsPort {
-  const unavailable = async () => ({
+function unavailableResult(): AutoPosterPortFailure {
+  return {
     ok: false as const,
     code: "unavailable" as const,
     message: "AutoPoster runtime mission capability is not configured.",
-  });
+  };
+}
+
+function createUnavailablePort(): AutoPosterOperationsPort {
+  const unavailable = async () => unavailableResult();
 
   return {
     listQueue: unavailable,
@@ -97,6 +112,14 @@ export function createAutoPosterRuntimeMissionExecutor(
   return {
     configured,
     tenantUserId: userId || "operator-runtime-unconfigured",
+    listConnectedAccounts: (workspaceId) =>
+      port.listConnectedAccounts
+        ? port.listConnectedAccounts({ userId, workspaceId })
+        : Promise.resolve(unavailableResult()),
+    validateConnectedAccount: ({ workspaceId, accountId, provider }) =>
+      port.validateConnectedAccount
+        ? port.validateConnectedAccount({ userId, workspaceId, accountId, provider })
+        : Promise.resolve(unavailableResult()),
     execute: (request) => executeMission(request, { registry, idempotencyStore }),
   };
 }

@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import * as client from "../api/client";
-import type { RuntimeMission, RuntimeMissionResult, RuntimeMissionStatus } from "../api/types";
+import type {
+  AutoPosterConnectedAccount,
+  RuntimeMission,
+  RuntimeMissionResult,
+  RuntimeMissionStatus,
+} from "../api/types";
 import { AutoPosterMissionPanel } from "../components/AutoPosterMissionPanel";
 import { ReadinessBar } from "../components/ReadinessBar";
 import { mockHealthHealthy } from "./fixtures";
@@ -30,6 +35,34 @@ const pendingMission: RuntimeMission = {
   createdAt: "2026-07-14T08:00:00.000Z",
   updatedAt: "2026-07-14T08:00:00.000Z",
   runtimeResult: null,
+  evidenceSummary: {
+    missionId: "mission-001",
+    traceId: "trace-001",
+    workspaceId: "workspace-a",
+    provider: "tiktok",
+    canonicalAccountReference: "tiktok:account-a",
+    policyDecision: "not_evaluated",
+    idempotencyOutcome: "not_applicable",
+    queueDraftId: null,
+    persistedDraftStatus: null,
+    operatorApprovalState: "required",
+    releaseApprovalState: "not_started",
+    publishingState: "not_started",
+    typedError: null,
+  },
+};
+
+const youtubeAccount: AutoPosterConnectedAccount = {
+  connectedAccountId: "youtube:UC-ExactCase",
+  accountId: "UC-ExactCase",
+  provider: "youtube",
+  providerDisplayName: "YouTube",
+  username: "@chanter",
+  displayName: "CHANTER",
+  connectionStatus: "connected",
+  publishingReady: true,
+  readinessBlockers: [],
+  lastVerifiedAt: "2026-07-14T07:00:00.000Z",
 };
 
 function runtimeResult(status: RuntimeMissionStatus): RuntimeMissionResult {
@@ -92,6 +125,16 @@ const succeededMission: RuntimeMission = {
       },
     },
   },
+  evidenceSummary: {
+    ...pendingMission.evidenceSummary,
+    policyDecision: "allowed",
+    idempotencyOutcome: "first_execution",
+    queueDraftId: "queue-draft-001",
+    persistedDraftStatus: "scheduled",
+    operatorApprovalState: "approved",
+    releaseApprovalState: "required",
+    publishingState: "blocked_until_human_approval",
+  },
 };
 
 describe("AutoPoster runtime mission panel", () => {
@@ -107,8 +150,8 @@ describe("AutoPoster runtime mission panel", () => {
 
     expect(screen.getByRole("heading", { name: /autoposter schedule mission/i })).toBeInTheDocument();
     expect(screen.getByLabelText("Workspace ID")).toBeInTheDocument();
-    expect(screen.getByLabelText("Account ID")).toBeInTheDocument();
-    expect(screen.getByLabelText("Provider")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load connected accounts" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Connected account")).toBeInTheDocument();
     expect(screen.getByLabelText("Media URL")).toBeInTheDocument();
     expect(screen.getByLabelText("Caption")).toBeInTheDocument();
     expect(screen.getByLabelText("Hashtags")).toBeInTheDocument();
@@ -118,19 +161,29 @@ describe("AutoPoster runtime mission panel", () => {
 
   it("shows YouTube metadata fields only when YouTube is selected", async () => {
     const user = userEvent.setup();
+    vi.spyOn(client, "listAutoPosterConnectedAccounts").mockResolvedValue({
+      ok: true,
+      workspaceId: "workspace-a",
+      accounts: [youtubeAccount],
+      count: 1,
+    });
     render(<AutoPosterMissionPanel />);
     await screen.findByText("No AutoPoster schedule missions yet.");
-    const provider = screen.getByLabelText("Provider");
 
     expect(screen.queryByLabelText("YouTube title")).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/YouTube description/i)).not.toBeInTheDocument();
 
-    await user.selectOptions(provider, "youtube");
+    await user.type(screen.getByLabelText("Workspace ID"), "workspace-a");
+    await user.click(screen.getByRole("button", { name: "Load connected accounts" }));
+    await user.selectOptions(screen.getByLabelText("Connected account"), youtubeAccount.connectedAccountId);
+    const selectedAccount = screen.getByLabelText("Selected connected account");
+    expect(selectedAccount).toHaveTextContent("YouTube");
+    expect(selectedAccount).toHaveTextContent("CHANTER");
+    expect(selectedAccount).toHaveTextContent("connected");
+    expect(selectedAccount).toHaveTextContent("Ready");
+    expect(selectedAccount).toHaveTextContent("UC-ExactCase");
     expect(screen.getByLabelText("YouTube title")).toBeRequired();
     expect(screen.getByLabelText(/YouTube description/i)).toBeInTheDocument();
-
-    await user.selectOptions(provider, "tiktok");
-    expect(screen.queryByLabelText("YouTube title")).not.toBeInTheDocument();
   });
 
   it("sends the exact safe schedule payload when creating a mission", async () => {
@@ -140,16 +193,24 @@ describe("AutoPoster runtime mission panel", () => {
       .mockResolvedValue({
         ...pendingMission,
         provider: "youtube",
-        accountId: "youtube-account",
+        accountId: youtubeAccount.accountId,
         title: "Launch title",
         description: "Launch description",
+      });
+    const accountsSpy = vi
+      .spyOn(client, "listAutoPosterConnectedAccounts")
+      .mockResolvedValue({
+        ok: true,
+        workspaceId: "workspace-a",
+        accounts: [youtubeAccount],
+        count: 1,
       });
     render(<AutoPosterMissionPanel />);
 
     await waitFor(() => expect(screen.getByLabelText("Workspace ID")).not.toBeDisabled());
     await user.type(screen.getByLabelText("Workspace ID"), " workspace-a ");
-    await user.type(screen.getByLabelText("Account ID"), "youtube-account");
-    await user.selectOptions(screen.getByLabelText("Provider"), "youtube");
+    await user.click(screen.getByRole("button", { name: "Load connected accounts" }));
+    await user.selectOptions(screen.getByLabelText("Connected account"), youtubeAccount.connectedAccountId);
     await user.type(screen.getByLabelText("Media URL"), "https://trusted-media.example/video.mp4");
     await user.type(screen.getByLabelText("Caption"), "Launch caption");
     await user.type(screen.getByLabelText("Hashtags"), "#one #two");
@@ -161,9 +222,10 @@ describe("AutoPoster runtime mission panel", () => {
     );
     await user.click(screen.getByRole("button", { name: "Create schedule mission" }));
 
+    expect(accountsSpy).toHaveBeenCalledWith("workspace-a");
     expect(createSpy).toHaveBeenCalledWith({
       workspaceId: "workspace-a",
-      accountId: "youtube-account",
+      accountId: "UC-ExactCase",
       provider: "youtube",
       mediaUrl: "https://trusted-media.example/video.mp4",
       caption: "Launch caption",
@@ -237,17 +299,22 @@ describe("AutoPoster runtime mission panel", () => {
         status: "duplicate",
         warnings: ["The existing queue draft was returned; no second item was created."],
       },
+      evidenceSummary: {
+        ...succeededMission.evidenceSummary,
+        idempotencyOutcome: "duplicate",
+      },
     };
     vi.mocked(client.listRuntimeMissions).mockResolvedValue([duplicateMission]);
     render(<AutoPosterMissionPanel />);
 
     expect(await screen.findByRole("heading", { name: "Existing queue draft" })).toBeInTheDocument();
-    expect(screen.getByText("queue-draft-001")).toBeInTheDocument();
+    expect(screen.getAllByText("queue-draft-001").length).toBeGreaterThan(0);
     expect(screen.getByText(/no second item was created/i)).toBeInTheDocument();
   });
 
   it.each([
     { id: "must-not-render", accountId: "account-a", provider: "tiktok", status: "scheduled", scheduledAt: "2030-07-15T15:50:00.000Z", approved: true },
+    { id: "must-not-render", accountId: "account-a ", provider: "tiktok", status: "scheduled", scheduledAt: "2030-07-15T15:50:00.000Z", approved: false },
     { id: "   ", accountId: "account-a", provider: "tiktok", status: "scheduled", scheduledAt: "2030-07-15T15:50:00.000Z", approved: false },
     { id: "must-not-render", accountId: "account-a", provider: "tiktok", status: "published", scheduledAt: "2030-07-15T15:50:00.000Z", approved: false },
     { id: "must-not-render", accountId: "account-a", provider: "tiktok", status: "scheduled", scheduledAt: "2030-07-16T15:50:00.000Z", approved: false },
@@ -281,11 +348,20 @@ describe("AutoPoster runtime mission panel", () => {
           ...runtimeResult(status),
           errors: [{ code: `AUTOPOSTER_${status.toUpperCase()}`, message: `Downstream result: ${status}.` }],
         },
+        evidenceSummary: {
+          ...pendingMission.evidenceSummary,
+          operatorApprovalState: "approved",
+          policyDecision: "allowed",
+          typedError: {
+            code: `AUTOPOSTER_${status.toUpperCase()}`,
+            message: `Downstream result: ${status}.`,
+          },
+        },
       };
       vi.mocked(client.listRuntimeMissions).mockResolvedValue([failedMission]);
       render(<AutoPosterMissionPanel />);
 
-      expect(await screen.findByText(`AUTOPOSTER_${status.toUpperCase()}`)).toBeInTheDocument();
+      expect((await screen.findAllByText(`AUTOPOSTER_${status.toUpperCase()}`)).length).toBeGreaterThan(0);
       expect(screen.queryByRole("heading", { name: /queue draft created|existing queue draft/i })).not.toBeInTheDocument();
       expect(screen.queryByText("Draft scheduled")).not.toBeInTheDocument();
       expect(screen.queryByText("Unapproved for publishing")).not.toBeInTheDocument();
@@ -297,8 +373,8 @@ describe("AutoPoster runtime mission panel", () => {
     vi.mocked(client.listRuntimeMissions).mockResolvedValue([succeededMission]);
     render(<AutoPosterMissionPanel />);
 
-    expect(await screen.findByText("mission-001")).toBeInTheDocument();
-    expect(screen.getByText("trace-001")).toBeInTheDocument();
+    expect((await screen.findAllByText("mission-001")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("trace-001").length).toBeGreaterThan(0);
     const decisions = screen.getByRole("heading", { name: "Runtime decisions" }).parentElement;
     expect(decisions).toHaveTextContent("PolicyAllowed");
     expect(decisions).toHaveTextContent("Runtime approvalApproved by founder");
@@ -307,6 +383,11 @@ describe("AutoPoster runtime mission panel", () => {
     expect(screen.getByText("autoposter-schedule-created")).toBeInTheDocument();
     expect(screen.getByText(/queue item queue-draft-001 was created and remains unapproved/i)).toBeInTheDocument();
     expect(screen.getByText(/adapter returned an unapproved queue draft/i)).toBeInTheDocument();
+    const evidence = screen.getByRole("heading", { name: "Evidence summary" }).parentElement;
+    expect(evidence).toHaveTextContent("Canonical accounttiktok:account-a");
+    expect(evidence).toHaveTextContent("Queue draft IDqueue-draft-001");
+    expect(evidence).toHaveTextContent("Release approvalrequired");
+    expect(evidence).toHaveTextContent("Publishingblocked until human approval");
   });
 
   it("exposes no token, credential, or secret input", async () => {

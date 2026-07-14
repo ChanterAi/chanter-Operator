@@ -20,7 +20,10 @@ export function createApp(
 
   const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
     if (error instanceof OperatorError) {
-      response.status(error.statusCode).json({ error: error.message });
+      response.status(error.statusCode).json({
+        error: error.message,
+        ...(error.code ? { code: error.code } : {}),
+      });
       return;
     }
     if (error instanceof SyntaxError) {
