@@ -11,8 +11,13 @@ import {
   type RuntimeMissionResult,
   type RuntimeMissionStatus,
 } from "chanter-agent-runtime";
+import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 import { withTransaction } from "../db/database.js";
 import { OperatorError } from "../services/operatorService.js";
+import {
+  AutoPosterMissionLedger,
+  type AutoPosterMissionLedgerContext,
+} from "./autoPosterMissionLedger.js";
 import type { AutoPosterRuntimeMissionExecutor } from "./autoPosterRuntime.js";
 import {
   MissionExecutionJournal,
@@ -47,6 +52,7 @@ export type AutoPosterMissionStatus =
   | RuntimeMissionStatus;
 
 export interface AutoPosterRuntimeMission {
+  replayed: boolean;
   missionId: string;
   traceId: string;
   product: typeof PRODUCT;
@@ -147,7 +153,33 @@ interface MissionRow {
   updated_at: string;
 }
 
+interface CanonicalScheduleMissionInput {
+  missionId: string | null;
+  traceId: string | null;
+  idempotencyKey: string | null;
+  requestedBy: string;
+  tenantUserId: string | null;
+  workspaceId: string | null;
+  accountId: string;
+  provider: "tiktok" | "youtube";
+  mediaUrl: string;
+  caption: string;
+  hashtags: string;
+  title: string;
+  description: string;
+  scheduledAt: string;
+}
+
+interface ResolvedScheduleMissionInput extends Omit<CanonicalScheduleMissionInput,
+  "missionId" | "traceId" | "idempotencyKey" | "workspaceId"> {
+  missionId: string;
+  traceId: string;
+  idempotencyKey: string;
+  workspaceId: string;
+}
+
 interface AutoPosterMissionServiceOptions {
+  agentRunLedgerService: AgentRunLedgerService;
   now?: () => Date;
   idFactory?: () => string;
   protectedValues?: string[];
@@ -210,6 +242,46 @@ function requireBoundedString(
     throw new OperatorError(`${field} must be at most ${maxLength} characters.`, 400);
   }
   return normalized;
+}
+
+function optionalExactIdentifier(
+  input: Record<string, unknown>,
+  field: string,
+  maxLength = 256,
+): string | null {
+  const value = input[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value || value !== value.trim()) {
+    throw new OperatorError(
+      `${field} must be an exact nonblank identifier.`,
+      400,
+      "OPERATOR_MISSION_IDENTITY_INVALID",
+    );
+  }
+  if (value.length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new OperatorError(
+      `${field} must be an exact identifier of at most ${maxLength} characters.`,
+      400,
+      "OPERATOR_MISSION_IDENTITY_INVALID",
+    );
+  }
+  return value;
+}
+
+function optionalExactWorkspaceId(input: Record<string, unknown>): string | null {
+  const value = input.workspaceId;
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") {
+    throw new OperatorError("workspaceId must be a string when provided.", 400);
+  }
+  if (!value || value !== value.trim() || value.length > 160) {
+    throw new OperatorError(
+      "workspaceId must be an exact nonblank identifier of at most 160 characters.",
+      409,
+      "OPERATOR_MISSION_SCOPE_MISMATCH",
+    );
+  }
+  return value;
 }
 
 function requireOpaqueAccountId(
@@ -284,6 +356,14 @@ function jsonObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function isRetryableCommercialDenial(result: RuntimeMissionResult): boolean {
+  const output = jsonObject(result.output);
+  return result.status === "denied"
+    && result.errors.some((error) => error.code === "AUTOPOSTER_FORBIDDEN")
+    && typeof output?.reasonCode === "string"
+    && Boolean(output.reasonCode);
 }
 
 export function permittedRecoveryActions(execution: MissionExecutionRecord): AutoPosterRecoveryAction[] {
@@ -413,6 +493,7 @@ function mapMission(
     ? (JSON.parse(row.runtime_result_json) as RuntimeMissionResult)
     : null;
   return {
+    replayed: false,
     missionId: row.mission_id,
     traceId: row.trace_id,
     product: row.product,
@@ -485,16 +566,18 @@ export class AutoPosterMissionService {
   private readonly idFactory: () => string;
   private readonly protectedValues: string[];
   private readonly journal: MissionExecutionJournal;
+  private readonly missionLedger: AutoPosterMissionLedger;
   private readonly failureInjector?: AutoPosterMissionServiceOptions["failureInjector"];
 
   constructor(
     private readonly database: DatabaseSync,
     private readonly executor: AutoPosterRuntimeMissionExecutor,
-    options: AutoPosterMissionServiceOptions = {},
+    options: AutoPosterMissionServiceOptions,
   ) {
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     this.journal = new MissionExecutionJournal(database, this.idFactory);
+    this.missionLedger = new AutoPosterMissionLedger(options.agentRunLedgerService);
     this.failureInjector = options.failureInjector;
     this.protectedValues = (options.protectedValues ?? [])
       .map((value) => value.trim())
@@ -503,6 +586,66 @@ export class AutoPosterMissionService {
 
   private injectFailure(boundary: MissionFailureBoundary, missionId: string): void {
     this.failureInjector?.(boundary, missionId);
+  }
+
+  private ledgerContext(missionId: string, updatedAt: string): AutoPosterMissionLedgerContext {
+    const mission = this.getMission(missionId);
+    const initial = mission.executionJournal[0];
+    if (!initial) {
+      throw new OperatorError(
+        "Runtime mission has no initial execution attempt for ledger lineage.",
+        409,
+        "MISSION_LEDGER_ATTEMPT_MISSING",
+      );
+    }
+    const approval = mission.executionJournal.find((transition) => transition.newState === "approved");
+    const runtimeStarted = mission.executionJournal.some((transition) =>
+      transition.newState === "execution_started"
+      || transition.newState === "recovery_in_progress"
+    );
+    return {
+      missionId: mission.missionId,
+      traceId: mission.traceId,
+      attemptId: initial.executionAttemptId,
+      provider: mission.provider,
+      startedAt: mission.createdAt,
+      updatedAt,
+      approvalActor: approval?.actor ?? null,
+      approvalTimestamp: approval?.timestamp ?? null,
+      runtimeStarted,
+    };
+  }
+
+  private requireSerializedRuntimeResult(missionId: string): string {
+    const row = this.database.prepare(
+      "SELECT runtime_result_json FROM autoposter_runtime_missions WHERE mission_id = ?",
+    ).get(missionId) as { runtime_result_json: string | null } | undefined;
+    if (!row?.runtime_result_json) {
+      throw new OperatorError(
+        "Runtime mission has no persisted result for completed ledger evidence.",
+        409,
+        "MISSION_LEDGER_RESULT_MISSING",
+      );
+    }
+    return row.runtime_result_json;
+  }
+
+  private ensureLegacyMissionLedgerLineage(missionId: string): void {
+    if (!this.database.isTransaction) {
+      throw new Error("Legacy mission ledger lineage must be backfilled inside the mission transaction.");
+    }
+    const row = this.missionRowBy("mission_id", missionId);
+    if (!row) {
+      throw new OperatorError("Runtime mission was not found.", 404);
+    }
+    this.missionLedger.backfillLegacyLineage({
+      missionId: row.mission_id,
+      traceId: row.trace_id,
+      provider: row.provider,
+      startedAt: row.created_at,
+      serializedRuntimeResult: row.runtime_result_json,
+      transitions: this.journal.listTransitions(row.mission_id),
+    });
   }
 
   private assertRecoveryActionAllowed(
@@ -554,6 +697,173 @@ export class AutoPosterMissionService {
     );
   }
 
+  private missionRowBy(column: "mission_id" | "trace_id" | "idempotency_key", value: string): MissionRow | null {
+    return (this.database
+      .prepare(`SELECT * FROM autoposter_runtime_missions WHERE ${column} = ?`)
+      .get(value) as MissionRow | undefined) ?? null;
+  }
+
+  private payloadHash(input: ResolvedScheduleMissionInput): string {
+    return createRuntimeMissionPayloadHash({
+      missionId: input.missionId,
+      traceId: input.traceId,
+      product: PRODUCT,
+      action: ACTION,
+      actor: { id: input.requestedBy, kind: "service" },
+      tenant: {
+        userId: this.executor.tenantUserId,
+        workspaceId: input.workspaceId,
+        accountId: input.accountId,
+      },
+      input: {
+        accountId: input.accountId,
+        provider: input.provider,
+        mediaUrl: input.mediaUrl,
+        caption: input.caption,
+        hashtags: input.hashtags,
+        ...(input.title ? { title: input.title } : {}),
+        ...(input.description ? { description: input.description } : {}),
+        scheduledAt: input.scheduledAt,
+      },
+      idempotencyKey: input.idempotencyKey,
+    });
+  }
+
+  private bindingMismatch(code: string, message: string): never {
+    throw new OperatorError(message, 409, code);
+  }
+
+  private assertExistingCreateBinding(
+    row: MissionRow,
+    input: CanonicalScheduleMissionInput,
+  ): void {
+    if (input.missionId && input.missionId !== row.mission_id) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_ID_MISMATCH",
+        "The supplied mission identity does not match its durable binding.",
+      );
+    }
+    if (input.idempotencyKey && input.idempotencyKey !== row.idempotency_key) {
+      this.bindingMismatch(
+        "OPERATOR_IDEMPOTENCY_MISMATCH",
+        "The supplied idempotency identity does not match its durable binding.",
+      );
+    }
+    if (input.traceId && input.traceId !== row.trace_id) {
+      this.bindingMismatch(
+        "OPERATOR_TRACE_MISMATCH",
+        "The supplied trace identity does not match its durable binding.",
+      );
+    }
+    if (input.tenantUserId && input.tenantUserId !== this.executor.tenantUserId) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_SCOPE_MISMATCH",
+        "The supplied tenant scope does not match Operator runtime truth.",
+      );
+    }
+    if (
+      (input.workspaceId !== null && input.workspaceId !== row.workspace_id)
+      || input.accountId !== row.account_id
+      || input.provider !== row.provider
+    ) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_SCOPE_MISMATCH",
+        "The supplied mission scope does not match its durable binding.",
+      );
+    }
+    if (input.requestedBy !== row.actor_id) {
+      this.bindingMismatch(
+        "OPERATOR_REQUESTER_MISMATCH",
+        "The supplied requester does not match its durable binding.",
+      );
+    }
+    if (
+      row.product !== PRODUCT
+      || row.action !== ACTION
+      || input.mediaUrl !== row.media_url
+      || input.caption !== row.caption
+      || input.hashtags !== row.hashtags
+      || (input.title || null) !== row.title
+      || (input.description || null) !== row.description
+      || input.scheduledAt !== row.scheduled_at
+    ) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_PAYLOAD_MISMATCH",
+        "The supplied execution payload does not match its durable binding.",
+      );
+    }
+
+    const execution = this.journal.getExecution(row.mission_id);
+    if (execution) {
+      const expectedHash = this.payloadHash({
+        ...input,
+        missionId: row.mission_id,
+        traceId: row.trace_id,
+        idempotencyKey: row.idempotency_key,
+        workspaceId: row.workspace_id,
+      });
+      if (expectedHash !== execution.missionPayloadHash) {
+        this.bindingMismatch(
+          "OPERATOR_MISSION_PAYLOAD_MISMATCH",
+          "The supplied execution payload does not match the durable payload hash.",
+        );
+      }
+    }
+  }
+
+  private findExistingCreate(input: CanonicalScheduleMissionInput): MissionRow | null {
+    if (input.tenantUserId && input.tenantUserId !== this.executor.tenantUserId) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_SCOPE_MISMATCH",
+        "The supplied tenant scope does not match Operator runtime truth.",
+      );
+    }
+
+    const byMission = input.missionId
+      ? this.missionRowBy("mission_id", input.missionId)
+      : null;
+    const byKey = input.idempotencyKey
+      ? this.missionRowBy("idempotency_key", input.idempotencyKey)
+      : null;
+    if (byMission && byKey && byMission.mission_id !== byKey.mission_id) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_IDENTITY_MISMATCH",
+        "The supplied mission and idempotency identities resolve to different durable records.",
+      );
+    }
+
+    const existing = byMission ?? byKey;
+    const byTrace = input.traceId
+      ? this.missionRowBy("trace_id", input.traceId)
+      : null;
+    if (byTrace && (!existing || byTrace.mission_id !== existing.mission_id)) {
+      this.bindingMismatch(
+        "OPERATOR_TRACE_MISMATCH",
+        "The supplied trace identity is already bound to another durable mission.",
+      );
+    }
+    if (!existing) return null;
+    this.assertExistingCreateBinding(existing, input);
+    return existing;
+  }
+
+  private assertIdentifiersAvailable(input: ResolvedScheduleMissionInput): void {
+    if (
+      this.missionRowBy("mission_id", input.missionId)
+      || this.missionRowBy("trace_id", input.traceId)
+      || this.missionRowBy("idempotency_key", input.idempotencyKey)
+    ) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_IDENTITY_MISMATCH",
+        "A generated or supplied mission identity is already durably bound.",
+      );
+    }
+  }
+
+  private replayedMission(missionId: string): AutoPosterRuntimeMission {
+    return { ...this.getMission(missionId), replayed: true };
+  }
+
   getReadiness(): AutoPosterRuntimeReadiness {
     return {
       configured: this.executor.configured,
@@ -595,7 +905,27 @@ export class AutoPosterMissionService {
       throw new OperatorError("Request body must be an object.", 400);
     }
     const input = inputValue as Record<string, unknown>;
-    const workspaceId = requireBoundedString(input, "workspaceId", 160);
+    if (input.product !== undefined && input.product !== PRODUCT) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_TARGET_MISMATCH",
+        "The supplied product is not supported by this mission gateway adapter.",
+      );
+    }
+    if (input.action !== undefined && input.action !== ACTION) {
+      this.bindingMismatch(
+        "OPERATOR_MISSION_TARGET_MISMATCH",
+        "The supplied action is not supported by this mission gateway adapter.",
+      );
+    }
+
+    const missionId = optionalExactIdentifier(input, "missionId");
+    const traceId = optionalExactIdentifier(input, "traceId");
+    const suppliedIdempotencyKey = optionalExactIdentifier(input, "idempotencyKey");
+    const idempotencyKey = suppliedIdempotencyKey
+      ?? (missionId ? `operator-autoposter:${missionId}` : null);
+    const requestedBy = optionalBoundedString(input, "requestedBy", 120) || ACTOR_ID;
+    const tenantUserId = optionalExactIdentifier(input, "tenantUserId");
+    const requestedWorkspaceId = optionalExactWorkspaceId(input);
     const requestedAccountId = requireOpaqueAccountId(input, 256);
     const providerValue = requireBoundedString(input, "provider", 16).toLowerCase();
     if (providerValue !== "tiktok" && providerValue !== "youtube") {
@@ -625,12 +955,15 @@ export class AutoPosterMissionService {
         400,
       );
     }
-    if (Date.parse(scheduledAt) <= this.now().getTime()) {
-      throw new OperatorError("scheduledAt must be in the future.", 400);
-    }
+    const normalizedScheduledAt = new Date(scheduledAt).toISOString();
 
     this.assertContainsNoProtectedValue([
-      workspaceId,
+      missionId,
+      traceId,
+      idempotencyKey,
+      requestedBy,
+      tenantUserId,
+      requestedWorkspaceId,
       requestedAccountId,
       provider,
       mediaUrl,
@@ -639,17 +972,45 @@ export class AutoPosterMissionService {
       title,
       description,
       scheduledAt,
-    ]);
+    ].filter((value): value is string => value !== null));
+
+    const canonicalInput: CanonicalScheduleMissionInput = {
+      missionId,
+      traceId,
+      idempotencyKey,
+      requestedBy,
+      tenantUserId,
+      workspaceId: requestedWorkspaceId,
+      accountId: requestedAccountId,
+      provider,
+      mediaUrl,
+      caption,
+      hashtags,
+      title,
+      description,
+      scheduledAt: normalizedScheduledAt,
+    };
+    const existing = this.findExistingCreate(canonicalInput);
+    if (existing) return this.replayedMission(existing.mission_id);
+
+    if (Date.parse(normalizedScheduledAt) <= this.now().getTime()) {
+      throw new OperatorError("scheduledAt must be in the future.", 400);
+    }
 
     const accountValidation = await this.executor.validateConnectedAccount({
-      workspaceId,
+      ...(requestedWorkspaceId ? { workspaceId: requestedWorkspaceId } : {}),
       accountId: requestedAccountId,
       provider,
     });
     if (!accountValidation.ok) this.throwPortFailure(accountValidation);
     const account = accountValidation.account;
     if (
-      accountValidation.workspaceId !== workspaceId ||
+      typeof accountValidation.workspaceId !== "string" ||
+      !accountValidation.workspaceId ||
+      accountValidation.workspaceId !== accountValidation.workspaceId.trim() ||
+      accountValidation.workspaceId.length > 160 ||
+      /[\u0000-\u001f\u007f]/.test(accountValidation.workspaceId) ||
+      (requestedWorkspaceId !== null && accountValidation.workspaceId !== requestedWorkspaceId) ||
       !isConnectedAccountView(account) ||
       account.accountId !== requestedAccountId ||
       account.provider !== provider ||
@@ -662,39 +1023,29 @@ export class AutoPosterMissionService {
         "autoposter_account_validation_invalid",
       );
     }
+    const workspaceId = accountValidation.workspaceId;
     const accountId = account.accountId;
 
-    const missionId = this.idFactory();
-    const traceId = this.idFactory();
-    const idempotencyKey = `operator-autoposter:${missionId}`;
+    const resolvedMissionId = missionId ?? this.idFactory();
+    const resolvedTraceId = traceId ?? this.idFactory();
+    const resolvedIdempotencyKey = idempotencyKey
+      ?? `operator-autoposter:${resolvedMissionId}`;
     const executionAttemptId = this.idFactory();
     const timestamp = this.now().toISOString();
-    const normalizedScheduledAt = new Date(scheduledAt).toISOString();
-    const missionPayloadHash = createRuntimeMissionPayloadHash({
-      missionId,
-      traceId,
-      product: PRODUCT,
-      action: ACTION,
-      actor: { id: ACTOR_ID, kind: "service" },
-      tenant: {
-        userId: this.executor.tenantUserId,
-        workspaceId,
-        accountId,
-      },
-      input: {
-        accountId,
-        provider,
-        mediaUrl,
-        caption,
-        hashtags,
-        ...(title ? { title } : {}),
-        ...(description ? { description } : {}),
-        scheduledAt: normalizedScheduledAt,
-      },
-      idempotencyKey,
-    });
+    const resolvedInput: ResolvedScheduleMissionInput = {
+      ...canonicalInput,
+      missionId: resolvedMissionId,
+      traceId: resolvedTraceId,
+      idempotencyKey: resolvedIdempotencyKey,
+      workspaceId,
+      accountId,
+    };
+    const missionPayloadHash = this.payloadHash(resolvedInput);
 
-    withTransaction(this.database, () => {
+    const created = withTransaction(this.database, () => {
+      const raced = this.findExistingCreate(canonicalInput);
+      if (raced) return { missionId: raced.mission_id, replayed: true };
+      this.assertIdentifiersAvailable(resolvedInput);
       this.database
         .prepare(
           `INSERT INTO autoposter_runtime_missions (
@@ -705,11 +1056,11 @@ export class AutoPosterMissionService {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_required', 1, NULL, NULL, ?, ?)`,
         )
         .run(
-          missionId,
-          traceId,
+          resolvedMissionId,
+          resolvedTraceId,
           PRODUCT,
           ACTION,
-          ACTOR_ID,
+          requestedBy,
           workspaceId,
           accountId,
           provider,
@@ -719,20 +1070,34 @@ export class AutoPosterMissionService {
           title || null,
           description || null,
           normalizedScheduledAt,
-          idempotencyKey,
+          resolvedIdempotencyKey,
           timestamp,
           timestamp,
         );
       this.journal.initialize({
-        missionId,
+        missionId: resolvedMissionId,
         executionAttemptId,
         missionPayloadHash,
         timestamp,
-        actor: ACTOR_ID,
+        actor: requestedBy,
       });
+      this.missionLedger.initialize({
+        missionId: resolvedMissionId,
+        traceId: resolvedTraceId,
+        attemptId: executionAttemptId,
+        provider,
+        startedAt: timestamp,
+        updatedAt: timestamp,
+        approvalActor: null,
+        approvalTimestamp: null,
+        runtimeStarted: false,
+      });
+      return { missionId: resolvedMissionId, replayed: false };
     });
 
-    return this.getMission(missionId);
+    return created.replayed
+      ? this.replayedMission(created.missionId)
+      : this.getMission(created.missionId);
   }
 
   listMissions(limit = 50): AutoPosterRuntimeMission[] {
@@ -951,6 +1316,7 @@ export class AutoPosterMissionService {
     const serializedResult = JSON.stringify(runtimeResult);
     const persistedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(missionId);
       const result = this.database.prepare(
         `UPDATE autoposter_runtime_missions
            SET status = ?, runtime_result_json = ?, updated_at = ?
@@ -974,6 +1340,7 @@ export class AutoPosterMissionService {
     });
     const completedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(missionId);
       this.journal.transition(missionId, "completed", {
         actor: ACTOR_ID,
         reason: "Mission completed only after the authoritative result was persisted.",
@@ -983,6 +1350,10 @@ export class AutoPosterMissionService {
         typedError: null,
         evidenceReferences: [`mission:${missionId}`, `runtime-result:${missionId}`],
       });
+      this.missionLedger.recordCompleted(
+        this.ledgerContext(missionId, completedAt),
+        serializedResult,
+      );
     });
     return this.getMission(missionId);
   }
@@ -1012,6 +1383,7 @@ export class AutoPosterMissionService {
     if (queueId) {
       const observedAt = this.now().toISOString();
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
         this.journal.transition(mission.missionId, "downstream_result_observed", {
           actor: "chanter-agent-runtime",
           reason: "Runtime observed one exact unapproved AutoPoster queue result.",
@@ -1023,6 +1395,9 @@ export class AutoPosterMissionService {
           typedError: null,
           evidenceReferences: [`autoposter-queue:${queueId}`, `runtime-result:${mission.missionId}`],
         });
+        this.missionLedger.recordValidating(
+          this.ledgerContext(mission.missionId, observedAt),
+        );
       });
       this.injectFailure("after_operator_observes_runtime_result_before_persistence", mission.missionId);
       return this.persistObservedRuntimeResult(
@@ -1037,10 +1412,14 @@ export class AutoPosterMissionService {
       message: "Runtime did not return authoritative queue evidence.",
     };
     const typedError = { code: firstError.code, message: firstError.message };
-    const recoverable = runtimeResult.status === "unavailable" || runtimeResult.status === "failed";
+    const commercialDenial = isRetryableCommercialDenial(runtimeResult);
+    const recoverable = runtimeResult.status === "unavailable"
+      || runtimeResult.status === "failed"
+      || commercialDenial;
     const failedState = recoverable ? "failed_recoverable" : "failed_terminal";
     const failedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(mission.missionId);
       const serializedResult = JSON.stringify(runtimeResult);
       const result = this.database.prepare(
         `UPDATE autoposter_runtime_missions
@@ -1053,20 +1432,36 @@ export class AutoPosterMissionService {
       const current = this.journal.requireExecution(mission.missionId);
       this.journal.transition(mission.missionId, failedState, {
         actor: "chanter-agent-runtime",
-        reason: recoverable
+        reason: commercialDenial
+          ? "Runtime returned a typed commercial denial; explicit reconciliation is required before a governed retry."
+          : recoverable
           ? "Runtime could not prove whether the downstream boundary completed; reconciliation is required before retry."
           : "Runtime returned a terminal typed refusal before authoritative completion.",
         timestamp: failedAt,
         lastConfirmedBoundary: current.lastConfirmedBoundary,
         recoveryReason: typedError.message,
-        recoveryClassification: recoveryClassification ?? (recoverable
-          ? "RECOVERY_DOWNSTREAM_UNAVAILABLE"
-          : "RECOVERY_EVIDENCE_INVALID"),
+        recoveryClassification: recoveryClassification ?? (commercialDenial
+          ? "RECOVERY_COMMERCIAL_DENIAL"
+          : recoverable
+            ? "RECOVERY_DOWNSTREAM_UNAVAILABLE"
+            : "RECOVERY_EVIDENCE_INVALID"),
         finalResultStatus: runtimeResult.status,
         runtimeObservation: runtimeResult,
         typedError,
         evidenceReferences: [`runtime-result:${mission.missionId}`],
       });
+      const ledgerContext = this.ledgerContext(mission.missionId, failedAt);
+      if (recoverable) {
+        this.missionLedger.recordReconciliationRequired(ledgerContext, {
+          code: typedError.code,
+          reason: typedError.message,
+        });
+      } else {
+        this.missionLedger.recordFailed(ledgerContext, {
+          code: typedError.code,
+          reason: typedError.message,
+        });
+      }
     });
     return this.getMission(mission.missionId);
   }
@@ -1111,6 +1506,7 @@ export class AutoPosterMissionService {
     if (current.runtimeResult && current.execution?.state === "completed") {
       this.assertCompletedReplayBinding(current, approvedBy);
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(current.missionId);
         this.journal.transition(current.missionId, "completed", {
           actor: ACTOR_ID,
           reason: "Exact durable replay returned the existing authoritative result without execution.",
@@ -1141,6 +1537,7 @@ export class AutoPosterMissionService {
 
     const approvedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(current.missionId);
       const result = this.database.prepare(
         `UPDATE autoposter_runtime_missions
            SET status = 'executing', approved_by = ?, updated_at = ?
@@ -1156,11 +1553,15 @@ export class AutoPosterMissionService {
         lastConfirmedBoundary: "approved",
         evidenceReferences: [`approval:${approvedBy}`],
       });
+      this.missionLedger.recordApproved(
+        this.ledgerContext(current.missionId, approvedAt),
+      );
     });
     this.injectFailure("after_approval_persistence", current.missionId);
 
     const startedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(current.missionId);
       this.journal.transition(current.missionId, "execution_started", {
         actor: "chanter-agent-runtime",
         reason: "Runtime execution attempt began under the persisted approval.",
@@ -1168,11 +1569,15 @@ export class AutoPosterMissionService {
         lastConfirmedBoundary: "execution_started",
         evidenceReferences: [`attempt:${current.execution!.executionAttemptId}`],
       });
+      this.missionLedger.recordRunning(
+        this.ledgerContext(current.missionId, startedAt),
+      );
     });
     this.injectFailure("after_runtime_execution_start_persistence", current.missionId);
 
     const preparedAt = this.now().toISOString();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(current.missionId);
       this.journal.transition(current.missionId, "downstream_request_prepared", {
         actor: "chanter-agent-runtime",
         reason: "Exact AutoPoster request scope and payload hash were durably prepared.",
@@ -1199,29 +1604,40 @@ export class AutoPosterMissionService {
     }
     const attemptId = this.idFactory();
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(mission.missionId);
       let currentExecution = this.journal.requireExecution(mission.missionId);
       if (currentExecution.currentState !== "failed_recoverable") {
+        const interruptedAt = this.now().toISOString();
+        const interruptedError = {
+          code: "RECOVERY_INTERRUPTED_EXECUTION",
+          message: "Execution was interrupted before Operator persisted an authoritative result.",
+        };
         currentExecution = this.journal.transition(mission.missionId, "failed_recoverable", {
           actor: ACTOR_ID,
           reason: "A restarted process detected an uncertain downstream execution boundary.",
-          timestamp: this.now().toISOString(),
+          timestamp: interruptedAt,
           lastConfirmedBoundary: currentExecution.lastConfirmedBoundary,
           recoveryReason: "Process interruption requires exact downstream reconciliation.",
           recoveryClassification: "INTERRUPTED_EXECUTION_DETECTED",
-          typedError: {
-            code: "RECOVERY_INTERRUPTED_EXECUTION",
-            message: "Execution was interrupted before Operator persisted an authoritative result.",
-          },
+          typedError: interruptedError,
         });
+        this.missionLedger.recordReconciliationRequired(
+          this.ledgerContext(mission.missionId, interruptedAt),
+          { code: interruptedError.code, reason: interruptedError.message },
+        );
       }
+      const recoveryStartedAt = this.now().toISOString();
       this.journal.transition(mission.missionId, "recovery_in_progress", {
         actor: ACTOR_ID,
         reason: "Operator claimed one bounded read-only reconciliation attempt.",
-        timestamp: this.now().toISOString(),
+        timestamp: recoveryStartedAt,
         executionAttemptId: attemptId,
         lastConfirmedBoundary: currentExecution.lastConfirmedBoundary,
         typedError: null,
       });
+      this.missionLedger.recordRunning(
+        this.ledgerContext(mission.missionId, recoveryStartedAt),
+      );
     });
     this.injectFailure("during_restart_claim_recovery", mission.missionId);
 
@@ -1266,6 +1682,18 @@ export class AutoPosterMissionService {
             typedError,
           },
         );
+        const ledgerContext = this.ledgerContext(mission.missionId, reconciledAt);
+        if (unavailable) {
+          this.missionLedger.recordReconciliationRequired(ledgerContext, {
+            code: typedError.code,
+            reason: typedError.message,
+          });
+        } else {
+          this.missionLedger.recordFailed(ledgerContext, {
+            code: typedError.code,
+            reason: typedError.message,
+          });
+        }
       });
       return this.getMission(mission.missionId);
     }
@@ -1298,6 +1726,10 @@ export class AutoPosterMissionService {
           typedError,
           evidenceReferences: [],
         });
+        this.missionLedger.recordFailed(
+          this.ledgerContext(mission.missionId, reconciledAt),
+          { code: typedError.code, reason: typedError.message },
+        );
       });
       return this.getMission(mission.missionId);
     }
@@ -1321,6 +1753,10 @@ export class AutoPosterMissionService {
           typedError,
           evidenceReferences: (result.conflictingPostIds ?? []).map((id) => `autoposter-conflict:${id}`),
         });
+        this.missionLedger.recordReconciliationRequired(
+          this.ledgerContext(mission.missionId, reconciledAt),
+          { code: typedError.code, reason: typedError.message },
+        );
       });
       return this.getMission(mission.missionId);
     }
@@ -1341,6 +1777,9 @@ export class AutoPosterMissionService {
           typedError: null,
           evidenceReferences: [`autoposter-queue:${result.post!.id}`],
         });
+        this.missionLedger.recordValidating(
+          this.ledgerContext(mission.missionId, reconciledAt),
+        );
       });
       return this.getMission(mission.missionId);
     }
@@ -1360,6 +1799,13 @@ export class AutoPosterMissionService {
           runtimeObservation: null,
           typedError: null,
         });
+        this.missionLedger.recordReconciliationRequired(
+          this.ledgerContext(mission.missionId, reconciledAt),
+          {
+            code: "SAFE_RETRY_AVAILABLE",
+            reason: "No downstream result exists; one bounded safe retry is permitted.",
+          },
+        );
       });
       return this.getMission(mission.missionId);
     }
@@ -1381,6 +1827,10 @@ export class AutoPosterMissionService {
         reconciliationResult: result,
         typedError,
       });
+      this.missionLedger.recordFailed(
+        this.ledgerContext(mission.missionId, reconciledAt),
+        { code: typedError.code, reason: typedError.message },
+      );
     });
     return this.getMission(mission.missionId);
   }
@@ -1395,13 +1845,19 @@ export class AutoPosterMissionService {
 
     if (execution.currentState === "result_persisted") {
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
+        const completedAt = this.now().toISOString();
         this.journal.transition(mission.missionId, "completed", {
           actor: ACTOR_ID,
           reason: "Restart completed the mission from its already-persisted Operator result.",
-          timestamp: this.now().toISOString(),
+          timestamp: completedAt,
           lastConfirmedBoundary: "completed",
           recoveryClassification: "RECOVERED_OPERATOR_RESULT",
         });
+        this.missionLedger.recordCompleted(
+          this.ledgerContext(mission.missionId, completedAt),
+          this.requireSerializedRuntimeResult(mission.missionId),
+        );
       });
       return this.getMission(mission.missionId);
     }
@@ -1411,6 +1867,7 @@ export class AutoPosterMissionService {
       execution.runtimeObservation
     ) {
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
         const currentExecution = this.journal.requireExecution(mission.missionId);
         if (currentExecution.currentState !== "downstream_result_observed" || !currentExecution.runtimeObservation) {
           throw new OperatorError("The observed Runtime result was already claimed by another recovery process.", 409, "MISSION_JOURNAL_CONCURRENT_TRANSITION");
@@ -1428,18 +1885,23 @@ export class AutoPosterMissionService {
     const attemptId = this.idFactory();
     if (execution.currentState === "approved") {
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
         if (this.journal.requireExecution(mission.missionId).currentState !== "approved") {
           throw new OperatorError("The approved mission was already claimed by another recovery process.", 409, "MISSION_JOURNAL_CONCURRENT_TRANSITION");
         }
-        this.prepareLegacyMissionRowForRecovery(mission.missionId, this.now().toISOString());
+        const resumedAt = this.now().toISOString();
+        this.prepareLegacyMissionRowForRecovery(mission.missionId, resumedAt);
         this.journal.transition(mission.missionId, "execution_started", {
           actor: "chanter-agent-runtime",
           reason: "Restart resumed an approved mission before any downstream request was prepared.",
-          timestamp: this.now().toISOString(),
+          timestamp: resumedAt,
           executionAttemptId: attemptId,
           lastConfirmedBoundary: "execution_started",
           recoveryClassification: "RESUMED_BEFORE_DOWNSTREAM",
         });
+        this.missionLedger.recordRunning(
+          this.ledgerContext(mission.missionId, resumedAt),
+        );
         this.journal.transition(mission.missionId, "downstream_request_prepared", {
           actor: "chanter-agent-runtime",
           reason: "The resumed execution durably prepared the exact downstream request.",
@@ -1464,6 +1926,7 @@ export class AutoPosterMissionService {
         throw new OperatorError("Recovered queue evidence is unavailable or invalid.", 409, "RECOVERY_EVIDENCE_INVALID");
       }
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
         const currentExecution = this.journal.requireExecution(mission.missionId);
         if (
           currentExecution.currentState !== "downstream_result_observed"
@@ -1471,11 +1934,12 @@ export class AutoPosterMissionService {
         ) {
           throw new OperatorError("The reconciled queue result was already claimed by another recovery process.", 409, "MISSION_JOURNAL_CONCURRENT_TRANSITION");
         }
-        this.prepareLegacyMissionRowForRecovery(mission.missionId, this.now().toISOString());
+        const retryStartedAt = this.now().toISOString();
+        this.prepareLegacyMissionRowForRecovery(mission.missionId, retryStartedAt);
         this.journal.transition(mission.missionId, "recovery_in_progress", {
           actor: ACTOR_ID,
           reason: "Operator is attaching the previously reconciled queue result without creating another job.",
-          timestamp: this.now().toISOString(),
+          timestamp: retryStartedAt,
           executionAttemptId: attemptId,
           lastConfirmedBoundary: "downstream_result_observed",
         });
@@ -1494,6 +1958,7 @@ export class AutoPosterMissionService {
       execution.retryCount === 0
     ) {
       withTransaction(this.database, () => {
+        this.ensureLegacyMissionLedgerLineage(mission.missionId);
         const currentExecution = this.journal.requireExecution(mission.missionId);
         if (
           currentExecution.currentState !== "failed_recoverable"
@@ -1502,17 +1967,21 @@ export class AutoPosterMissionService {
         ) {
           throw new OperatorError("The single safe retry was already claimed by another recovery process.", 409, "MISSION_JOURNAL_CONCURRENT_TRANSITION");
         }
-        this.prepareLegacyMissionRowForRecovery(mission.missionId, this.now().toISOString());
+        const retryStartedAt = this.now().toISOString();
+        this.prepareLegacyMissionRowForRecovery(mission.missionId, retryStartedAt);
         this.journal.transition(mission.missionId, "recovery_in_progress", {
           actor: ACTOR_ID,
           reason: "Operator claimed the single permitted safe retry after exact not-found reconciliation.",
-          timestamp: this.now().toISOString(),
+          timestamp: retryStartedAt,
           executionAttemptId: attemptId,
           lastConfirmedBoundary: execution.lastConfirmedBoundary,
           retryCount: 1,
           recoveryClassification: "SAFE_RETRY_IN_PROGRESS",
           typedError: null,
         });
+        this.missionLedger.recordRunning(
+          this.ledgerContext(mission.missionId, retryStartedAt),
+        );
         this.journal.transition(mission.missionId, "downstream_request_prepared", {
           actor: "chanter-agent-runtime",
           reason: "The single safe retry durably prepared the exact original downstream request.",
@@ -1547,6 +2016,7 @@ export class AutoPosterMissionService {
       message: "A human stopped automatic recovery and escalated the mission.",
     };
     withTransaction(this.database, () => {
+      this.ensureLegacyMissionLedgerLineage(mission.missionId);
       this.database.prepare(
         `UPDATE autoposter_runtime_missions SET status = 'failed', updated_at = ? WHERE mission_id = ?`,
       ).run(stoppedAt, mission.missionId);
@@ -1559,6 +2029,10 @@ export class AutoPosterMissionService {
         recoveryClassification: "STOPPED_FOR_ESCALATION",
         typedError,
       });
+      this.missionLedger.recordFailed(
+        this.ledgerContext(mission.missionId, stoppedAt),
+        { code: typedError.code, reason: typedError.message },
+      );
     });
     return this.getMission(mission.missionId);
   }

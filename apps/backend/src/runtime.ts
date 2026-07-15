@@ -22,11 +22,20 @@ export function createRuntime() {
   const runtimeMissionExecutor = createAutoPosterRuntimeMissionExecutor(
     config.autoPosterRuntime,
   );
+  const protectedValues = [
+    config.autoPosterRuntime.serviceToken,
+    config.missionSubmit.token,
+    config.missionControl.token,
+    config.ledgerIngest.token,
+  ];
+  const agentRunLedgerService = new AgentRunLedgerService(database, protectedValues);
   const runtimeMissionService = new AutoPosterMissionService(
     database,
     runtimeMissionExecutor,
-    { protectedValues: [config.autoPosterRuntime.serviceToken] },
+    {
+      agentRunLedgerService,
+      protectedValues,
+    },
   );
-  const agentRunLedgerService = new AgentRunLedgerService(database);
   return { database, service, runtimeMissionService, agentRunLedgerService };
 }

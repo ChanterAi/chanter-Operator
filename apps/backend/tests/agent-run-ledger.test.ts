@@ -1,7 +1,14 @@
+const LEDGER_INGEST_TOKEN = "test-ledger-ingest-token";
+
+function withLedgerAuth(req: ReturnType<typeof request>) {
+  return req.set("Authorization", `Bearer ${LEDGER_INGEST_TOKEN}`);
+}
+
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import express from "express";
 import request from "supertest";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -11,7 +18,7 @@ import {
 import { AgentRunLedgerService } from "../src/agentRunLedger/agentRunLedgerService.js";
 import { createApp } from "../src/app.js";
 import { AuditLogger } from "../src/audit/auditLogger.js";
-import { createDatabase } from "../src/db/database.js";
+import { createDatabase, withTransaction } from "../src/db/database.js";
 import { MockRunner } from "../src/runners/mockRunner.js";
 import { OperatorError, OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
@@ -157,13 +164,23 @@ function createHarness(databasePath?: string): Harness {
     new MockRunner(),
     ensureWorkspace(path.join(root, "workspace")),
   );
-  const ledger = new AgentRunLedgerService(database);
+  const ledger = new AgentRunLedgerService(database, [LEDGER_INGEST_TOKEN]);
+  // Phase 2A: wrap with test-only auth middleware.
+  const rawApp = createApp(operator, undefined, ledger);
+  const testApp = express();
+  testApp.use((req, _res, next) => {
+    if (!req.headers["authorization"] && !req.headers["x-chanter-capability-token"]) {
+      req.headers["authorization"] = `Bearer ${LEDGER_INGEST_TOKEN}`;
+    }
+    next();
+  });
+  testApp.use(rawApp);
   return {
     root,
     databasePath: resolvedDatabasePath,
     database,
     ledger,
-    app: createApp(operator, undefined, ledger),
+    app: testApp,
   };
 }
 
@@ -193,6 +210,30 @@ afterEach(() => {
 });
 
 describe("Agent Run Ledger durable authority", () => {
+  it("rejects the configured ingest token before any ledger value can persist", async () => {
+    const harness = createHarness();
+    const entry = {
+      ...buildEntry(1, "created"),
+      input_summary: `Never persist ${LEDGER_INGEST_TOKEN}`,
+    };
+    const response = await withLedgerAuth(request(harness.app)
+      .post("/api/agent-run-ledger/entries"))
+      .send(entry);
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: "Agent Run Ledger entries must not contain protected configuration data.",
+      code: "AGENT_RUN_LEDGER_PROTECTED_VALUE",
+    });
+    expect(JSON.stringify(response.body)).not.toContain(LEDGER_INGEST_TOKEN);
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_run_ledger_runs",
+    ).get()).toEqual({ count: 0 });
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_run_ledger_transitions",
+    ).get()).toEqual({ count: 0 });
+  });
+
   it("materializes one run, orders history, replays without writes, and reconstructs after restart", () => {
     const first = createHarness();
     const lifecycle = successfulLifecycle();
@@ -273,6 +314,33 @@ describe("Agent Run Ledger durable authority", () => {
     const durable = harness.ledger.getRun(RUN_ID);
     expect(durable.entry.sequence).toBe(1);
     expect(durable.transitions).toHaveLength(1);
+  });
+
+  it("joins the caller transaction and rolls back mission-side and ledger writes together", () => {
+    const harness = createHarness();
+    harness.database.exec(`
+      CREATE TABLE ledger_nested_rollback_probe (
+        value TEXT NOT NULL
+      );
+    `);
+
+    expect(() => withTransaction(harness.database, () => {
+      harness.database.prepare(
+        "INSERT INTO ledger_nested_rollback_probe (value) VALUES (?)",
+      ).run("mission-side-write");
+      harness.ledger.appendEntry(buildEntry(1, "created"));
+      throw new Error("outer transaction rollback probe");
+    })).toThrow("outer transaction rollback probe");
+
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM ledger_nested_rollback_probe",
+    ).get()).toEqual({ count: 0 });
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_run_ledger_runs",
+    ).get()).toEqual({ count: 0 });
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_run_ledger_transitions",
+    ).get()).toEqual({ count: 0 });
   });
 
   it("keeps failed runs visible and supports every exact filter with inclusive dates", () => {

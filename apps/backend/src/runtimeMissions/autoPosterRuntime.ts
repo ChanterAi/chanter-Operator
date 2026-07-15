@@ -31,7 +31,7 @@ export interface AutoPosterRuntimeMissionExecutor {
     workspaceId: string,
   ): Promise<AutoPosterConnectedAccountListSuccess | AutoPosterPortFailure>;
   validateConnectedAccount(input: {
-    workspaceId: string;
+    workspaceId?: string;
     accountId: string;
     provider: "tiktok" | "youtube";
   }): Promise<AutoPosterConnectedAccountValidationSuccess | AutoPosterPortFailure>;
@@ -149,7 +149,12 @@ export function createAutoPosterRuntimeMissionExecutor(
         : Promise.resolve(unavailableResult()),
     validateConnectedAccount: ({ workspaceId, accountId, provider }) =>
       port.validateConnectedAccount
-        ? port.validateConnectedAccount({ userId, workspaceId, accountId, provider })
+        ? port.validateConnectedAccount({
+            userId,
+            ...(workspaceId ? { workspaceId } : {}),
+            accountId,
+            provider,
+          })
         : Promise.resolve(unavailableResult()),
     execute: (request) => executeMission(request, {
       registry,

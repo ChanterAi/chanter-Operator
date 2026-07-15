@@ -4,11 +4,93 @@ import { actionTypes, type ActionType } from "../types.js";
 import { OperatorError, OperatorService } from "../services/operatorService.js";
 import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
+import {
+  capabilityTokenIsDistinct,
+  createCapabilityTokenMiddleware,
+} from "../middleware/capabilityToken.js";
+import { config } from "../config.js";
+import {
+  envelopeToRuntimeMissionRequest,
+  validateMissionEnvelope,
+} from "chanter-agent-runtime";
+
+const AUTOPOSTER_SCHEDULE_INPUT_KEYS = new Set([
+  "accountId",
+  "provider",
+  "mediaUrl",
+  "caption",
+  "hashtags",
+  "title",
+  "description",
+  "scheduledAt",
+]);
 
 function normalizeActionType(value: unknown): ActionType {
   return typeof value === "string" && actionTypes.includes(value as ActionType)
     ? (value as ActionType)
     : "unknown";
+}
+
+function scheduleInputFromEnvelope(value: unknown): Record<string, unknown> {
+  const validation = validateMissionEnvelope(value);
+  if (!validation.ok) {
+    const first = validation.errors[0];
+    throw new OperatorError(
+      first?.message ?? "Mission envelope validation failed.",
+      400,
+      first?.code ?? "OPERATOR_MISSION_ENVELOPE_INVALID",
+    );
+  }
+  const request = envelopeToRuntimeMissionRequest(validation.value);
+  if (request.product !== "auto_poster" || request.action !== "autoposter.post.schedule") {
+    throw new OperatorError(
+      "The mission target is not registered with the Operator gateway.",
+      409,
+      "OPERATOR_MISSION_TARGET_MISMATCH",
+    );
+  }
+  if (!request.tenant.accountId) {
+    throw new OperatorError(
+      "tenant.accountId is required for an AutoPoster schedule mission.",
+      400,
+      "OPERATOR_MISSION_SCOPE_INVALID",
+    );
+  }
+  if (Object.keys(request.input).some((key) => !AUTOPOSTER_SCHEDULE_INPUT_KEYS.has(key))) {
+    throw new OperatorError(
+      "The mission input contains a field that is not registered for this action.",
+      400,
+      "OPERATOR_MISSION_INPUT_UNSUPPORTED_FIELD",
+    );
+  }
+  if (
+    request.input.accountId !== undefined
+    && request.input.accountId !== request.tenant.accountId
+  ) {
+    throw new OperatorError(
+      "The mission input account does not match the exact tenant account scope.",
+      409,
+      "OPERATOR_MISSION_SCOPE_MISMATCH",
+    );
+  }
+  return {
+    missionId: request.missionId,
+    traceId: request.traceId,
+    idempotencyKey: request.idempotencyKey,
+    requestedBy: request.actor.id,
+    tenantUserId: request.tenant.userId,
+    workspaceId: request.tenant.workspaceId,
+    accountId: request.tenant.accountId,
+    product: request.product,
+    action: request.action,
+    provider: request.input.provider,
+    mediaUrl: request.input.mediaUrl,
+    caption: request.input.caption,
+    hashtags: request.input.hashtags,
+    title: request.input.title,
+    description: request.input.description,
+    scheduledAt: request.input.scheduledAt,
+  };
 }
 
 export function createApiRouter(
@@ -17,6 +99,38 @@ export function createApiRouter(
   agentRunLedgerService?: AgentRunLedgerService,
 ): Router {
   const router = Router();
+
+  // Capability-token middleware for write endpoints (fail-closed).
+  const missionSubmitTokenMiddleware = createCapabilityTokenMiddleware({
+    tokenEnvVar: "OPERATOR_MISSION_SUBMIT_TOKEN",
+    tokenValue: config.missionSubmit.token,
+    endpointLabel: "Mission submission",
+    forbiddenTokenValues: [
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
+    ],
+  });
+  const missionControlTokenMiddleware = createCapabilityTokenMiddleware({
+    tokenEnvVar: "OPERATOR_CONTROL_TOKEN",
+    tokenValue: config.missionControl.token,
+    endpointLabel: "Operator mission control",
+    forbiddenTokenValues: [
+      config.missionSubmit.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
+    ],
+  });
+  const ledgerIngestTokenMiddleware = createCapabilityTokenMiddleware({
+    tokenEnvVar: "OPERATOR_LEDGER_INGEST_TOKEN",
+    tokenValue: config.ledgerIngest.token,
+    endpointLabel: "Agent Run Ledger ingest",
+    forbiddenTokenValues: [
+      config.missionSubmit.token,
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+    ],
+  });
 
   const requireRuntimeMissionService = (): AutoPosterMissionService => {
     if (!runtimeMissionService) {
@@ -32,6 +146,31 @@ export function createApiRouter(
     return agentRunLedgerService;
   };
 
+  const missionSubmitReady = capabilityTokenIsDistinct(
+    config.missionSubmit.token,
+    [
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
+    ],
+  );
+  const missionControlReady = capabilityTokenIsDistinct(
+    config.missionControl.token,
+    [
+      config.missionSubmit.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
+    ],
+  );
+  const ledgerIngestReady = capabilityTokenIsDistinct(
+    config.ledgerIngest.token,
+    [
+      config.missionSubmit.token,
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+    ],
+  );
+
   router.get("/health", (_request, response) => {
     const integrity = service.checkIntegrity();
     response.json({
@@ -41,6 +180,32 @@ export function createApiRouter(
       execution: "contained_simulation",
       real_execution_enabled: false,
       network_execution_enabled: false,
+      missionSubmit: {
+        configured: Boolean(config.missionSubmit.token),
+        isolated: missionSubmitReady,
+        ready: missionSubmitReady,
+        endpoints: [
+          "/api/runtime-missions",
+          "/api/runtime-missions/autoposter/schedule",
+        ],
+      },
+      missionControl: {
+        configured: Boolean(config.missionControl.token),
+        isolated: missionControlReady,
+        ready: missionControlReady,
+        endpoints: [
+          "/api/runtime-missions/:missionId/approve",
+          "/api/runtime-missions/:missionId/reconcile",
+          "/api/runtime-missions/:missionId/resume",
+          "/api/runtime-missions/:missionId/stop",
+        ],
+      },
+      ledgerIngest: {
+        configured: Boolean(config.ledgerIngest.token),
+        isolated: ledgerIngestReady,
+        ready: ledgerIngestReady,
+        endpoints: ["/api/agent-run-ledger/entries"],
+      },
       runtimeMissions: {
         autoposter: runtimeMissionService?.getReadiness() ?? {
           configured: false,
@@ -74,7 +239,7 @@ export function createApiRouter(
     response.json({ lanes: productLanes });
   });
 
-  router.post("/agent-run-ledger/entries", (request, response) => {
+  router.post("/agent-run-ledger/entries", ledgerIngestTokenMiddleware, (request, response) => {
     const result = requireAgentRunLedgerService().appendEntry(request.body);
     response.status(result.replayed ? 200 : 201).json(result);
   });
@@ -104,8 +269,24 @@ export function createApiRouter(
     response.json({ missions: requireRuntimeMissionService().listMissions(parsedLimit) });
   });
 
+  router.post("/runtime-missions", missionSubmitTokenMiddleware, (request, response, next) => {
+    let missions: AutoPosterMissionService;
+    let input: Record<string, unknown>;
+    try {
+      missions = requireRuntimeMissionService();
+      input = scheduleInputFromEnvelope(request.body);
+    } catch (error) {
+      next(error);
+      return;
+    }
+    missions
+      .createScheduleMission(input)
+      .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
+      .catch(next);
+  });
+
   router.get("/runtime-missions/:missionId", (request, response) => {
-    response.json(requireRuntimeMissionService().getMission(request.params.missionId));
+    response.json(requireRuntimeMissionService().getMission(String(request.params.missionId)));
   });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {
@@ -122,7 +303,7 @@ export function createApiRouter(
       .catch(next);
   });
 
-  router.post("/runtime-missions/autoposter/schedule", (request, response, next) => {
+  router.post("/runtime-missions/autoposter/schedule", missionSubmitTokenMiddleware, (request, response, next) => {
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -132,11 +313,11 @@ export function createApiRouter(
     }
     missions
       .createScheduleMission(request.body)
-      .then((mission) => response.status(201).json(mission))
+      .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
       .catch(next);
   });
 
-  router.post("/runtime-missions/:missionId/approve", (request, response, next) => {
+  router.post("/runtime-missions/:missionId/approve", missionControlTokenMiddleware, (request, response, next) => {
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -145,12 +326,12 @@ export function createApiRouter(
       return;
     }
     missions
-      .approveAndExecute(request.params.missionId, request.body?.approvedBy)
+      .approveAndExecute(String(request.params.missionId), request.body?.approvedBy)
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
-  router.post("/runtime-missions/:missionId/reconcile", (request, response, next) => {
+  router.post("/runtime-missions/:missionId/reconcile", missionControlTokenMiddleware, (request, response, next) => {
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -158,12 +339,12 @@ export function createApiRouter(
       next(error);
       return;
     }
-    missions.reconcileMission(request.params.missionId)
+    missions.reconcileMission(String(request.params.missionId))
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
-  router.post("/runtime-missions/:missionId/resume", (request, response, next) => {
+  router.post("/runtime-missions/:missionId/resume", missionControlTokenMiddleware, (request, response, next) => {
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -171,14 +352,14 @@ export function createApiRouter(
       next(error);
       return;
     }
-    missions.resumeSafely(request.params.missionId)
+    missions.resumeSafely(String(request.params.missionId))
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
-  router.post("/runtime-missions/:missionId/stop", (request, response, next) => {
+  router.post("/runtime-missions/:missionId/stop", missionControlTokenMiddleware, (request, response, next) => {
     try {
-      response.json(requireRuntimeMissionService().stopAndEscalate(request.params.missionId));
+      response.json(requireRuntimeMissionService().stopAndEscalate(String(request.params.missionId)));
     } catch (error) {
       next(error);
     }

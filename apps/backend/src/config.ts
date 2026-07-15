@@ -1,8 +1,17 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const projectRoot = path.resolve(sourceDirectory, "../../..");
+const projectEnvironmentPath = path.join(projectRoot, ".env");
+
+// The documented local workflow keeps one uncommitted .env at the repository
+// root. Node does not load it implicitly, so load it before reading config while
+// preserving any values explicitly exported by the invoking shell.
+if (existsSync(projectEnvironmentPath)) {
+  process.loadEnvFile(projectEnvironmentPath);
+}
 
 const autoPosterRuntimeTimeoutRaw = process.env.AUTOPOSTER_RUNTIME_TIMEOUT_MS?.trim() ?? "";
 const autoPosterRuntimeTimeoutParsed = Number(autoPosterRuntimeTimeoutRaw);
@@ -32,5 +41,14 @@ export const config = {
         ? autoPosterRuntimeTimeoutParsed
         : undefined,
     timeoutValid: autoPosterRuntimeTimeoutValid,
+  },
+  missionSubmit: {
+    token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",
+  },
+  missionControl: {
+    token: process.env.OPERATOR_CONTROL_TOKEN?.trim() ?? "",
+  },
+  ledgerIngest: {
+    token: process.env.OPERATOR_LEDGER_INGEST_TOKEN?.trim() ?? "",
   },
 };

@@ -94,6 +94,26 @@ interface JsonRow {
   entry_json: string;
 }
 
+function containsProtectedValue(
+  value: unknown,
+  protectedValues: readonly string[],
+  seen = new WeakSet<object>(),
+): boolean {
+  if (typeof value === "string") {
+    return protectedValues.some((protectedValue) => value.includes(protectedValue));
+  }
+  if (value === null || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.some((item) => containsProtectedValue(item, protectedValues, seen));
+  }
+  return Object.entries(value).some(([key, item]) =>
+    containsProtectedValue(key, protectedValues, seen)
+    || containsProtectedValue(item, protectedValues, seen),
+  );
+}
+
 function requiredExactFilter(value: unknown, name: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (
@@ -225,9 +245,23 @@ function assertTransitionBinding(row: TransitionBindingRow, entry: AgentRunLedge
 }
 
 export class AgentRunLedgerService {
-  constructor(private readonly database: DatabaseSync) {}
+  private readonly protectedValues: string[];
+
+  constructor(
+    private readonly database: DatabaseSync,
+    protectedValues: readonly string[] = [],
+  ) {
+    this.protectedValues = protectedValues.map((value) => value.trim()).filter(Boolean);
+  }
 
   appendEntry(value: unknown): AgentRunLedgerAppendResult {
+    if (containsProtectedValue(value, this.protectedValues)) {
+      throw new OperatorError(
+        "Agent Run Ledger entries must not contain protected configuration data.",
+        400,
+        "AGENT_RUN_LEDGER_PROTECTED_VALUE",
+      );
+    }
     let entry: AgentRunLedgerEntry;
     try {
       entry = validateAgentRunLedgerEntry(value);
@@ -236,6 +270,7 @@ export class AgentRunLedgerService {
     }
 
     try {
+      if (this.database.isTransaction) return this.appendValidatedEntry(entry);
       return withTransaction(this.database, () => this.appendValidatedEntry(entry));
     } catch (error) {
       translateContractError(error);

@@ -77,6 +77,21 @@ Full detail: `docs/OPERATOR_RUNTIME_BRIDGE_P1A.md` and `docs/OPERATOR_RUNTIME_BR
 - The Release Operator and Mission Compiler never mutate anything — they read root docs and git state, and write evidence/report artifacts only to their own gitignored `reports/` folders or an explicit `--out` path.
 - Push, deploy, live publish, and migration remain **human-approval decisions** everywhere in Operator; no code path in this repo performs any of them today.
 
+## Phase 2A local mission gateway
+
+Operator is the durable authority for the registered `auto_poster` / `autoposter.post.schedule` write mission. Two loopback ingress routes share the same mission table, approval gate, execution journal, and Runtime adapter:
+
+- `POST /api/runtime-missions` accepts the versioned `chanter.mission.v1` envelope and currently dispatches only the registered AutoPoster schedule action.
+- `POST /api/runtime-missions/autoposter/schedule` preserves the existing compatibility request.
+
+The two create routes require `OPERATOR_MISSION_SUBMIT_TOKEN`. That submission capability cannot approve, reconcile, resume, or stop a mission. Those four independent control routes require `OPERATOR_CONTROL_TOKEN`, which must differ from the submit, AutoPoster service, and ledger-ingest values and must never be shared with MCP or another submission client; Operator fails control routes closed when these values collide. `GET /api/health` reports control `configured`, `isolated`, and `ready` booleans without exposing any capability value. The loopback Vite development/preview proxy injects the submit or control token server-side only for its exact same-origin POST route allowlist; reads, unrelated writes, foreign origins, and originless requests receive neither token. No capability value is bundled or returned to browser JavaScript. A separately hosted static frontend must provide an equivalent trusted server-side control proxy and must not expose either token to client code. New missions return `201` with `replayed: false`; an exact durable mission/idempotency replay returns `200` with `replayed: true` and performs no second connected-account preflight or downstream write. A changed identity, trace, scope, target, or execution payload returns a typed `409` without returning the prior result or evidence. Callers may omit `workspaceId`; only a genuinely new request then asks AutoPoster to resolve the canonical workspace for the exact provider/account, and Operator persists that returned identifier. Agent Runtime execution remains blocked until a separate Operator-control request approves the durable mission.
+
+Copy `.env.example` to the uncommitted repository-root `.env` for local configuration. Both the backend and the Vite development/preview proxy load that root file without overriding values explicitly exported by the invoking shell.
+
+`POST /api/agent-run-ledger/entries` is independently protected by `OPERATOR_LEDGER_INGEST_TOKEN`. Operator writes the registered AutoPoster mission lifecycle directly through the existing ledger service in the same SQLite transactions as authoritative mission transitions; external ledger ingestion still requires the separate token.
+
+All configured write capabilities — mission submit, mission control, ledger ingest, and the AutoPoster Runtime service token — must use distinct values. Any protected route whose configured capability collides with another capability fails closed with `CAPABILITY_TOKEN_CONFIGURATION_INVALID`.
+
 ## Quick-start commands
 
 From `apps/chanter-Operator` (verified against `package.json`):

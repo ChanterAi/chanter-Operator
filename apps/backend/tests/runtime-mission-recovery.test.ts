@@ -11,6 +11,7 @@ import type {
   AutoPosterScheduleSuccess,
 } from "chanter-agent-runtime";
 import { createDatabase } from "../src/db/database.js";
+import { AgentRunLedgerService } from "../src/agentRunLedger/agentRunLedgerService.js";
 import {
   AutoPosterMissionService,
   type MissionFailureBoundary,
@@ -298,6 +299,7 @@ function openService(
   activeDatabases.add(database);
   let injected = false;
   const service = new AutoPosterMissionService(database, executor(port, failureBoundary), {
+    agentRunLedgerService: new AgentRunLedgerService(database),
     failureInjector: failureBoundary
       ? (boundary) => {
           if (!injected && boundary === failureBoundary) {

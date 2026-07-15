@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
@@ -11,6 +13,7 @@ import type {
   AutoPosterScheduleParams,
 } from "chanter-agent-runtime";
 import { createApp } from "../src/app.js";
+import { AgentRunLedgerService } from "../src/agentRunLedger/agentRunLedgerService.js";
 import { AuditLogger } from "../src/audit/auditLogger.js";
 import { createDatabase } from "../src/db/database.js";
 import { MockRunner } from "../src/runners/mockRunner.js";
@@ -26,6 +29,17 @@ import { OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
 
 const TOKEN_CANARY = "short-token-9";
+const MISSION_SUBMIT_TOKEN = "test-mission-submit-token";
+const MISSION_CONTROL_TOKEN = "test-operator-control-token";
+const LEDGER_INGEST_TOKEN = "test-ledger-ingest-token";
+
+function withSubmitAuth(req: ReturnType<typeof request>) {
+  return req.set("Authorization", `Bearer ${MISSION_SUBMIT_TOKEN}`);
+}
+
+function withControlAuth(req: ReturnType<typeof request>) {
+  return req.set("Authorization", `Bearer ${MISSION_CONTROL_TOKEN}`);
+}
 
 function futureIso(minutes = 60): string {
   return new Date(Date.now() + minutes * 60_000).toISOString();
@@ -87,7 +101,7 @@ function makePort(overrides: Partial<AutoPosterOperationsPort> = {}): {
       accountValidationCalls.push(params);
       return {
         ok: true,
-        workspaceId: params.workspaceId,
+        workspaceId: params.workspaceId ?? "workspace-a-00000001",
         account: accountView(params.accountId, params.provider as "tiktok" | "youtube"),
       };
     },
@@ -148,8 +162,10 @@ function makePort(overrides: Partial<AutoPosterOperationsPort> = {}): {
 interface Harness {
   database: DatabaseSync;
   auditPath: string;
+  ledger: AgentRunLedgerService;
   missionService: AutoPosterMissionService;
   app: ReturnType<typeof createApp>;
+  rawApp: ReturnType<typeof createApp>;
 }
 
 function createHarness(
@@ -167,14 +183,43 @@ function createHarness(
     workspaceRoot,
   );
   const executor = createAutoPosterRuntimeMissionExecutor(configuration, { port });
+  const protectedValues = [
+    configuration.serviceToken,
+    MISSION_SUBMIT_TOKEN,
+    MISSION_CONTROL_TOKEN,
+    LEDGER_INGEST_TOKEN,
+  ];
+  const agentRunLedgerService = new AgentRunLedgerService(database, protectedValues);
   const missionService = new AutoPosterMissionService(database, executor, {
-    protectedValues: [configuration.serviceToken],
+    agentRunLedgerService,
+    protectedValues,
   });
+  // Phase 2A: wrap createApp with a test-only middleware that injects only the
+  // capability owned by each exact route class.
+  const rawApp = createApp(operatorService, missionService, agentRunLedgerService);
+  const testApp = express();
+  testApp.use((req, _res, next) => {
+    if (!req.headers["authorization"] && !req.headers["x-chanter-capability-token"]) {
+      const token = req.method === "POST" && (
+        req.path === "/api/runtime-missions" ||
+        req.path === "/api/runtime-missions/autoposter/schedule"
+      )
+        ? MISSION_SUBMIT_TOKEN
+        : req.method === "POST" && /^\/api\/runtime-missions\/[^/]+\/(?:approve|reconcile|resume|stop)$/.test(req.path)
+          ? MISSION_CONTROL_TOKEN
+          : "";
+      if (token) req.headers["authorization"] = `Bearer ${token}`;
+    }
+    next();
+  });
+  testApp.use(rawApp);
   return {
     database,
     auditPath,
+    ledger: agentRunLedgerService,
     missionService,
-    app: createApp(operatorService, missionService),
+    app: testApp,
+    rawApp,
   };
 }
 
@@ -197,12 +242,13 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
 
-    const response = await request(harness.app)
-      .post("/api/runtime-missions/autoposter/schedule")
+    const response = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
       .send(validInput());
 
     expect(response.status).toBe(201);
     expect(response.body).toMatchObject({
+      replayed: false,
       product: "auto_poster",
       action: "autoposter.post.schedule",
       status: "approval_required",
@@ -239,6 +285,550 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       .prepare("SELECT status, runtime_result_json FROM autoposter_runtime_missions")
       .get() as { status: string; runtime_result_json: string | null };
     expect(stored).toEqual({ status: "approval_required", runtime_result_json: null });
+  });
+
+  it("creates once with caller identity and returns a 200 replay before account preflight", async () => {
+    const { port, accountValidationCalls, scheduleCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const input = validInput({
+      workspaceId: undefined,
+      missionId: "mission-stable-001",
+      traceId: "trace-stable-001",
+      idempotencyKey: "caller-key-stable-001",
+      requestedBy: "mcp-client",
+    });
+
+    const first = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send(input);
+    const { missionId: _omittedMissionId, ...retry } = input;
+    const replay = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send(retry);
+
+    expect(first.status).toBe(201);
+    expect(first.body).toMatchObject({
+      replayed: false,
+      missionId: "mission-stable-001",
+      traceId: "trace-stable-001",
+      idempotencyKey: "caller-key-stable-001",
+      actorId: "mcp-client",
+      workspaceId: "workspace-a-00000001",
+      status: "approval_required",
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({
+      replayed: true,
+      missionId: first.body.missionId,
+      traceId: first.body.traceId,
+      idempotencyKey: first.body.idempotencyKey,
+    });
+    expect(accountValidationCalls).toEqual([{
+      userId: "owner",
+      accountId: "account-a",
+      provider: "tiktok",
+    }]);
+    expect(scheduleCalls).toHaveLength(0);
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM autoposter_runtime_missions").get())
+      .toEqual({ count: 1 });
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM autoposter_mission_journal").get())
+      .toEqual({ count: 1 });
+  });
+
+  it("records one canonical ledger lineage and appends nothing on exact replay or mismatch", async () => {
+    const { port, accountValidationCalls, scheduleCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const input = validInput({
+      missionId: "ledger-lineage-mission",
+      traceId: "ledger-lineage-trace",
+      idempotencyKey: "ledger-lineage-key",
+      requestedBy: "mcp-client",
+    });
+
+    const created = await harness.missionService.createScheduleMission(input);
+    const initialLedger = harness.ledger.getRun(created.missionId);
+    expect(initialLedger.transitions.map((entry) => entry.status)).toEqual([
+      "created",
+      "approval_required",
+    ]);
+
+    const completed = await harness.missionService.approveAndExecute(created.missionId, "founder");
+    const completedLedger = harness.ledger.getRun(created.missionId);
+    expect(completedLedger.transitions.map((entry) => entry.status)).toEqual([
+      "created",
+      "approval_required",
+      "approved",
+      "running",
+      "validating",
+      "completed",
+    ]);
+    expect(new Set(completedLedger.transitions.map((entry) => entry.run_id))).toEqual(
+      new Set([created.missionId]),
+    );
+    expect(new Set(completedLedger.transitions.map((entry) => entry.trace_id))).toEqual(
+      new Set([created.traceId]),
+    );
+    expect(new Set(completedLedger.transitions.map((entry) => entry.attempt_id)).size).toBe(1);
+    expect(completedLedger.transitions.every((entry) => entry.provider === "tiktok")).toBe(true);
+    expect(completedLedger.transitions.every((entry) => entry.model === "not_applicable")).toBe(true);
+    expect(completedLedger.entry).toMatchObject({
+      run_id: created.missionId,
+      trace_id: created.traceId,
+      status: "completed",
+      approval_status: "approved",
+      approval_actor: "founder",
+      approval_timestamp: expect.any(String),
+      validation_result: "passed",
+      evidence_count: 1,
+      evidence_integrity_status: "verified",
+    });
+
+    const stored = harness.database.prepare(
+      "SELECT runtime_result_json FROM autoposter_runtime_missions WHERE mission_id = ?",
+    ).get(created.missionId) as { runtime_result_json: string };
+    const expectedEvidenceHash = createHash("sha256")
+      .update(stored.runtime_result_json, "utf8")
+      .digest("hex");
+    expect(completedLedger.entry.evidence_refs).toEqual([expect.objectContaining({
+      sha256: expectedEvidenceHash,
+      uri: `operator://runtime-missions/${created.missionId}/runtime-result`,
+    })]);
+
+    const exactCreateReplay = await harness.missionService.createScheduleMission(input);
+    const exactExecutionReplay = await harness.missionService.approveAndExecute(
+      created.missionId,
+      "founder",
+    );
+    expect(exactCreateReplay).toMatchObject({ replayed: true, status: "succeeded" });
+    expect(exactExecutionReplay).toMatchObject({ status: "succeeded" });
+    expect(harness.ledger.getRun(created.missionId)).toEqual(completedLedger);
+
+    await expect(harness.missionService.createScheduleMission({
+      ...input,
+      caption: "Changed caption must conflict",
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      code: "OPERATOR_MISSION_PAYLOAD_MISMATCH",
+    });
+    expect(harness.ledger.getRun(created.missionId)).toEqual(completedLedger);
+    expect(accountValidationCalls).toHaveLength(1);
+    expect(scheduleCalls).toHaveLength(1);
+    expect(completed.runtimeResult).toBeDefined();
+  });
+
+  it("returns typed non-leaking 409 conflicts for changed durable bindings", async () => {
+    const { port, accountValidationCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const input = validInput({
+      missionId: "mission-binding-a",
+      traceId: "trace-binding-a",
+      idempotencyKey: "key-binding-a",
+      requestedBy: "mcp-client",
+    });
+    const created = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send(input);
+    expect(created.status).toBe(201);
+
+    const cases: Array<{
+      label: string;
+      body: Record<string, unknown>;
+      code: string;
+    }> = [
+      {
+        label: "changed key",
+        body: { ...input, idempotencyKey: "key-binding-changed" },
+        code: "OPERATOR_IDEMPOTENCY_MISMATCH",
+      },
+      {
+        label: "changed trace",
+        body: { ...input, missionId: undefined, traceId: "trace-binding-changed" },
+        code: "OPERATOR_TRACE_MISMATCH",
+      },
+      {
+        label: "changed workspace",
+        body: { ...input, missionId: undefined, traceId: undefined, workspaceId: "workspace-b" },
+        code: "OPERATOR_MISSION_SCOPE_MISMATCH",
+      },
+      {
+        label: "changed account",
+        body: { ...input, missionId: undefined, traceId: undefined, accountId: "account-b" },
+        code: "OPERATOR_MISSION_SCOPE_MISMATCH",
+      },
+      {
+        label: "changed provider",
+        body: { ...input, missionId: undefined, traceId: undefined, provider: "youtube", title: "Video" },
+        code: "OPERATOR_MISSION_SCOPE_MISMATCH",
+      },
+      {
+        label: "changed payload",
+        body: { ...input, missionId: undefined, traceId: undefined, caption: "Changed caption" },
+        code: "OPERATOR_MISSION_PAYLOAD_MISMATCH",
+      },
+      {
+        label: "changed product",
+        body: { ...input, product: "clean_engine" },
+        code: "OPERATOR_MISSION_TARGET_MISMATCH",
+      },
+      {
+        label: "changed action",
+        body: { ...input, action: "autoposter.post.publish" },
+        code: "OPERATOR_MISSION_TARGET_MISMATCH",
+      },
+    ];
+
+    for (const conflict of cases) {
+      const response = await withSubmitAuth(request(harness.app)
+        .post("/api/runtime-missions/autoposter/schedule"))
+        .send(conflict.body);
+      expect(response.status, conflict.label).toBe(409);
+      expect(response.body, conflict.label).toEqual({
+        error: expect.any(String),
+        code: conflict.code,
+      });
+      expect(JSON.stringify(response.body), conflict.label).not.toMatch(
+        /runtimeResult|evidenceSummary|queue-draft|mission-binding-a/,
+      );
+    }
+
+    const secondInput = validInput({
+      missionId: "mission-binding-b",
+      traceId: "trace-binding-b",
+      idempotencyKey: "key-binding-b",
+      requestedBy: "mcp-client",
+      caption: "Second mission",
+    });
+    expect((await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send(secondInput)).status).toBe(201);
+
+    const splitIdentity = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send({ ...input, idempotencyKey: "key-binding-b", traceId: undefined });
+    expect(splitIdentity.status).toBe(409);
+    expect(splitIdentity.body.code).toBe("OPERATOR_MISSION_IDENTITY_MISMATCH");
+
+    const traceCollision = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send({
+        ...input,
+        missionId: "mission-binding-c",
+        idempotencyKey: "key-binding-c",
+      });
+    expect(traceCollision.status).toBe(409);
+    expect(traceCollision.body.code).toBe("OPERATOR_TRACE_MISMATCH");
+    expect(accountValidationCalls).toHaveLength(2);
+    expect(harness.database.prepare("SELECT COUNT(*) AS count FROM autoposter_runtime_missions").get())
+      .toEqual({ count: 2 });
+  });
+
+  it("accepts the canonical envelope ingress and rejects an unsupported target", async () => {
+    const { port, accountValidationCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const scheduledAt = futureIso();
+    const envelope = {
+      schemaVersion: "chanter.mission.v1",
+      missionId: "envelope-mission-001",
+      traceId: "envelope-trace-001",
+      idempotencyKey: "envelope-key-001",
+      source: { system: "mcp", requestedBy: "mcp-envelope-client" },
+      objective: "Create one unapproved AutoPoster schedule draft.",
+      target: { product: "auto_poster", action: "autoposter.post.schedule" },
+      tenant: { userId: "owner", accountId: "account-a" },
+      input: {
+        accountId: "account-a",
+        provider: "tiktok",
+        mediaUrl: "https://cdn.example.com/video.mp4",
+        caption: "Envelope clip",
+        hashtags: "#chanter",
+        scheduledAt,
+      },
+      constraints: ["No publishing"],
+      acceptanceCriteria: ["One unapproved draft"],
+      requestedAt: new Date().toISOString(),
+    };
+
+    const first = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions"))
+      .send(envelope);
+    const replay = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions"))
+      .send(envelope);
+    expect(first.status).toBe(201);
+    expect(first.body).toMatchObject({
+      replayed: false,
+      missionId: envelope.missionId,
+      traceId: envelope.traceId,
+      actorId: "mcp-envelope-client",
+      workspaceId: "workspace-a-00000001",
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ replayed: true, missionId: envelope.missionId });
+    expect(accountValidationCalls).toHaveLength(1);
+
+    const unsupportedInput = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions"))
+      .send({
+        ...envelope,
+        input: { ...envelope.input, unregisteredControl: "must-not-be-ignored" },
+      });
+    expect(unsupportedInput.status).toBe(400);
+    expect(unsupportedInput.body).toEqual({
+      error: "The mission input contains a field that is not registered for this action.",
+      code: "OPERATOR_MISSION_INPUT_UNSUPPORTED_FIELD",
+    });
+    expect(accountValidationCalls).toHaveLength(1);
+    expect(harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM autoposter_runtime_missions",
+    ).get()).toEqual({ count: 1 });
+
+    const unsupported = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions"))
+      .send({
+        ...envelope,
+        target: { product: "clean_engine", action: "clean_engine.image.clean" },
+      });
+    expect(unsupported.status).toBe(409);
+    expect(unsupported.body).toEqual({
+      error: "The mission target is not registered with the Operator gateway.",
+      code: "OPERATOR_MISSION_TARGET_MISMATCH",
+    });
+  });
+
+  it("protects every real mission-write and ledger-ingest route before domain handling", async () => {
+    const { port } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const routes = [
+      { path: "/api/runtime-missions", token: MISSION_SUBMIT_TOKEN },
+      { path: "/api/runtime-missions/autoposter/schedule", token: MISSION_SUBMIT_TOKEN },
+      { path: "/api/runtime-missions/missing/approve", token: MISSION_CONTROL_TOKEN },
+      { path: "/api/runtime-missions/missing/reconcile", token: MISSION_CONTROL_TOKEN },
+      { path: "/api/runtime-missions/missing/resume", token: MISSION_CONTROL_TOKEN },
+      { path: "/api/runtime-missions/missing/stop", token: MISSION_CONTROL_TOKEN },
+      { path: "/api/agent-run-ledger/entries", token: LEDGER_INGEST_TOKEN },
+    ];
+
+    for (const route of routes) {
+      const missing = await request(harness.rawApp).post(route.path).send({});
+      expect(missing.status, route.path).toBe(401);
+      expect(missing.body.code, route.path).toBe("CAPABILITY_TOKEN_INVALID");
+
+      const wrong = await request(harness.rawApp)
+        .post(route.path)
+        .set("Authorization", "Bearer wrong-capability-token")
+        .send({});
+      expect(wrong.status, route.path).toBe(401);
+      expect(wrong.body.code, route.path).toBe("CAPABILITY_TOKEN_INVALID");
+
+      const valid = await request(harness.rawApp)
+        .post(route.path)
+        .set("Authorization", `Bearer ${route.token}`)
+        .send({});
+      expect(valid.status, route.path).not.toBe(401);
+      expect(valid.status, route.path).not.toBe(503);
+    }
+  });
+
+  it("keeps submit, Operator control, AutoPoster service, and ledger capabilities non-substitutable", async () => {
+    const { port, scheduleCalls } = makePort();
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+
+    const controlCannotSubmit = await request(harness.rawApp)
+      .post("/api/runtime-missions/autoposter/schedule")
+      .set("Authorization", `Bearer ${MISSION_CONTROL_TOKEN}`)
+      .send(validInput());
+    expect(controlCannotSubmit.status).toBe(401);
+
+    const created = await request(harness.rawApp)
+      .post("/api/runtime-missions/autoposter/schedule")
+      .set("Authorization", `Bearer ${MISSION_SUBMIT_TOKEN}`)
+      .send(validInput());
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ status: "approval_required", approvedBy: null });
+    expect(scheduleCalls).toHaveLength(0);
+
+    const controlPaths = ["approve", "reconcile", "resume", "stop"];
+    const nonControlTokens = [MISSION_SUBMIT_TOKEN, TOKEN_CANARY, LEDGER_INGEST_TOKEN];
+    for (const action of controlPaths) {
+      for (const [tokenIndex, token] of nonControlTokens.entries()) {
+        const rejected = await request(harness.rawApp)
+          .post(`/api/runtime-missions/${created.body.missionId}/${action}`)
+          .set("Authorization", `Bearer ${token}`)
+          .send(action === "approve" ? { approvedBy: "founder" } : {});
+        expect(rejected.status, `${action}:token-${tokenIndex}`).toBe(401);
+        expect(rejected.body.code, `${action}:token-${tokenIndex}`).toBe("CAPABILITY_TOKEN_INVALID");
+      }
+    }
+
+    expect(harness.missionService.getMission(created.body.missionId)).toMatchObject({
+      status: "approval_required",
+      approvedBy: null,
+      runtimeResult: null,
+    });
+    expect(scheduleCalls).toHaveLength(0);
+
+    const approved = await request(harness.rawApp)
+      .post(`/api/runtime-missions/${created.body.missionId}/approve`)
+      .set("Authorization", `Bearer ${MISSION_CONTROL_TOKEN}`)
+      .send({ approvedBy: "founder" });
+    expect(approved.status).toBe(200);
+    expect(approved.body).toMatchObject({ status: "succeeded", approvedBy: "founder" });
+    expect(scheduleCalls).toHaveLength(1);
+  });
+
+  it("replays an executed mission after database and service recreation", async () => {
+    const { port, accountValidationCalls, scheduleCalls } = makePort();
+    const input = validInput({
+      missionId: "restart-create-mission",
+      traceId: "restart-create-trace",
+      idempotencyKey: "restart-create-key",
+      requestedBy: "mcp-client",
+    });
+    const first = createHarness(temporaryRoot, port);
+    database = first.database;
+    const created = await first.missionService.createScheduleMission(input);
+    const completed = await first.missionService.approveAndExecute(created.missionId, "founder");
+    const ledgerBeforeRestart = first.ledger.getRun(created.missionId);
+    first.database.close();
+    database = undefined;
+
+    const restarted = createHarness(temporaryRoot, port);
+    database = restarted.database;
+    const { missionId: _omittedMissionId, ...retry } = input;
+    const replay = await withSubmitAuth(request(restarted.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
+      .send(retry);
+    const executionReplay = await restarted.missionService.approveAndExecute(
+      created.missionId,
+      "founder",
+    );
+
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({
+      replayed: true,
+      missionId: created.missionId,
+      traceId: created.traceId,
+      status: "succeeded",
+      runtimeResult: completed.runtimeResult,
+    });
+    expect(accountValidationCalls).toHaveLength(1);
+    expect(scheduleCalls).toHaveLength(1);
+    expect(executionReplay.runtimeResult).toEqual(completed.runtimeResult);
+    expect(restarted.ledger.getRun(created.missionId)).toEqual(ledgerBeforeRestart);
+  });
+
+  it("recovers a typed commercial denial only through explicit reconcile and resume", async () => {
+    let commercialAllowed = false;
+    let scheduleAttempts = 0;
+    const { port, accountValidationCalls } = makePort({
+      async schedulePost(params) {
+        scheduleAttempts += 1;
+        if (!commercialAllowed) {
+          return {
+            ok: false,
+            code: "forbidden",
+            message: "Runtime scheduling is not included in this plan.",
+            details: {
+              reasonCode: "runtime_scheduling_not_allowed",
+              planId: "starter",
+              workspaceId: params.workspaceId,
+            },
+          };
+        }
+        return {
+          ok: true,
+          duplicate: false,
+          post: {
+            id: "commercial-recovery-draft",
+            accountId: params.accountId,
+            provider: params.provider ?? "tiktok",
+            status: "scheduled",
+            scheduledAt: params.scheduledAt,
+            approved: false,
+          },
+        };
+      },
+      async reconcileSchedule() {
+        return {
+          ok: true,
+          outcome: "not_found",
+          count: 0,
+          unique: true,
+          safeToReuse: false,
+          approvalState: "not_started",
+          publishingState: "not_started",
+          evidenceStatus: "not_found",
+        };
+      },
+    });
+    const harness = createHarness(temporaryRoot, port);
+    database = harness.database;
+    const input = validInput({
+      missionId: "commercial-recovery-mission",
+      traceId: "commercial-recovery-trace",
+      idempotencyKey: "commercial-recovery-key",
+      requestedBy: "mcp-client",
+    });
+
+    const created = await harness.missionService.createScheduleMission(input);
+    const denied = await harness.missionService.approveAndExecute(created.missionId, "founder");
+    expect(denied).toMatchObject({
+      status: "denied",
+      execution: {
+        state: "failed_recoverable",
+        recoveryClassification: "RECOVERY_COMMERCIAL_DENIAL",
+        nextPermittedActions: ["Reconcile", "Stop / escalate"],
+      },
+    });
+
+    const rawReplay = await harness.missionService.createScheduleMission(input);
+    expect(rawReplay).toMatchObject({ replayed: true, status: "denied" });
+    expect(scheduleAttempts).toBe(1);
+    expect(accountValidationCalls).toHaveLength(1);
+    expect(harness.ledger.getRun(created.missionId).transitions.map((entry) => entry.status)).toEqual([
+      "created",
+      "approval_required",
+      "approved",
+      "running",
+      "reconciliation_required",
+    ]);
+
+    commercialAllowed = true;
+    const reconciled = await harness.missionService.reconcileMission(created.missionId);
+    expect(reconciled.execution).toMatchObject({
+      state: "failed_recoverable",
+      reconciliationOutcome: "not_found",
+      nextPermittedActions: ["Reconcile", "Resume safely", "Stop / escalate"],
+    });
+    const recovered = await harness.missionService.resumeSafely(created.missionId);
+    expect(recovered).toMatchObject({
+      status: "succeeded",
+      execution: { state: "completed", recoveryClassification: "SAFE_RETRY_COMPLETED" },
+    });
+    const stableReplay = await harness.missionService.createScheduleMission(input);
+    expect(stableReplay).toMatchObject({ replayed: true, status: "succeeded" });
+    expect(scheduleAttempts).toBe(2);
+    expect(accountValidationCalls).toHaveLength(1);
+    const recoveredLedger = harness.ledger.getRun(created.missionId);
+    expect(recoveredLedger.transitions.map((entry) => entry.status)).toEqual([
+      "created",
+      "approval_required",
+      "approved",
+      "running",
+      "reconciliation_required",
+      "running",
+      "reconciliation_required",
+      "running",
+      "validating",
+      "completed",
+    ]);
+    expect(new Set(recoveredLedger.transitions.map((entry) => entry.attempt_id)).size).toBe(1);
   });
 
   it("loads the workspace-scoped canonical account registry through the existing Runtime port", async () => {
@@ -317,8 +907,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
 
-    const response = await request(harness.app)
-      .post("/api/runtime-missions/autoposter/schedule")
+    const response = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
       .send(validInput({ accountId: " account-a " }));
 
     expect(response.status).toBe(409);
@@ -363,11 +953,11 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         .send(validInput())
     ).body as AutoPosterRuntimeMission;
 
-    const missing = await request(harness.app).post(
-      `/api/runtime-missions/${created.missionId}/approve`,
+    const missing = await withControlAuth(request(harness.app).post(
+      `/api/runtime-missions/${created.missionId}/approve`),
     );
-    const blank = await request(harness.app)
-      .post(`/api/runtime-missions/${created.missionId}/approve`)
+    const blank = await withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${created.missionId}/approve`))
       .send({ approvedBy: "   " });
 
     expect(missing.status).toBe(400);
@@ -393,8 +983,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         .send(input)
     ).body as AutoPosterRuntimeMission;
 
-    const approved = await request(harness.app)
-      .post(`/api/runtime-missions/${created.missionId}/approve`)
+    const approved = await withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${created.missionId}/approve`))
       .send({ approvedBy: "founder" });
 
     expect(approved.status).toBe(200);
@@ -657,13 +1247,13 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     database = harness.database;
     const created = await harness.missionService.createScheduleMission(validInput());
 
-    const firstPromise = request(harness.app)
-      .post(`/api/runtime-missions/${created.missionId}/approve`)
+    const firstPromise = withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${created.missionId}/approve`))
       .send({ approvedBy: "founder-a" })
       .then((response) => response);
     await started;
-    const second = await request(harness.app)
-      .post(`/api/runtime-missions/${created.missionId}/approve`)
+    const second = await withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${created.missionId}/approve`))
       .send({ approvedBy: "founder-b" });
     releaseSchedule?.();
     const first = await firstPromise;
@@ -679,14 +1269,18 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const { port } = makePort();
     const firstDatabase = createDatabase(databasePath);
     const executor = createAutoPosterRuntimeMissionExecutor(validConfiguration(), { port });
-    const firstService = new AutoPosterMissionService(firstDatabase, executor);
+    const firstService = new AutoPosterMissionService(firstDatabase, executor, {
+      agentRunLedgerService: new AgentRunLedgerService(firstDatabase),
+    });
     const created = await firstService.createScheduleMission(validInput());
     const completed = await firstService.approveAndExecute(created.missionId, "founder");
     firstDatabase.close();
 
     const reopenedDatabase = createDatabase(databasePath);
     database = reopenedDatabase;
-    const reopenedService = new AutoPosterMissionService(reopenedDatabase, executor);
+    const reopenedService = new AutoPosterMissionService(reopenedDatabase, executor, {
+      agentRunLedgerService: new AgentRunLedgerService(reopenedDatabase),
+    });
     const reopened = reopenedService.getMission(created.missionId);
 
     expect(reopened).toEqual(completed);
@@ -713,8 +1307,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       ignoredToken: TOKEN_CANARY,
       planId: "caller-supplied-plan",
     }));
-    const approved = await request(harness.app)
-      .post(`/api/runtime-missions/${created.missionId}/approve`)
+    const approved = await withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${created.missionId}/approve`))
       .send({ approvedBy: "founder", token: TOKEN_CANARY });
     const rawRows = JSON.stringify(
       harness.database.prepare("SELECT * FROM autoposter_runtime_missions").all(),
@@ -730,30 +1324,45 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     expect(serialized).toContain("[REDACTED]");
   });
 
-  it("rejects the configured service token before accepted inputs or approval identity can persist", async () => {
+  it("rejects every configured capability token before mission input or approval can persist", async () => {
     const { port } = makePort();
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
 
-    const rejectedCreation = await request(harness.app)
-      .post("/api/runtime-missions/autoposter/schedule")
-      .send(validInput({ caption: `Never store ${TOKEN_CANARY}` }));
+    const protectedValues = [
+      TOKEN_CANARY,
+      MISSION_SUBMIT_TOKEN,
+      MISSION_CONTROL_TOKEN,
+      LEDGER_INGEST_TOKEN,
+    ];
+    const rejectedCreations = [];
+    for (const protectedValue of protectedValues) {
+      rejectedCreations.push(await withSubmitAuth(request(harness.app)
+        .post("/api/runtime-missions/autoposter/schedule"))
+        .send(validInput({ caption: `Never store ${protectedValue}` })));
+    }
     const mission = await harness.missionService.createScheduleMission(validInput());
-    const rejectedApproval = await request(harness.app)
-      .post(`/api/runtime-missions/${mission.missionId}/approve`)
-      .send({ approvedBy: TOKEN_CANARY });
+    const rejectedApprovals = [];
+    for (const protectedValue of protectedValues) {
+      rejectedApprovals.push(await withControlAuth(request(harness.app)
+        .post(`/api/runtime-missions/${mission.missionId}/approve`))
+        .send({ approvedBy: protectedValue }));
+    }
     const rawRows = JSON.stringify(
       harness.database.prepare("SELECT * FROM autoposter_runtime_missions").all(),
     );
     const serializedResponses = JSON.stringify([
-      rejectedCreation.body,
-      rejectedApproval.body,
+      ...rejectedCreations.map((response) => response.body),
+      ...rejectedApprovals.map((response) => response.body),
     ]);
 
-    expect(rejectedCreation.status).toBe(400);
-    expect(rejectedApproval.status).toBe(400);
-    expect(serializedResponses).not.toContain(TOKEN_CANARY);
-    expect(rawRows).not.toContain(TOKEN_CANARY);
+    for (const response of [...rejectedCreations, ...rejectedApprovals]) {
+      expect(response.status).toBe(400);
+    }
+    for (const protectedValue of protectedValues) {
+      expect(serializedResponses).not.toContain(protectedValue);
+      expect(rawRows).not.toContain(protectedValue);
+    }
     expect(harness.missionService.listMissions()).toHaveLength(1);
     expect(harness.missionService.getMission(mission.missionId)).toMatchObject({
       status: "approval_required",
@@ -776,6 +1385,28 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       execution: "contained_simulation",
       real_execution_enabled: false,
       network_execution_enabled: false,
+      missionSubmit: {
+        configured: true,
+        endpoints: [
+          "/api/runtime-missions",
+          "/api/runtime-missions/autoposter/schedule",
+        ],
+      },
+      missionControl: {
+        configured: true,
+        isolated: true,
+        ready: true,
+        endpoints: [
+          "/api/runtime-missions/:missionId/approve",
+          "/api/runtime-missions/:missionId/reconcile",
+          "/api/runtime-missions/:missionId/resume",
+          "/api/runtime-missions/:missionId/stop",
+        ],
+      },
+      ledgerIngest: {
+        configured: true,
+        endpoints: ["/api/agent-run-ledger/entries"],
+      },
       runtimeMissions: {
         autoposter: {
           configured: true,
@@ -785,6 +1416,15 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         },
       },
     });
+    const serializedHealth = JSON.stringify(response.body);
+    for (const protectedValue of [
+      TOKEN_CANARY,
+      MISSION_SUBMIT_TOKEN,
+      MISSION_CONTROL_TOKEN,
+      LEDGER_INGEST_TOKEN,
+    ]) {
+      expect(serializedHealth).not.toContain(protectedValue);
+    }
   });
 
   it("lists missions newest-first and keeps immutable execution inputs read-only", async () => {
@@ -855,8 +1495,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const harness = createHarness(temporaryRoot, port);
     database = harness.database;
 
-    const created = await request(harness.app)
-      .post("/api/runtime-missions/autoposter/schedule")
+    const created = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
       .send(validInput());
     const interrupted = await request(harness.app)
       .post(`/api/runtime-missions/${created.body.missionId}/approve`)
@@ -895,11 +1535,11 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     });
     expect(scheduleAttempts).toBe(1);
 
-    const second = await request(harness.app)
-      .post("/api/runtime-missions/autoposter/schedule")
+    const second = await withSubmitAuth(request(harness.app)
+      .post("/api/runtime-missions/autoposter/schedule"))
       .send(validInput({ caption: "stop this recovery" }));
-    await request(harness.app)
-      .post(`/api/runtime-missions/${second.body.missionId}/approve`)
+    await withControlAuth(request(harness.app)
+      .post(`/api/runtime-missions/${second.body.missionId}/approve`))
       .send({ approvedBy: "founder" });
     const stopped = await request(harness.app)
       .post(`/api/runtime-missions/${second.body.missionId}/stop`)
