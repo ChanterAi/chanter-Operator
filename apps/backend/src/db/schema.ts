@@ -336,6 +336,93 @@ CREATE TABLE IF NOT EXISTS operator_mission_journal (
 CREATE INDEX IF NOT EXISTS idx_operator_mission_journal_mission
   ON operator_mission_journal(mission_id, sequence);
 
+-- Phase 2D durable mission graph authority (additive; the Phase 2C mission
+-- spine tables above are intentionally untouched). One graph compiles once
+-- into an immutable normalized document + SHA-256 hash; founder approval
+-- binds that exact hash; nodes materialize as ordinary generic missions in
+-- operator_missions, so the graph layer never becomes a second execution
+-- authority.
+CREATE TABLE IF NOT EXISTS operator_mission_graphs (
+  graph_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  schema_version TEXT NOT NULL CHECK (schema_version = 'chanter.mission.graph.v1'),
+  source_system TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  tenant_user_id TEXT NOT NULL,
+  workspace_id TEXT,
+  account_id TEXT,
+  objective TEXT NOT NULL,
+  compiled_graph_json TEXT NOT NULL,
+  graph_hash TEXT NOT NULL,
+  node_count INTEGER NOT NULL CHECK (node_count >= 1 AND node_count <= 8),
+  status TEXT NOT NULL CHECK (status IN (
+    'approval_required', 'approved', 'running', 'completed',
+    'failed_recoverable', 'failed_terminal', 'cancelled'
+  )),
+  approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required = 1),
+  approved_by TEXT,
+  approved_at TEXT,
+  approved_graph_hash TEXT,
+  requested_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_mission_graphs_created_at
+  ON operator_mission_graphs(created_at DESC, graph_id DESC);
+
+CREATE TABLE IF NOT EXISTS operator_mission_graph_nodes (
+  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
+  node_id TEXT NOT NULL,
+  product TEXT NOT NULL CHECK (product <> 'auto_poster'),
+  action TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  input_json TEXT NOT NULL,
+  depends_on_json TEXT NOT NULL,
+  child_mission_id TEXT NOT NULL UNIQUE,
+  child_trace_id TEXT NOT NULL,
+  child_idempotency_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'blocked', 'ready', 'running', 'completed',
+    'failed_recoverable', 'failed_terminal', 'cancelled'
+  )),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0 AND attempts <= 3),
+  result_status TEXT,
+  result_summary_json TEXT,
+  typed_error_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (graph_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS operator_mission_graph_edges (
+  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
+  from_node_id TEXT NOT NULL,
+  to_node_id TEXT NOT NULL,
+  PRIMARY KEY (graph_id, from_node_id, to_node_id)
+);
+
+CREATE TABLE IF NOT EXISTS operator_mission_graph_events (
+  event_id TEXT PRIMARY KEY,
+  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  scope TEXT NOT NULL CHECK (scope IN ('graph', 'node')),
+  node_id TEXT,
+  event_type TEXT NOT NULL,
+  previous_state TEXT,
+  new_state TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  typed_error_json TEXT,
+  UNIQUE(graph_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_mission_graph_events_graph
+  ON operator_mission_graph_events(graph_id, sequence);
+
 CREATE TABLE IF NOT EXISTS agent_run_ledger_ingest_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,

@@ -2,6 +2,7 @@ import { AuditLogger } from "./audit/auditLogger.js";
 import { config } from "./config.js";
 import { createDatabase } from "./db/database.js";
 import { GenericMissionService } from "./missions/genericMissionService.js";
+import { MissionGraphService } from "./missions/missionGraphService.js";
 import { createLoopGovernorMissionExecutor } from "./missions/loopGovernorRuntime.js";
 import { MockRunner } from "./runners/mockRunner.js";
 import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
@@ -50,5 +51,15 @@ export function createRuntime() {
       protectedValues,
     },
   );
-  return { database, service, runtimeMissionService, agentRunLedgerService, genericMissionService };
+  const missionGraphService = new MissionGraphService(database, genericMissionService, {
+    protectedValues,
+  });
+  return {
+    database,
+    service,
+    runtimeMissionService,
+    agentRunLedgerService,
+    genericMissionService,
+    missionGraphService,
+  };
 }

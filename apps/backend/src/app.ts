@@ -6,18 +6,20 @@ import { createApiRouter } from "./routes/api.js";
 import type { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
 import type { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
 import type { GenericMissionService } from "./missions/genericMissionService.js";
+import type { MissionGraphService } from "./missions/missionGraphService.js";
 
 export function createApp(
   service: OperatorService,
   runtimeMissionService?: AutoPosterMissionService,
   agentRunLedgerService?: AgentRunLedgerService,
   genericMissionService?: GenericMissionService,
+  missionGraphService?: MissionGraphService,
 ) {
   const app = express();
   app.disable("x-powered-by");
   app.use("/api/agent-run-ledger/entries", express.json({ limit: "129kb" }));
   app.use(express.json({ limit: "32kb" }));
-  app.use("/api", createApiRouter(service, runtimeMissionService, agentRunLedgerService, genericMissionService));
+  app.use("/api", createApiRouter(service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService));
 
   app.use((_request, response) => {
     response.status(404).json({ error: "Route was not found." });

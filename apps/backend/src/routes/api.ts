@@ -5,6 +5,7 @@ import { OperatorError, OperatorService } from "../services/operatorService.js";
 import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 import type { GenericMissionService } from "../missions/genericMissionService.js";
+import type { MissionGraphService } from "../missions/missionGraphService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -100,6 +101,7 @@ export function createApiRouter(
   runtimeMissionService?: AutoPosterMissionService,
   agentRunLedgerService?: AgentRunLedgerService,
   genericMissionService?: GenericMissionService,
+  missionGraphService?: MissionGraphService,
 ): Router {
   const router = Router();
 
@@ -154,6 +156,13 @@ export function createApiRouter(
       throw new OperatorError("Generic runtime missions are unavailable.", 503);
     }
     return genericMissionService;
+  };
+
+  const requireMissionGraphService = (): MissionGraphService => {
+    if (!missionGraphService) {
+      throw new OperatorError("Mission graphs are unavailable.", 503);
+    }
+    return missionGraphService;
   };
 
   // Phase 2C: true only when the mission id belongs to the generic durable
@@ -442,6 +451,67 @@ export function createApiRouter(
         return;
       }
       response.json(requireRuntimeMissionService().stopAndEscalate(missionId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Phase 2D durable mission graph authority. Submission and control stay on
+  // the same independent capability tokens as the mission spine: the submit
+  // capability can never approve, and approval binds the exact graph hash.
+  router.post("/mission-graphs", missionSubmitTokenMiddleware, (request, response, next) => {
+    try {
+      const graph = requireMissionGraphService().submitGraph(request.body);
+      response.status(graph.replayed ? 200 : 201).json(graph);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/mission-graphs", (request, response, next) => {
+    try {
+      const parsedLimit = Number(request.query.limit ?? 50);
+      response.json({ graphs: requireMissionGraphService().listGraphs(parsedLimit) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/mission-graphs/:graphId", (request, response, next) => {
+    try {
+      response.json(requireMissionGraphService().getGraph(String(request.params.graphId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post("/mission-graphs/:graphId/approve", missionControlTokenMiddleware, (request, response, next) => {
+    try {
+      requireMissionGraphService()
+        .approveGraph(String(request.params.graphId), request.body ?? {})
+        .then((graph) => response.json(graph))
+        .catch(next);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post("/mission-graphs/:graphId/resume", missionControlTokenMiddleware, (request, response, next) => {
+    try {
+      requireMissionGraphService()
+        .resumeGraph(String(request.params.graphId))
+        .then((graph) => response.json(graph))
+        .catch(next);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post("/mission-graphs/:graphId/cancel", missionControlTokenMiddleware, (request, response, next) => {
+    try {
+      response.json(
+        requireMissionGraphService().cancelGraph(String(request.params.graphId), request.body ?? {}),
+      );
     } catch (error) {
       next(error);
     }
