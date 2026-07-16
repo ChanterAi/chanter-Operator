@@ -21,6 +21,14 @@ const autoPosterRuntimeTimeoutValid =
     autoPosterRuntimeTimeoutParsed >= 100 &&
     autoPosterRuntimeTimeoutParsed <= 120_000);
 
+const loopGovernorTimeoutRaw = process.env.LOOP_GOVERNOR_TIMEOUT_MS?.trim() ?? "";
+const loopGovernorTimeoutParsed = Number(loopGovernorTimeoutRaw);
+const loopGovernorTimeoutValid =
+  !loopGovernorTimeoutRaw ||
+  (Number.isInteger(loopGovernorTimeoutParsed) &&
+    loopGovernorTimeoutParsed >= 1_000 &&
+    loopGovernorTimeoutParsed <= 120_000);
+
 export const config = {
   host: "127.0.0.1",
   port: Number(process.env.OPERATOR_PORT ?? 3001),
@@ -41,6 +49,16 @@ export const config = {
         ? autoPosterRuntimeTimeoutParsed
         : undefined,
     timeoutValid: autoPosterRuntimeTimeoutValid,
+  },
+  loopGovernorRuntime: {
+    pythonExecutable: process.env.LOOP_GOVERNOR_PYTHON?.trim() ?? "",
+    governorRoot: process.env.LOOP_GOVERNOR_ROOT?.trim() ?? "",
+    dataDir: process.env.LOOP_GOVERNOR_MISSION_DATA_DIR?.trim() ?? "",
+    timeoutMs:
+      loopGovernorTimeoutRaw && loopGovernorTimeoutValid
+        ? loopGovernorTimeoutParsed
+        : undefined,
+    timeoutValid: loopGovernorTimeoutValid,
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",

@@ -1,6 +1,8 @@
 import { AuditLogger } from "./audit/auditLogger.js";
 import { config } from "./config.js";
 import { createDatabase } from "./db/database.js";
+import { GenericMissionService } from "./missions/genericMissionService.js";
+import { createLoopGovernorMissionExecutor } from "./missions/loopGovernorRuntime.js";
 import { MockRunner } from "./runners/mockRunner.js";
 import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "./runtimeMissions/autoPosterRuntime.js";
@@ -37,5 +39,16 @@ export function createRuntime() {
       protectedValues,
     },
   );
-  return { database, service, runtimeMissionService, agentRunLedgerService };
+  const loopGovernorMissionExecutor = createLoopGovernorMissionExecutor(
+    config.loopGovernorRuntime,
+  );
+  const genericMissionService = new GenericMissionService(
+    database,
+    loopGovernorMissionExecutor,
+    {
+      agentRunLedgerService,
+      protectedValues,
+    },
+  );
+  return { database, service, runtimeMissionService, agentRunLedgerService, genericMissionService };
 }

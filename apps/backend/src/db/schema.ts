@@ -252,6 +252,90 @@ CREATE TABLE IF NOT EXISTS agent_run_ledger_transitions (
 CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_transitions_run
   ON agent_run_ledger_transitions(run_id, sequence ASC);
 
+-- Phase 2C generic durable mission spine (additive; the accepted AutoPoster
+-- Phase 2A tables above are intentionally untouched). The CHECK below makes
+-- it impossible for the generic spine to silently absorb the AutoPoster
+-- authority: 'auto_poster' missions can only ever live in their own tables.
+CREATE TABLE IF NOT EXISTS operator_missions (
+  mission_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  product TEXT NOT NULL CHECK (product <> 'auto_poster'),
+  action TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  tenant_user_id TEXT NOT NULL,
+  workspace_id TEXT,
+  account_id TEXT,
+  objective TEXT NOT NULL,
+  input_json TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  payload_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'approval_required', 'executing', 'succeeded', 'failed', 'denied',
+    'validation_failed', 'duplicate', 'unavailable'
+  )),
+  approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required = 1),
+  approved_by TEXT,
+  runtime_result_json TEXT,
+  requested_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_missions_created_at
+  ON operator_missions(created_at DESC, mission_id DESC);
+CREATE INDEX IF NOT EXISTS idx_operator_missions_product_action
+  ON operator_missions(product, action, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS operator_mission_executions (
+  mission_id TEXT PRIMARY KEY REFERENCES operator_missions(mission_id) ON DELETE RESTRICT,
+  execution_attempt_id TEXT NOT NULL,
+  mission_payload_hash TEXT NOT NULL,
+  downstream_operation_type TEXT NOT NULL,
+  current_state TEXT NOT NULL CHECK (current_state IN (
+    'approval_required', 'approved', 'execution_started',
+    'downstream_request_prepared', 'downstream_result_observed',
+    'result_persisted', 'completed', 'failed_recoverable',
+    'failed_terminal', 'reconciliation_required', 'recovery_in_progress'
+  )),
+  last_confirmed_boundary TEXT NOT NULL,
+  recovery_reason TEXT NOT NULL DEFAULT '',
+  recovery_classification TEXT NOT NULL DEFAULT 'NONE',
+  reconciliation_outcome TEXT NOT NULL DEFAULT 'not_started' CHECK (reconciliation_outcome IN (
+    'not_started', 'not_found', 'unique', 'conflict', 'unavailable',
+    'scope_mismatch', 'idempotency_mismatch', 'payload_mismatch', 'invalid',
+    'incomplete'
+  )),
+  downstream_ids_json TEXT,
+  final_result_status TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0 AND retry_count <= 1),
+  typed_error_json TEXT,
+  reconciliation_result_json TEXT,
+  runtime_observation_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operator_mission_journal (
+  transition_id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES operator_missions(mission_id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  execution_attempt_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  product TEXT NOT NULL,
+  action TEXT NOT NULL,
+  previous_state TEXT,
+  new_state TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  typed_error_json TEXT,
+  UNIQUE(mission_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_mission_journal_mission
+  ON operator_mission_journal(mission_id, sequence);
+
 CREATE TABLE IF NOT EXISTS agent_run_ledger_ingest_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id TEXT NOT NULL,

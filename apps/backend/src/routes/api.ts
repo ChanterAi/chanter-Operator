@@ -4,6 +4,8 @@ import { actionTypes, type ActionType } from "../types.js";
 import { OperatorError, OperatorService } from "../services/operatorService.js";
 import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
+import type { GenericMissionService } from "../missions/genericMissionService.js";
+import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
   createCapabilityTokenMiddleware,
@@ -97,6 +99,7 @@ export function createApiRouter(
   service: OperatorService,
   runtimeMissionService?: AutoPosterMissionService,
   agentRunLedgerService?: AgentRunLedgerService,
+  genericMissionService?: GenericMissionService,
 ): Router {
   const router = Router();
 
@@ -145,6 +148,18 @@ export function createApiRouter(
     }
     return agentRunLedgerService;
   };
+
+  const requireGenericMissionService = (): GenericMissionService => {
+    if (!genericMissionService) {
+      throw new OperatorError("Generic runtime missions are unavailable.", 503);
+    }
+    return genericMissionService;
+  };
+
+  // Phase 2C: true only when the mission id belongs to the generic durable
+  // spine; every other id (including unknown ids) keeps the exact legacy path.
+  const isGenericMission = (missionId: string): boolean =>
+    Boolean(genericMissionService?.hasMission(missionId));
 
   const missionSubmitReady = capabilityTokenIsDistinct(
     config.missionSubmit.token,
@@ -288,23 +303,43 @@ export function createApiRouter(
   });
 
   router.post("/runtime-missions", missionSubmitTokenMiddleware, (request, response, next) => {
-    let missions: AutoPosterMissionService;
-    let input: Record<string, unknown>;
+    // Phase 2C dispatch: only envelopes whose exact (product, action) pair is
+    // registered on the generic lane take the new spine. Everything else —
+    // AutoPoster envelopes, invalid envelopes, unknown targets — follows the
+    // accepted Phase 2A path with identical ordering and identical errors.
     try {
-      missions = requireRuntimeMissionService();
-      input = scheduleInputFromEnvelope(request.body);
+      const validation = validateMissionEnvelope(request.body);
+      const registered = validation.ok
+        ? resolveRegisteredMissionAction(
+            validation.value.target.product,
+            validation.value.target.action,
+          )
+        : null;
+      if (validation.ok && registered?.lane === "generic") {
+        requireGenericMissionService()
+          .createMissionFromEnvelope(validation.value)
+          .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
+          .catch(next);
+        return;
+      }
+      const missions = requireRuntimeMissionService();
+      const input = scheduleInputFromEnvelope(request.body);
+      missions
+        .createScheduleMission(input)
+        .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
+        .catch(next);
     } catch (error) {
       next(error);
-      return;
     }
-    missions
-      .createScheduleMission(input)
-      .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
-      .catch(next);
   });
 
   router.get("/runtime-missions/:missionId", (request, response) => {
-    response.json(requireRuntimeMissionService().getMission(String(request.params.missionId)));
+    const missionId = String(request.params.missionId);
+    if (isGenericMission(missionId)) {
+      response.json(requireGenericMissionService().getMission(missionId));
+      return;
+    }
+    response.json(requireRuntimeMissionService().getMission(missionId));
   });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {
@@ -336,6 +371,14 @@ export function createApiRouter(
   });
 
   router.post("/runtime-missions/:missionId/approve", missionControlTokenMiddleware, (request, response, next) => {
+    const missionId = String(request.params.missionId);
+    if (isGenericMission(missionId)) {
+      requireGenericMissionService()
+        .approveAndExecute(missionId, request.body?.approvedBy)
+        .then((mission) => response.json(mission))
+        .catch(next);
+      return;
+    }
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -344,12 +387,20 @@ export function createApiRouter(
       return;
     }
     missions
-      .approveAndExecute(String(request.params.missionId), request.body?.approvedBy)
+      .approveAndExecute(missionId, request.body?.approvedBy)
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
   router.post("/runtime-missions/:missionId/reconcile", missionControlTokenMiddleware, (request, response, next) => {
+    const missionId = String(request.params.missionId);
+    if (isGenericMission(missionId)) {
+      requireGenericMissionService()
+        .reconcileMission(missionId)
+        .then((mission) => response.json(mission))
+        .catch(next);
+      return;
+    }
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -357,12 +408,20 @@ export function createApiRouter(
       next(error);
       return;
     }
-    missions.reconcileMission(String(request.params.missionId))
+    missions.reconcileMission(missionId)
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
   router.post("/runtime-missions/:missionId/resume", missionControlTokenMiddleware, (request, response, next) => {
+    const missionId = String(request.params.missionId);
+    if (isGenericMission(missionId)) {
+      requireGenericMissionService()
+        .resumeSafely(missionId)
+        .then((mission) => response.json(mission))
+        .catch(next);
+      return;
+    }
     let missions: AutoPosterMissionService;
     try {
       missions = requireRuntimeMissionService();
@@ -370,14 +429,19 @@ export function createApiRouter(
       next(error);
       return;
     }
-    missions.resumeSafely(String(request.params.missionId))
+    missions.resumeSafely(missionId)
       .then((mission) => response.json(mission))
       .catch(next);
   });
 
   router.post("/runtime-missions/:missionId/stop", missionControlTokenMiddleware, (request, response, next) => {
     try {
-      response.json(requireRuntimeMissionService().stopAndEscalate(String(request.params.missionId)));
+      const missionId = String(request.params.missionId);
+      if (isGenericMission(missionId)) {
+        response.json(requireGenericMissionService().stopAndEscalate(missionId));
+        return;
+      }
+      response.json(requireRuntimeMissionService().stopAndEscalate(missionId));
     } catch (error) {
       next(error);
     }
