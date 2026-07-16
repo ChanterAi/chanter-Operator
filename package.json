@@ -21,6 +21,7 @@
     "mission:test": "node --test \"tools/mission-compiler/tests/*.test.mjs\"",
     "test:agent-run-ledger:cross-repo": "node tools/resilience-evidence/clean-source-validation.mjs -- node --import tsx tools/agent-run-ledger/cross-repository-demo.mjs",
     "test:phase2a:integration": "node --import tsx --test tools/phase2a/single-authority.integration.test.mts",
+    "test:phase2b1:ledger": "node --import tsx --test tools/phase2b1/ledger-transport.integration.test.mts",
     "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
     "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests"
   },
