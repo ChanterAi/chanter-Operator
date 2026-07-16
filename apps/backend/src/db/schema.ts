@@ -251,6 +251,40 @@ CREATE TABLE IF NOT EXISTS agent_run_ledger_transitions (
 
 CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_transitions_run
   ON agent_run_ledger_transitions(run_id, sequence ASC);
+
+CREATE TABLE IF NOT EXISTS agent_run_ledger_ingest_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  contract_version TEXT NOT NULL CHECK (contract_version = '1.0'),
+  producer TEXT NOT NULL,
+  mission_id TEXT,
+  occurred_at TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  correlation_id TEXT,
+  causation_id TEXT,
+  payload_hash TEXT NOT NULL,
+  entry_json TEXT NOT NULL,
+  ingest_outcome TEXT NOT NULL CHECK (ingest_outcome IN ('accepted', 'conflicted')),
+  applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
+  applied_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+-- Only one accepted receipt may ever own a given event_id; conflicted probes
+-- are retained as evidence rows and are deliberately exempt from this index.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_event_id_accepted
+  ON agent_run_ledger_ingest_events(event_id)
+  WHERE ingest_outcome = 'accepted';
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_run_sequence
+  ON agent_run_ledger_ingest_events(run_id, sequence, ingest_outcome);
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_pending
+  ON agent_run_ledger_ingest_events(run_id, applied, sequence)
+  WHERE ingest_outcome = 'accepted';
 `;
 
 const validLanes = new Set<string>([

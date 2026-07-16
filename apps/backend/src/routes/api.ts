@@ -240,8 +240,22 @@ export function createApiRouter(
   });
 
   router.post("/agent-run-ledger/entries", ledgerIngestTokenMiddleware, (request, response) => {
-    const result = requireAgentRunLedgerService().appendEntry(request.body);
-    response.status(result.replayed ? 200 : 201).json(result);
+    const result = requireAgentRunLedgerService().ingestEntry(request.body);
+    if (result.kind === "applied") {
+      response.status(result.replayed ? 200 : 201).json({ replayed: result.replayed, run: result.run });
+      return;
+    }
+    response.status(202).json({
+      accepted: true,
+      applied: false,
+      gap_state: result.gap_state,
+      run_id: result.run_id,
+      event_id: result.event_id,
+      sequence: result.sequence,
+      payload_hash: result.payload_hash,
+      last_applied_sequence: result.last_applied_sequence,
+      last_received_sequence: result.last_received_sequence,
+    });
   });
 
   router.get("/agent-run-ledger/runs", (request, response) => {
@@ -262,6 +276,10 @@ export function createApiRouter(
 
   router.get("/agent-run-ledger/runs/:runId", (request, response) => {
     response.json(requireAgentRunLedgerService().getRun(request.params.runId));
+  });
+
+  router.get("/agent-run-ledger/runs/:runId/ingest-status", (request, response) => {
+    response.json(requireAgentRunLedgerService().getIngestProjection(request.params.runId));
   });
 
   router.get("/runtime-missions", (request, response) => {
