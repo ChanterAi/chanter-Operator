@@ -28,6 +28,7 @@ import {
   type GenericMissionFailureBoundary,
 } from "../src/missions/genericMissionService.js";
 import { compileMissionGraph } from "../src/missions/missionGraphCompiler.js";
+import { MissionGraphChildDispatcher } from "../src/missions/missionGraphChildDispatcher.js";
 import {
   MissionGraphService,
   type MissionGraphFailureBoundary,
@@ -170,10 +171,14 @@ function createHarness(
     protectedValues: PROTECTED_TOKENS,
     failureInjector: options.missionFailureInjector,
   });
-  const graphService = new MissionGraphService(database, genericService, {
+  const graphService = new MissionGraphService(
+    database,
+    new MissionGraphChildDispatcher(genericService, autoPosterService),
+    {
     protectedValues: PROTECTED_TOKENS,
     failureInjector: options.graphFailureInjector,
-  });
+    },
+  );
   const rawApp = createApp(
     operatorService,
     autoPosterService,
@@ -362,15 +367,15 @@ describe("Phase 2D mission graph compiler", () => {
       expect(unknownAction.errors[0]!.status).toBe(409);
     }
 
-    const autoposterLane = compileMissionGraph(graphEnvelope({
+    const unknownAutoPosterAction = compileMissionGraph(graphEnvelope({
       nodes: [{
         ...graphNode("node_a", "goal a"),
-        target: { product: "auto_poster", action: "autoposter.post.schedule" },
+        target: { product: "auto_poster", action: "autoposter.post.publish" },
       }],
     }));
-    expect(autoposterLane.ok).toBe(false);
-    if (!autoposterLane.ok) {
-      expect(autoposterLane.errors[0]!.code).toBe("GRAPH_NODE_TARGET_UNREGISTERED");
+    expect(unknownAutoPosterAction.ok).toBe(false);
+    if (!unknownAutoPosterAction.ok) {
+      expect(unknownAutoPosterAction.errors[0]!.code).toBe("GRAPH_NODE_TARGET_UNREGISTERED");
     }
 
     const rogueInput = compileMissionGraph(graphEnvelope({

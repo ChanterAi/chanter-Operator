@@ -20,6 +20,10 @@ import {
 } from "./autoPosterMissionLedger.js";
 import type { AutoPosterRuntimeMissionExecutor } from "./autoPosterRuntime.js";
 import {
+  autoPosterScheduleInputFromEnvelope,
+  validateAutoPosterScheduleInput,
+} from "./autoPosterScheduleInput.js";
+import {
   MissionExecutionJournal,
   type MissionExecutionRecord,
   type MissionExecutionState,
@@ -30,10 +34,6 @@ import {
 const PRODUCT = "auto_poster" as const;
 const ACTION = AUTOPOSTER_ACTIONS.postSchedule;
 const ACTOR_ID = "chanter-operator";
-const ISO_WITH_ZONE_PATTERN =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
-const SENSITIVE_QUERY_KEY_PATTERN =
-  /(?:token|secret|password|credential|api[-_]?key|signature)/i;
 const REDACTED_VALUE = "[REDACTED]";
 const ACCOUNT_VALIDATION_ERROR_CODES = new Set([
   "unknown_account_id",
@@ -284,34 +284,6 @@ function optionalExactWorkspaceId(input: Record<string, unknown>): string | null
   return value;
 }
 
-function requireOpaqueAccountId(
-  input: Record<string, unknown>,
-  maxLength: number,
-): string {
-  const value = input.accountId;
-  if (typeof value !== "string") {
-    throw new OperatorError("accountId must be a string.", 400, "unknown_account_id");
-  }
-  if (!value) {
-    throw new OperatorError("accountId is required.", 400, "unknown_account_id");
-  }
-  if (value.length > maxLength) {
-    throw new OperatorError(
-      `accountId must be at most ${maxLength} characters.`,
-      400,
-      "account_id_non_canonical",
-    );
-  }
-  if (value !== value.trim()) {
-    throw new OperatorError(
-      "accountId must match the exact canonical connected-account ID; surrounding whitespace is not normalized.",
-      409,
-      "account_id_non_canonical",
-    );
-  }
-  return value;
-}
-
 function optionalBoundedString(
   input: Record<string, unknown>,
   field: string,
@@ -327,29 +299,6 @@ function optionalBoundedString(
     throw new OperatorError(`${field} must be at most ${maxLength} characters.`, 400);
   }
   return normalized;
-}
-
-function validateMediaUrl(value: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new OperatorError("mediaUrl must be a valid HTTPS URL.", 400);
-  }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
-    throw new OperatorError(
-      "mediaUrl must be an HTTPS URL without credentials or a fragment.",
-      400,
-    );
-  }
-  for (const key of parsed.searchParams.keys()) {
-    if (SENSITIVE_QUERY_KEY_PATTERN.test(key)) {
-      throw new OperatorError(
-        "mediaUrl must not contain credential or signature query parameters.",
-        400,
-      );
-    }
-  }
 }
 
 function jsonObject(value: unknown): Record<string, unknown> | null {
@@ -873,6 +822,16 @@ export class AutoPosterMissionService {
     };
   }
 
+  hasMission(missionId: string): boolean {
+    const normalized = String(missionId || "").trim();
+    if (!normalized) return false;
+    return Boolean(
+      this.database
+        .prepare("SELECT mission_id FROM autoposter_runtime_missions WHERE mission_id = ?")
+        .get(normalized),
+    );
+  }
+
   async listConnectedAccounts(workspaceIdValue: unknown): Promise<AutoPosterConnectedAccountListSuccess> {
     const workspaceId = requireBoundedString(
       { workspaceId: workspaceIdValue },
@@ -898,6 +857,21 @@ export class AutoPosterMissionService {
       ...result,
       accounts: result.accounts.map(projectConnectedAccount),
     };
+  }
+
+  async createScheduleMissionFromEnvelope(
+    envelope: unknown,
+    options: { requireWorkspace?: boolean; mustBeAfter?: string | Date } = {},
+  ): Promise<AutoPosterRuntimeMission> {
+    const converted = autoPosterScheduleInputFromEnvelope(envelope, options);
+    if (!converted.ok) {
+      throw new OperatorError(
+        converted.error.message,
+        converted.error.status,
+        converted.error.code,
+      );
+    }
+    return this.createScheduleMission(converted.value);
   }
 
   async createScheduleMission(inputValue: unknown): Promise<AutoPosterRuntimeMission> {
@@ -926,36 +900,27 @@ export class AutoPosterMissionService {
     const requestedBy = optionalBoundedString(input, "requestedBy", 120) || ACTOR_ID;
     const tenantUserId = optionalExactIdentifier(input, "tenantUserId");
     const requestedWorkspaceId = optionalExactWorkspaceId(input);
-    const requestedAccountId = requireOpaqueAccountId(input, 256);
-    const providerValue = requireBoundedString(input, "provider", 16).toLowerCase();
-    if (providerValue !== "tiktok" && providerValue !== "youtube") {
-      throw new OperatorError("provider must be either tiktok or youtube.", 400);
-    }
-    const provider = providerValue;
-    const mediaUrl = requireBoundedString(input, "mediaUrl", 2_048);
-    validateMediaUrl(mediaUrl);
-    const caption = requireBoundedString(input, "caption", 2_200, true);
-    const hashtags = requireBoundedString(input, "hashtags", 1_000, true);
-    const title = optionalBoundedString(input, "title", 100);
-    const description = optionalBoundedString(input, "description", 5_000);
-    if (provider === "youtube" && !title) {
-      throw new OperatorError("title is required when provider is youtube.", 400);
-    }
-    if (provider === "tiktok" && (title || description)) {
+    const scheduleValidation = validateAutoPosterScheduleInput(input, {
+      rejectUnknownFields: false,
+      normalizeProviderCase: true,
+    });
+    if (!scheduleValidation.ok) {
       throw new OperatorError(
-        "title and description are only valid for youtube missions.",
-        400,
+        scheduleValidation.error.message,
+        scheduleValidation.error.status,
+        scheduleValidation.error.serviceCode,
       );
     }
-
-    const scheduledAt = requireBoundedString(input, "scheduledAt", 64);
-    if (!ISO_WITH_ZONE_PATTERN.test(scheduledAt) || Number.isNaN(Date.parse(scheduledAt))) {
-      throw new OperatorError(
-        "scheduledAt must be a valid ISO-8601 timestamp with an explicit timezone.",
-        400,
-      );
-    }
-    const normalizedScheduledAt = new Date(scheduledAt).toISOString();
+    const {
+      accountId: requestedAccountId,
+      provider,
+      mediaUrl,
+      caption,
+      hashtags,
+      title,
+      description,
+      scheduledAt: normalizedScheduledAt,
+    } = scheduleValidation.value;
 
     this.assertContainsNoProtectedValue([
       missionId,
@@ -971,7 +936,7 @@ export class AutoPosterMissionService {
       hashtags,
       title,
       description,
-      scheduledAt,
+      normalizedScheduledAt,
     ].filter((value): value is string => value !== null));
 
     const canonicalInput: CanonicalScheduleMissionInput = {

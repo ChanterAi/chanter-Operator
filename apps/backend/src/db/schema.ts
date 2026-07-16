@@ -1,5 +1,39 @@
 import type { ProductLane } from "../types.js";
 
+export const PHASE_2D_GRAPH_NODE_PRODUCT_CHECK =
+  "product TEXT NOT NULL CHECK (product <> 'auto_poster')";
+export const PHASE_2E_GRAPH_NODE_PRODUCT_CHECK =
+  "product TEXT NOT NULL CHECK (product <> 'auto_poster' OR action = 'autoposter.post.schedule')";
+
+export function missionGraphNodesTableSql(
+  tableName: "operator_mission_graph_nodes" | "operator_mission_graph_nodes_phase2e",
+  ifNotExists = false,
+): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}${tableName} (
+  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
+  node_id TEXT NOT NULL,
+  ${PHASE_2E_GRAPH_NODE_PRODUCT_CHECK},
+  action TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  input_json TEXT NOT NULL,
+  depends_on_json TEXT NOT NULL,
+  child_mission_id TEXT NOT NULL UNIQUE,
+  child_trace_id TEXT NOT NULL,
+  child_idempotency_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'blocked', 'ready', 'running', 'completed',
+    'failed_recoverable', 'failed_terminal', 'cancelled'
+  )),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0 AND attempts <= 3),
+  result_status TEXT,
+  result_summary_json TEXT,
+  typed_error_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (graph_id, node_id)
+);`;
+}
+
 export const schema = `
 CREATE TABLE IF NOT EXISTS task_intents (
   id TEXT PRIMARY KEY,
@@ -339,9 +373,9 @@ CREATE INDEX IF NOT EXISTS idx_operator_mission_journal_mission
 -- Phase 2D durable mission graph authority (additive; the Phase 2C mission
 -- spine tables above are intentionally untouched). One graph compiles once
 -- into an immutable normalized document + SHA-256 hash; founder approval
--- binds that exact hash; nodes materialize as ordinary generic missions in
--- operator_missions, so the graph layer never becomes a second execution
--- authority.
+-- binds that exact hash; nodes materialize through their existing reviewed
+-- child mission authority, so the graph layer never becomes a second
+-- execution authority.
 CREATE TABLE IF NOT EXISTS operator_mission_graphs (
   graph_id TEXT PRIMARY KEY,
   trace_id TEXT NOT NULL UNIQUE,
@@ -372,29 +406,7 @@ CREATE TABLE IF NOT EXISTS operator_mission_graphs (
 CREATE INDEX IF NOT EXISTS idx_operator_mission_graphs_created_at
   ON operator_mission_graphs(created_at DESC, graph_id DESC);
 
-CREATE TABLE IF NOT EXISTS operator_mission_graph_nodes (
-  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
-  node_id TEXT NOT NULL,
-  product TEXT NOT NULL CHECK (product <> 'auto_poster'),
-  action TEXT NOT NULL,
-  objective TEXT NOT NULL,
-  input_json TEXT NOT NULL,
-  depends_on_json TEXT NOT NULL,
-  child_mission_id TEXT NOT NULL UNIQUE,
-  child_trace_id TEXT NOT NULL,
-  child_idempotency_key TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN (
-    'blocked', 'ready', 'running', 'completed',
-    'failed_recoverable', 'failed_terminal', 'cancelled'
-  )),
-  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0 AND attempts <= 3),
-  result_status TEXT,
-  result_summary_json TEXT,
-  typed_error_json TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (graph_id, node_id)
-);
+${missionGraphNodesTableSql("operator_mission_graph_nodes", true)}
 
 CREATE TABLE IF NOT EXISTS operator_mission_graph_edges (
   graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,

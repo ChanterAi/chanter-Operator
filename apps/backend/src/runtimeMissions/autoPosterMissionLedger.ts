@@ -7,6 +7,7 @@ import {
   type AgentRunLedgerStatus,
 } from "chanter-agent-runtime";
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
+import { operatorRuntimeResultUri } from "../agentRunLedger/evidenceReference.js";
 import type { MissionJournalTransition } from "./missionExecutionJournal.js";
 
 const PRODUCT = "auto_poster";
@@ -57,7 +58,7 @@ function runtimeResultEvidence(
   return [{
     evidence_id: `runtime-result:${sha256}`,
     kind: "artifact",
-    uri: `operator://runtime-missions/${encodeURIComponent(missionId)}/runtime-result`,
+    uri: operatorRuntimeResultUri(missionId),
     sha256,
     captured_at: capturedAt,
   }];

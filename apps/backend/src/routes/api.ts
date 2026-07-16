@@ -12,88 +12,12 @@ import {
   createCapabilityTokenMiddleware,
 } from "../middleware/capabilityToken.js";
 import { config } from "../config.js";
-import {
-  envelopeToRuntimeMissionRequest,
-  validateMissionEnvelope,
-} from "chanter-agent-runtime";
-
-const AUTOPOSTER_SCHEDULE_INPUT_KEYS = new Set([
-  "accountId",
-  "provider",
-  "mediaUrl",
-  "caption",
-  "hashtags",
-  "title",
-  "description",
-  "scheduledAt",
-]);
+import { validateMissionEnvelope } from "chanter-agent-runtime";
 
 function normalizeActionType(value: unknown): ActionType {
   return typeof value === "string" && actionTypes.includes(value as ActionType)
     ? (value as ActionType)
     : "unknown";
-}
-
-function scheduleInputFromEnvelope(value: unknown): Record<string, unknown> {
-  const validation = validateMissionEnvelope(value);
-  if (!validation.ok) {
-    const first = validation.errors[0];
-    throw new OperatorError(
-      first?.message ?? "Mission envelope validation failed.",
-      400,
-      first?.code ?? "OPERATOR_MISSION_ENVELOPE_INVALID",
-    );
-  }
-  const request = envelopeToRuntimeMissionRequest(validation.value);
-  if (request.product !== "auto_poster" || request.action !== "autoposter.post.schedule") {
-    throw new OperatorError(
-      "The mission target is not registered with the Operator gateway.",
-      409,
-      "OPERATOR_MISSION_TARGET_MISMATCH",
-    );
-  }
-  if (!request.tenant.accountId) {
-    throw new OperatorError(
-      "tenant.accountId is required for an AutoPoster schedule mission.",
-      400,
-      "OPERATOR_MISSION_SCOPE_INVALID",
-    );
-  }
-  if (Object.keys(request.input).some((key) => !AUTOPOSTER_SCHEDULE_INPUT_KEYS.has(key))) {
-    throw new OperatorError(
-      "The mission input contains a field that is not registered for this action.",
-      400,
-      "OPERATOR_MISSION_INPUT_UNSUPPORTED_FIELD",
-    );
-  }
-  if (
-    request.input.accountId !== undefined
-    && request.input.accountId !== request.tenant.accountId
-  ) {
-    throw new OperatorError(
-      "The mission input account does not match the exact tenant account scope.",
-      409,
-      "OPERATOR_MISSION_SCOPE_MISMATCH",
-    );
-  }
-  return {
-    missionId: request.missionId,
-    traceId: request.traceId,
-    idempotencyKey: request.idempotencyKey,
-    requestedBy: request.actor.id,
-    tenantUserId: request.tenant.userId,
-    workspaceId: request.tenant.workspaceId,
-    accountId: request.tenant.accountId,
-    product: request.product,
-    action: request.action,
-    provider: request.input.provider,
-    mediaUrl: request.input.mediaUrl,
-    caption: request.input.caption,
-    hashtags: request.input.hashtags,
-    title: request.input.title,
-    description: request.input.description,
-    scheduledAt: request.input.scheduledAt,
-  };
 }
 
 export function createApiRouter(
@@ -331,10 +255,8 @@ export function createApiRouter(
           .catch(next);
         return;
       }
-      const missions = requireRuntimeMissionService();
-      const input = scheduleInputFromEnvelope(request.body);
-      missions
-        .createScheduleMission(input)
+      requireRuntimeMissionService()
+        .createScheduleMissionFromEnvelope(request.body)
         .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
         .catch(next);
     } catch (error) {

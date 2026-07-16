@@ -48,6 +48,7 @@ const [
   { AgentRunLedgerService },
   { createDatabase },
   { GenericMissionService },
+  { MissionGraphChildDispatcher },
   { MissionGraphService },
   { createLoopGovernorMissionExecutor },
   { MockRunner },
@@ -61,6 +62,7 @@ const [
   import("../../apps/backend/src/agentRunLedger/agentRunLedgerService.js"),
   import("../../apps/backend/src/db/database.js"),
   import("../../apps/backend/src/missions/genericMissionService.js"),
+  import("../../apps/backend/src/missions/missionGraphChildDispatcher.js"),
   import("../../apps/backend/src/missions/missionGraphService.js"),
   import("../../apps/backend/src/missions/loopGovernorRuntime.js"),
   import("../../apps/backend/src/runners/mockRunner.js"),
@@ -132,7 +134,7 @@ function startOperator(
     agentRunLedgerService: ledger,
     protectedValues,
   });
-  const graph = new MissionGraphService(database, generic, {
+  const graph = new MissionGraphService(database, new MissionGraphChildDispatcher(generic, autoPoster), {
     protectedValues,
     failureInjector: graphFailureInjector as never,
   });

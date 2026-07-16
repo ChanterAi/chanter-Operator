@@ -1,13 +1,12 @@
 /**
  * Phase 2D durable mission graph authority.
  *
- * One Operator-owned orchestration layer over the accepted Phase 2C generic
- * mission spine. The graph layer never executes anything itself and never
- * talks to a downstream port: every node materializes as an ordinary durable
- * generic mission (deterministic child identity) that runs through the exact
- * GenericMissionService create -> approve -> Agent Runtime -> Loop Governor
- * path, with its own journal, ledger lineage, crash boundaries, and bounded
- * retry. What this service adds — and all it adds — is:
+ * One Operator-owned orchestration layer over reviewed durable child mission
+ * authorities. The graph layer never executes anything itself and never talks
+ * to a downstream port: each node materializes with deterministic child
+ * identity through the closed-world dispatcher, then runs through its existing
+ * mission journal, ledger lineage, crash boundaries, and bounded retry. What
+ * this service adds — and all it adds — is:
  *
  *   deterministic compilation (chanter.mission.graph.v1 -> hash)
  *   -> durable graph/node/edge/event persistence (approval_required)
@@ -23,10 +22,11 @@ import type { DatabaseSync } from "node:sqlite";
 import { validateMissionEnvelope } from "chanter-agent-runtime";
 import { withTransaction } from "../db/database.js";
 import { OperatorError } from "../services/operatorService.js";
-import type {
-  GenericMissionService,
-  GenericRuntimeMission,
-} from "./genericMissionService.js";
+import {
+  MissionGraphChildDispatcher,
+  type MissionGraphChildMission,
+  type MissionGraphChildReference,
+} from "./missionGraphChildDispatcher.js";
 import {
   compileMissionGraph,
   missionGraphChildEnvelope,
@@ -65,6 +65,9 @@ const TERMINAL_CHILD_ERROR_CODES = new Set([
   "OPERATOR_MISSION_IDENTITY_INVALID",
   "OPERATOR_APPROVAL_BINDING_MISMATCH",
   "GRAPH_CHILD_ENVELOPE_INVALID",
+  "GRAPH_CHILD_AUTHORITY_UNREGISTERED",
+  "GRAPH_CHILD_IDENTITY_MISMATCH",
+  "GRAPH_AUTOPOSTER_RESULT_UNSAFE",
 ]);
 
 export type MissionGraphFailureBoundary =
@@ -148,7 +151,7 @@ export class MissionGraphService {
 
   constructor(
     private readonly database: DatabaseSync,
-    private readonly missions: GenericMissionService,
+    private readonly children: MissionGraphChildDispatcher,
     options: MissionGraphServiceOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
@@ -502,9 +505,12 @@ export class MissionGraphService {
         return;
       }
       if (nodes.every((node) => node.status === "completed")) {
+        const completionReason = nodes.every((node) => node.product === "auto_poster")
+          ? "Every requested AutoPoster queue draft was durably scheduled and remains unapproved."
+          : "Every node completed with an authoritative child mission result.";
         this.journal.transitionGraph(graphId, "completed", {
           actor: ACTOR_ID,
-          reason: "Every node completed with an authoritative child mission result.",
+          reason: completionReason,
           timestamp: this.now().toISOString(),
           evidenceReferences: nodes.map((node) => `child-mission:${node.childMissionId}`),
         });
@@ -554,7 +560,9 @@ export class MissionGraphService {
     });
     this.journal.transitionNode(graph.graphId, node.nodeId, "running", {
       actor: ACTOR_ID,
-      reason: "The node was dispatched to the Phase 2C generic mission spine.",
+      reason: node.product === "auto_poster"
+        ? "The node was dispatched to the reviewed AutoPoster schedule-draft mission spine."
+        : "The node was dispatched to the Phase 2C generic mission spine.",
       timestamp: this.now().toISOString(),
       attempts: node.attempts + 1,
       evidenceReferences: [`child-mission:${node.childMissionId}`],
@@ -592,11 +600,11 @@ export class MissionGraphService {
           "GRAPH_CHILD_ENVELOPE_INVALID",
         );
       }
-      await this.missions.createMissionFromEnvelope(validation.value);
+      await this.children.createMissionFromEnvelope(validation.value);
       this.injectFailure("after_child_mission_created", graph.graphId, node.nodeId);
-      const mission = await this.missions.approveAndExecute(
-        node.childMissionId,
-        graph.approvedBy,
+      const mission = await this.children.approveAndExecute(
+        this.childReference(node),
+        graph.approvedBy ?? "",
       );
       this.applyChildOutcome(graph, node.nodeId, mission);
     } catch (error) {
@@ -614,17 +622,18 @@ export class MissionGraphService {
     graph: MissionGraphRecord,
     node: MissionGraphNodeRecord,
   ): Promise<void> {
-    if (!this.missions.hasMission(node.childMissionId)) {
+    const reference = this.childReference(node);
+    if (!this.children.hasMission(reference)) {
       // Crash landed between the node running boundary and the durable child
       // create: the deterministic envelope makes re-dispatch exactly safe.
       await this.executeChildMission(graph, node);
       return;
     }
     try {
-      let mission = this.missions.getMission(node.childMissionId);
-      let state = mission.execution?.state;
+      let mission = this.children.getMission(reference);
+      let state = mission.executionState;
       if (state === "approval_required") {
-        mission = await this.missions.approveAndExecute(node.childMissionId, graph.approvedBy);
+        mission = await this.children.approveAndExecute(reference, graph.approvedBy ?? "");
         this.applyChildOutcome(graph, node.nodeId, mission);
         return;
       }
@@ -638,7 +647,7 @@ export class MissionGraphService {
         || state === "result_persisted"
       ) {
         // Safe resumes: zero or replay-only downstream interaction.
-        mission = await this.missions.resumeSafely(node.childMissionId);
+        mission = await this.children.resumeSafely(reference);
         this.applyChildOutcome(graph, node.nodeId, mission);
         return;
       }
@@ -647,14 +656,14 @@ export class MissionGraphService {
         || state === "downstream_request_prepared"
         || state === "failed_recoverable"
       ) {
-        mission = await this.missions.reconcileMission(node.childMissionId);
-        state = mission.execution?.state;
-        const canResume = mission.execution?.nextPermittedActions.includes("Resume safely");
+        mission = await this.children.reconcileMission(reference);
+        state = mission.executionState;
+        const canResume = mission.nextPermittedActions.includes("Resume safely");
         if (
           (state === "downstream_result_observed" || state === "failed_recoverable")
           && canResume
         ) {
-          mission = await this.missions.resumeSafely(node.childMissionId);
+          mission = await this.children.resumeSafely(reference);
         }
         this.applyChildOutcome(graph, node.nodeId, mission);
         return;
@@ -672,64 +681,59 @@ export class MissionGraphService {
     graph: MissionGraphRecord,
     node: MissionGraphNodeRecord,
   ): void {
-    if (!this.missions.hasMission(node.childMissionId)) return;
-    const mission = this.missions.getMission(node.childMissionId);
-    const state = mission.execution?.state;
-    if (
-      state === "completed"
-      || state === "failed_terminal"
-      || state === "failed_recoverable"
-      || state === "reconciliation_required"
-    ) {
-      this.applyChildOutcome(graph, node.nodeId, mission);
+    try {
+      const reference = this.childReference(node);
+      if (!this.children.hasMission(reference)) return;
+      const mission = this.children.getMission(reference);
+      const state = mission.executionState;
+      if (
+        state === "completed"
+        || state === "failed_terminal"
+        || state === "failed_recoverable"
+        || state === "reconciliation_required"
+      ) {
+        this.applyChildOutcome(graph, node.nodeId, mission);
+      }
+    } catch (error) {
+      this.recordChildDispatchError(graph, node.nodeId, error);
     }
   }
 
   private applyChildOutcome(
     graph: MissionGraphRecord,
     nodeId: string,
-    mission: GenericRuntimeMission,
+    mission: MissionGraphChildMission,
   ): void {
     const node = this.journal.requireNode(graph.graphId, nodeId);
     if (node.status !== "running") return;
-    const state = mission.execution?.state ?? null;
+    const state = mission.executionState;
     const timestamp = this.now().toISOString();
 
     if (
-      state === "completed"
-      && (mission.status === "succeeded" || mission.status === "duplicate")
+      mission.outcome === "completed"
     ) {
-      const downstreamIds = mission.execution?.downstreamIds ?? null;
       this.journal.transitionNode(graph.graphId, nodeId, "completed", {
         actor: ACTOR_ID,
-        reason: "The child mission completed with an authoritative durable result.",
+        reason: mission.lane === "autoposter_legacy"
+          ? "The AutoPoster child mission completed with one authoritative unapproved scheduled queue draft."
+          : "The child mission completed with an authoritative durable result.",
         timestamp,
         resultStatus: mission.status,
-        resultSummary: {
-          childMissionId: mission.missionId,
-          childTraceId: mission.traceId,
-          childStatus: mission.status,
-          executionState: state,
-          downstreamIds,
-        },
+        resultSummary: mission.resultSummary,
         typedError: null,
-        evidenceReferences: [
-          `child-mission:${mission.missionId}`,
-          ...(downstreamIds?.loopId ? [`loop-governor-loop:${downstreamIds.loopId}`] : []),
-          ...(downstreamIds?.taskId ? [`loop-governor-task:${downstreamIds.taskId}`] : []),
-        ],
+        evidenceReferences: mission.evidenceReferences,
       });
       this.injectFailure("after_node_completed_persistence", graph.graphId, nodeId);
       return;
     }
 
-    if (state === "failed_terminal") {
+    if (mission.outcome === "failed_terminal") {
       this.journal.transitionNode(graph.graphId, nodeId, "failed_terminal", {
         actor: ACTOR_ID,
         reason: "The child mission reached a deterministic terminal failure.",
         timestamp,
         resultStatus: mission.status,
-        typedError: mission.execution?.typedError ?? {
+        typedError: mission.typedError ?? {
           code: "GRAPH_CHILD_FAILED_TERMINAL",
           message: "The child mission failed terminally without a typed error.",
         },
@@ -745,7 +749,7 @@ export class MissionGraphService {
       reason: "The child mission has not produced an authoritative result yet; a bounded recovery is required.",
       timestamp,
       resultStatus: mission.status,
-      typedError: mission.execution?.typedError ?? {
+      typedError: mission.typedError ?? {
         code: "GRAPH_CHILD_EXECUTION_UNRESOLVED",
         message: `The child mission is in durable state ${state ?? "unknown"} and needs recovery.`,
       },
@@ -811,6 +815,16 @@ export class MissionGraphService {
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
+
+  private childReference(node: MissionGraphNodeRecord): MissionGraphChildReference {
+    return {
+      product: node.product,
+      action: node.action,
+      childMissionId: node.childMissionId,
+      childTraceId: node.childTraceId,
+      childIdempotencyKey: node.childIdempotencyKey,
+    };
+  }
 
   private parseCompiledGraph(graph: MissionGraphRecord): CompiledMissionGraph {
     return JSON.parse(graph.compiledGraphJson) as CompiledMissionGraph;
@@ -889,14 +903,15 @@ export class MissionGraphService {
   private buildView(graph: MissionGraphRecord, replayed = false): MissionGraphView {
     const nodes = this.journal.listNodes(graph.graphId).map((node): MissionGraphNodeView => {
       let childMission: MissionGraphNodeChildSummary | null = null;
-      if (this.missions.hasMission(node.childMissionId)) {
-        const mission = this.missions.getMission(node.childMissionId);
+      const reference = this.childReference(node);
+      if (this.children.hasMission(reference)) {
+        const mission = this.children.getMission(reference);
         childMission = {
           status: mission.status,
-          executionState: mission.execution?.state ?? null,
-          nextPermittedActions: mission.execution?.nextPermittedActions ?? [],
-          downstreamIds: mission.execution?.downstreamIds ?? null,
-          retryCount: mission.execution?.retryCount ?? null,
+          executionState: mission.executionState,
+          nextPermittedActions: mission.nextPermittedActions,
+          downstreamIds: mission.downstreamIds,
+          retryCount: mission.retryCount,
         };
       }
       return {

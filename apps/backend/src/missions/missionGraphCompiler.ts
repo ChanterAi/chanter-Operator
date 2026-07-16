@@ -7,16 +7,15 @@
  * the same envelope is byte-identical by construction, which is what lets
  * the Operator graph authority bind founder approval to an exact hash.
  *
- * Every node must resolve through the existing Phase 2C closed-world action
- * registry on the generic lane, and every node input must pass the exact
- * adapter-owned validation the mission spine enforces at submission — a graph
- * that could never execute is refused before it can become durable.
+ * Every node must resolve through an explicitly graph-eligible action in the
+ * closed-world registry, and every node input must pass that action's exact
+ * mission-spine validation — a graph that could never execute is refused
+ * before it can become durable.
  */
 import { createHash } from "node:crypto";
 import {
   canonicalEnvelopeJson,
   envelopeToRuntimeMissionRequest,
-  validateManualLoopInput,
   validateMissionEnvelope,
   type ChanterMissionEnvelopeV1,
   type JsonValue,
@@ -111,6 +110,10 @@ export function missionGraphChildEnvelope(
   graph: CompiledMissionGraph,
   node: CompiledMissionGraphNode,
 ): ChanterMissionEnvelopeV1 {
+  const childAccountId = node.target.product === "auto_poster"
+    && typeof node.input.accountId === "string"
+    ? node.input.accountId
+    : graph.tenant.accountId;
   return {
     schemaVersion: "chanter.mission.v1",
     missionId: missionGraphChildMissionId(graph.graphId, node.nodeId),
@@ -122,7 +125,7 @@ export function missionGraphChildEnvelope(
     tenant: {
       userId: graph.tenant.userId,
       ...(graph.tenant.workspaceId ? { workspaceId: graph.tenant.workspaceId } : {}),
-      ...(graph.tenant.accountId ? { accountId: graph.tenant.accountId } : {}),
+      ...(childAccountId ? { accountId: childAccountId } : {}),
     },
     input: node.input,
     constraints: [],
@@ -205,7 +208,7 @@ function parseNode(
   }
   rejectUnknownFields(target, GRAPH_NODE_TARGET_FIELDS, `${nodeLabel}.target`, errors);
   const registered = resolveRegisteredMissionAction(target.product, target.action);
-  if (!registered || registered.lane !== "generic") {
+  if (!registered || !registered.graphEligible) {
     errors.push(error(
       "GRAPH_NODE_TARGET_UNREGISTERED",
       `${nodeLabel}.target is not registered with the Operator graph authority.`,
@@ -437,9 +440,9 @@ export function compileMissionGraph(envelope: unknown): MissionGraphCompileResul
       })),
   };
 
-  // Adapter-owned closed-world input validation through the exact machinery
-  // the Phase 2C mission spine runs at submission: each node must already be
-  // a valid, executable child mission or the graph never becomes durable.
+  // Per-action closed-world validation through the reviewed registry contract:
+  // each node must already be a valid executable child or the graph never
+  // becomes durable. Validators may return a deterministic canonical payload.
   for (const node of compiled.nodes) {
     const childEnvelope = missionGraphChildEnvelope(compiled, node);
     const envelopeValidation = validateMissionEnvelope(childEnvelope);
@@ -450,16 +453,39 @@ export function compileMissionGraph(envelope: unknown): MissionGraphCompileResul
         errors: [error(first.code, `node ${JSON.stringify(node.nodeId)}: ${first.message}`)],
       };
     }
-    const inputErrors = validateManualLoopInput(
-      envelopeToRuntimeMissionRequest(envelopeValidation.value),
-    ).errors;
-    if (inputErrors.length > 0) {
-      const first = inputErrors[0]!;
+    const registered = resolveRegisteredMissionAction(
+      node.target.product,
+      node.target.action,
+    );
+    if (!registered || !registered.graphEligible) {
       return {
         ok: false,
-        errors: [error(first.code, `node ${JSON.stringify(node.nodeId)}: ${first.message}`)],
+        errors: [error(
+          "GRAPH_NODE_TARGET_UNREGISTERED",
+          `node ${JSON.stringify(node.nodeId)} is not registered with the Operator graph authority.`,
+          409,
+        )],
       };
     }
+    const inputValidation = registered.validateGraphInput(
+      envelopeToRuntimeMissionRequest(envelopeValidation.value),
+      {
+        requestedAt: compiled.requestedAt,
+        workspaceId: compiled.tenant.workspaceId,
+        accountId: compiled.tenant.accountId,
+      },
+    );
+    if (!inputValidation.ok) {
+      return {
+        ok: false,
+        errors: [error(
+          inputValidation.code,
+          `node ${JSON.stringify(node.nodeId)}: ${inputValidation.message}`,
+          inputValidation.status ?? 400,
+        )],
+      };
+    }
+    node.input = inputValidation.input;
   }
 
   const normalizedJson = canonicalEnvelopeJson(compiled as unknown as JsonValue);
