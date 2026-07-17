@@ -4,6 +4,7 @@ import { createDatabase } from "./db/database.js";
 import { GenericMissionService } from "./missions/genericMissionService.js";
 import { MissionGraphChildDispatcher } from "./missions/missionGraphChildDispatcher.js";
 import { MissionGraphService } from "./missions/missionGraphService.js";
+import { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
 import { createLoopGovernorMissionExecutor } from "./missions/loopGovernorRuntime.js";
 import { MockRunner } from "./runners/mockRunner.js";
 import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
@@ -59,6 +60,10 @@ export function createRuntime() {
   const missionGraphService = new MissionGraphService(database, missionGraphChildren, {
     protectedValues,
   });
+  const autoPosterResultService = new AutoPosterResultProjectionService(
+    database,
+    runtimeMissionExecutor,
+  );
   return {
     database,
     service,
@@ -66,5 +71,6 @@ export function createRuntime() {
     agentRunLedgerService,
     genericMissionService,
     missionGraphService,
+    autoPosterResultService,
   };
 }

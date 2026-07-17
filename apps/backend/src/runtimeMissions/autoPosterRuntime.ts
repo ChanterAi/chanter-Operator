@@ -10,6 +10,7 @@ import {
   type AutoPosterConnectedAccountValidationSuccess,
   type AutoPosterOperationsPort,
   type AutoPosterPortFailure,
+  type AutoPosterPostStatusSuccess,
   type AutoPosterScheduleReconciliationSuccess,
   type RuntimeMissionIdempotencyStore,
   type RuntimeMissionRequest,
@@ -35,6 +36,17 @@ export interface AutoPosterRuntimeMissionExecutor {
     accountId: string;
     provider: "tiktok" | "youtube";
   }): Promise<AutoPosterConnectedAccountValidationSuccess | AutoPosterPortFailure>;
+  /**
+   * Phase 2E-B bounded read of one exact AutoPoster queue job through the
+   * strict Runtime status contract. One request, one port timeout, no retry,
+   * no provider call, no AutoPoster write; identity bytes pass through
+   * unchanged and every failure propagates typed.
+   */
+  getPostStatus(input: {
+    postId: string;
+    workspaceId?: string;
+    accountId?: string;
+  }): Promise<AutoPosterPostStatusSuccess | AutoPosterPortFailure>;
   execute(request: RuntimeMissionRequest): Promise<RuntimeMissionResult>;
   reconcileSchedule(
     request: RuntimeMissionRequest,
@@ -156,6 +168,13 @@ export function createAutoPosterRuntimeMissionExecutor(
             provider,
           })
         : Promise.resolve(unavailableResult()),
+    getPostStatus: ({ postId, workspaceId, accountId }) =>
+      port.getPostStatus({
+        userId,
+        ...(workspaceId ? { workspaceId } : {}),
+        postId,
+        ...(accountId ? { accountId } : {}),
+      }),
     execute: (request) => executeMission(request, {
       registry,
       idempotencyStore,

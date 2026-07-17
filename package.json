@@ -26,6 +26,7 @@
     "test:phase2c:mission": "node --import tsx --test tools/phase2c/mission-loop.integration.test.mts",
     "test:phase2d:graph": "node --import tsx --test tools/phase2d/mission-graph.integration.test.mts",
     "test:phase2e:autoposter-graph": "node --import tsx --test tools/phase2e/autoposter-schedule-graph.integration.test.mts",
+    "test:phase2eb:autoposter-results": "node --import tsx --test tools/phase2e/autoposter-result-refresh.integration.test.mts",
     "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
     "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests"
   },

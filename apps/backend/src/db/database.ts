@@ -4,6 +4,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { CommitReview, Evidence, ExecutionStep, RunnerPolicyPreview, TaskIntent, ValidationEvidence } from "../types.js";
 import type { ReadonlyCommandResultRow } from "../services/operatorService.js";
 import {
+  autoPosterResultEventsIndexSql,
+  autoPosterResultEventsTableSql,
+  autoPosterResultProjectionsTableSql,
   missionGraphNodesTableSql,
   PHASE_2D_GRAPH_NODE_PRODUCT_CHECK,
   PHASE_2E_GRAPH_NODE_PRODUCT_CHECK,
@@ -45,6 +48,10 @@ export function createDatabase(databasePath: string): DatabaseSync {
     // Phase 2E-A migration: explicit, transactional, restart-safe, and
     // intentionally outside every legacy swallow-on-failure path.
     migrateMissionGraphNodesForAutoPoster(database);
+
+    // Phase 2E-B migration: additive result projection/event tables,
+    // fail-closed on any unknown existing schema variant.
+    migrateAutoPosterResultProjectionTables(database);
     return database;
   } catch (error) {
     database.close();
@@ -174,6 +181,76 @@ export function migrateMissionGraphNodesForAutoPoster(database: DatabaseSync): b
     if (indexes.filter((index) => index.unique === 1).length < 2) {
       throw new Error(
         "Phase 2E-A graph-node migration did not preserve primary/unique indexes.",
+      );
+    }
+    return true;
+  });
+}
+
+/**
+ * Phase 2E-B additive migration: creates the AutoPoster result projection
+ * and append-only observation event tables. Fail-closed: an existing table
+ * whose schema differs from the reviewed definition refuses migration
+ * instead of being rewritten, and creation is one atomic transaction so an
+ * interrupted run leaves either both tables or neither. Existing graph and
+ * mission tables are never touched.
+ */
+export function migrateAutoPosterResultProjectionTables(database: DatabaseSync): boolean {
+  const readTableSql = (name: string): string | null => {
+    const row = database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    ).get(name) as { sql: string | null } | undefined;
+    return row?.sql ?? null;
+  };
+
+  const expected: Array<{ name: string; createSql: string }> = [
+    {
+      name: "operator_autoposter_result_projections",
+      createSql: autoPosterResultProjectionsTableSql(),
+    },
+    {
+      name: "operator_autoposter_result_events",
+      createSql: autoPosterResultEventsTableSql(),
+    },
+  ];
+
+  const missing: Array<{ name: string; createSql: string }> = [];
+  for (const table of expected) {
+    const currentSql = readTableSql(table.name);
+    if (currentSql === null) {
+      missing.push(table);
+      continue;
+    }
+    if (compactSql(currentSql) !== compactSql(table.createSql)) {
+      throw new Error(
+        `Phase 2E-B migration refused an unknown ${table.name} schema.`,
+      );
+    }
+  }
+  if (missing.length === 0) {
+    // Restart safety: both tables already match the reviewed schema exactly.
+    database.exec(autoPosterResultEventsIndexSql);
+    return false;
+  }
+
+  return withTransaction(database, () => {
+    for (const table of missing) {
+      database.exec(table.createSql);
+    }
+    database.exec(autoPosterResultEventsIndexSql);
+
+    for (const table of expected) {
+      const migratedSql = readTableSql(table.name);
+      if (!migratedSql || compactSql(migratedSql) !== compactSql(table.createSql)) {
+        throw new Error(
+          `Phase 2E-B migration did not produce the exact reviewed ${table.name} schema.`,
+        );
+      }
+    }
+    const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all();
+    if (foreignKeyViolations.length > 0) {
+      throw new Error(
+        "Phase 2E-B result projection migration failed foreign-key integrity validation.",
       );
     }
     return true;

@@ -34,6 +34,99 @@ export function missionGraphNodesTableSql(
 );`;
 }
 
+/**
+ * Phase 2E-B bounded Operator projection of one AutoPoster publishing
+ * lifecycle observation. These are the only ten states the projection may
+ * derive; exact AutoPoster source/provider statuses are stored verbatim
+ * alongside so the derivation is always auditable.
+ */
+export const AUTOPOSTER_RESULT_PROJECTION_STATUSES = [
+  "awaiting_publish_approval",
+  "approved_for_publish",
+  "processing",
+  "retry_scheduled",
+  "uploaded_private",
+  "provider_accepted_unverified",
+  "manually_reconciled",
+  "failed",
+  "outcome_unknown",
+  "manual_review_required",
+] as const;
+
+const projectionStatusCheckSql = AUTOPOSTER_RESULT_PROJECTION_STATUSES
+  .map((status) => `'${status}'`)
+  .join(", ");
+
+/**
+ * Phase 2E-B result projection: one row per completed AutoPoster schedule
+ * graph node, holding the latest confirmed allowlisted observation of its
+ * exact queue job. This is a read-model of AutoPoster truth — never a second
+ * publishing-job database — so it stores identity, bounded evidence, and a
+ * snapshot hash, never the full job document.
+ */
+export function autoPosterResultProjectionsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_autoposter_result_projections (
+  graph_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  graph_hash TEXT NOT NULL,
+  child_mission_id TEXT NOT NULL UNIQUE,
+  child_trace_id TEXT NOT NULL,
+  queue_job_id TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL CHECK (provider IN ('tiktok', 'youtube')),
+  connected_account_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  source_status TEXT NOT NULL,
+  provider_status TEXT NOT NULL,
+  projection_status TEXT NOT NULL CHECK (projection_status IN (
+    ${projectionStatusCheckSql}
+  )),
+  approved INTEGER NOT NULL CHECK (approved IN (0, 1)),
+  source_updated_at TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  snapshot_hash TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  escalation_reason TEXT,
+  escalation_severity TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (graph_id, node_id),
+  FOREIGN KEY (graph_id, node_id) REFERENCES operator_mission_graph_nodes(graph_id, node_id) ON DELETE RESTRICT
+);`;
+}
+
+/**
+ * Phase 2E-B append-only observation evidence. Exact replay appends nothing;
+ * every validated newer observation, contradiction, or identity mismatch
+ * appends exactly one row with a deterministic event id.
+ */
+export function autoPosterResultEventsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_autoposter_result_events (
+  event_id TEXT PRIMARY KEY,
+  graph_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  queue_job_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  observation_kind TEXT NOT NULL CHECK (observation_kind IN (
+    'observation', 'contradiction', 'identity_mismatch'
+  )),
+  projection_status TEXT NOT NULL CHECK (projection_status IN (
+    ${projectionStatusCheckSql}
+  )),
+  reason_code TEXT NOT NULL,
+  source_updated_at TEXT NOT NULL,
+  snapshot_hash TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  FOREIGN KEY (graph_id, node_id) REFERENCES operator_mission_graph_nodes(graph_id, node_id) ON DELETE RESTRICT,
+  UNIQUE (graph_id, node_id, sequence)
+);`;
+}
+
+export const autoPosterResultEventsIndexSql =
+  `CREATE INDEX IF NOT EXISTS idx_operator_autoposter_result_events_node
+  ON operator_autoposter_result_events(graph_id, node_id, sequence);`;
+
 export const schema = `
 CREATE TABLE IF NOT EXISTS task_intents (
   id TEXT PRIMARY KEY,

@@ -6,6 +6,7 @@ import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMiss
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 import type { GenericMissionService } from "../missions/genericMissionService.js";
 import type { MissionGraphService } from "../missions/missionGraphService.js";
+import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -26,6 +27,7 @@ export function createApiRouter(
   agentRunLedgerService?: AgentRunLedgerService,
   genericMissionService?: GenericMissionService,
   missionGraphService?: MissionGraphService,
+  autoPosterResultService?: AutoPosterResultProjectionService,
 ): Router {
   const router = Router();
 
@@ -87,6 +89,13 @@ export function createApiRouter(
       throw new OperatorError("Mission graphs are unavailable.", 503);
     }
     return missionGraphService;
+  };
+
+  const requireAutoPosterResultService = (): AutoPosterResultProjectionService => {
+    if (!autoPosterResultService) {
+      throw new OperatorError("AutoPoster result projections are unavailable.", 503);
+    }
+    return autoPosterResultService;
   };
 
   // Phase 2C: true only when the mission id belongs to the generic durable
@@ -433,6 +442,37 @@ export function createApiRouter(
     try {
       response.json(
         requireMissionGraphService().cancelGraph(String(request.params.graphId), request.body ?? {}),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Phase 2E-B manual AutoPoster result collection. Refresh is an explicit
+  // founder/operator control action (same capability token as graph
+  // approval; submit/runtime/ledger tokens can never substitute) that reads
+  // at most eight exact persisted queue jobs and never writes to AutoPoster,
+  // calls a provider, re-executes a child, or mutates graph execution state.
+  router.post(
+    "/mission-graphs/:graphId/autoposter-results/refresh",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        requireAutoPosterResultService()
+          .refreshGraphResults(String(request.params.graphId))
+          .then((result) => response.json(result))
+          .catch(next);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // Stored projection read model: never initiates refresh or network work.
+  router.get("/mission-graphs/:graphId/autoposter-results", (request, response, next) => {
+    try {
+      response.json(
+        requireAutoPosterResultService().getProjections(String(request.params.graphId)),
       );
     } catch (error) {
       next(error);
