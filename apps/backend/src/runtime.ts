@@ -1,6 +1,7 @@
 import { AuditLogger } from "./audit/auditLogger.js";
 import { config } from "./config.js";
 import { createDatabase } from "./db/database.js";
+import { AutoPosterGraphIntakeService } from "./missions/autoPosterGraphIntake.js";
 import { GenericMissionService } from "./missions/genericMissionService.js";
 import { MissionGraphChildDispatcher } from "./missions/missionGraphChildDispatcher.js";
 import { MissionGraphService } from "./missions/missionGraphService.js";
@@ -73,6 +74,11 @@ export function createRuntime() {
     protectedValues,
     observationScheduler: autoPosterObservationService,
   });
+  const autoPosterGraphIntakeService = new AutoPosterGraphIntakeService(
+    missionGraphService,
+    runtimeMissionService,
+    runtimeMissionExecutor,
+  );
   const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
     protectedValues,
   });
@@ -83,6 +89,7 @@ export function createRuntime() {
     agentRunLedgerService,
     genericMissionService,
     missionGraphService,
+    autoPosterGraphIntakeService,
     autoPosterResultService,
     autoPosterObservationService,
     safeCommitCloseoutService,

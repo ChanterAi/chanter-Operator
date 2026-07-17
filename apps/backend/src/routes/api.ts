@@ -6,6 +6,7 @@ import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMiss
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 import type { GenericMissionService } from "../missions/genericMissionService.js";
 import type { MissionGraphService } from "../missions/missionGraphService.js";
+import type { AutoPosterGraphIntakeService } from "../missions/autoPosterGraphIntake.js";
 import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "../safeCommit/safeCommitCloseoutService.js";
@@ -32,6 +33,8 @@ export function createApiRouter(
   autoPosterResultService?: AutoPosterResultProjectionService,
   autoPosterObservationService?: AutoPosterObservationService,
   safeCommitCloseoutService?: SafeCommitCloseoutService,
+  // Appended, not inserted: see the matching comment in app.ts.
+  autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
 ): Router {
   const router = Router();
 
@@ -107,6 +110,13 @@ export function createApiRouter(
       throw new OperatorError("Mission graphs are unavailable.", 503);
     }
     return missionGraphService;
+  };
+
+  const requireAutoPosterGraphIntakeService = (): AutoPosterGraphIntakeService => {
+    if (!autoPosterGraphIntakeService) {
+      throw new OperatorError("AutoPoster graph mission intake is unavailable.", 503);
+    }
+    return autoPosterGraphIntakeService;
   };
 
   const requireAutoPosterResultService = (): AutoPosterResultProjectionService => {
@@ -192,6 +202,7 @@ export function createApiRouter(
         endpoints: [
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
+          "/api/mission-graphs/autoposter-schedule",
           "/api/safecommit-closeouts",
           "/api/safecommit-closeouts/:requestId",
         ],
@@ -568,6 +579,23 @@ export function createApiRouter(
       next(error);
     }
   });
+
+  // Phase 2F-A unified AutoPoster mission ingress. MCP submits the same flat
+  // schedule intent it always has; Operator alone compiles it into the
+  // canonical one-node graph and durably persists it — MCP never constructs
+  // a graph itself and gains no approval, replay, or result-ingestion
+  // authority. Same submit-only capability token as every other submission
+  // route; approval still requires the independent control token.
+  router.post(
+    "/mission-graphs/autoposter-schedule",
+    missionSubmitTokenMiddleware,
+    (request, response, next) => {
+      requireAutoPosterGraphIntakeService()
+        .submitScheduleIntent(request.body)
+        .then((result) => response.status(result.graph.replayed ? 200 : 201).json(result))
+        .catch(next);
+    },
+  );
 
   router.get("/mission-graphs", (request, response, next) => {
     try {

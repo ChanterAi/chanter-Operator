@@ -1391,6 +1391,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         endpoints: [
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
+          "/api/mission-graphs/autoposter-schedule",
           "/api/safecommit-closeouts",
           "/api/safecommit-closeouts/:requestId",
         ],

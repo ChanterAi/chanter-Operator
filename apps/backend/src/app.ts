@@ -7,6 +7,7 @@ import type { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissi
 import type { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
 import type { GenericMissionService } from "./missions/genericMissionService.js";
 import type { MissionGraphService } from "./missions/missionGraphService.js";
+import type { AutoPosterGraphIntakeService } from "./missions/autoPosterGraphIntake.js";
 import type { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
@@ -20,6 +21,10 @@ export function createApp(
   autoPosterResultService?: AutoPosterResultProjectionService,
   autoPosterObservationService?: AutoPosterObservationService,
   safeCommitCloseoutService?: SafeCommitCloseoutService,
+  // Appended, not inserted: existing positional call sites (tests are not
+  // covered by the tsc project's `include`, so a mid-list insertion would
+  // silently misalign every existing positional argument at runtime).
+  autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -34,6 +39,7 @@ export function createApp(
     autoPosterResultService,
     autoPosterObservationService,
     safeCommitCloseoutService,
+    autoPosterGraphIntakeService,
   ));
 
   app.use((_request, response) => {

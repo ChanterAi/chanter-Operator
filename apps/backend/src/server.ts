@@ -9,6 +9,7 @@ const {
   agentRunLedgerService,
   genericMissionService,
   missionGraphService,
+  autoPosterGraphIntakeService,
   autoPosterResultService,
   autoPosterObservationService,
   safeCommitCloseoutService,
@@ -22,6 +23,7 @@ const app = createApp(
   autoPosterResultService,
   autoPosterObservationService,
   safeCommitCloseoutService,
+  autoPosterGraphIntakeService,
 );
 const server = app.listen(config.port, config.host, () => {
   console.log("CHANTER Operator backend: http://" + config.host + ":" + config.port);
