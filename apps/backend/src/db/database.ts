@@ -14,6 +14,9 @@ import {
   missionGraphNodesTableSql,
   PHASE_2D_GRAPH_NODE_PRODUCT_CHECK,
   PHASE_2E_GRAPH_NODE_PRODUCT_CHECK,
+  safeCommitCloseoutEventsTableSql,
+  safeCommitCloseoutIndexesSql,
+  safeCommitCloseoutsTableSql,
   schema,
 } from "./schema.js";
 
@@ -33,6 +36,10 @@ export function createDatabase(databasePath: string): DatabaseSync {
   try {
     database.exec("PRAGMA foreign_keys = ON;");
     database.exec("PRAGMA journal_mode = WAL;");
+
+    // Validate/create the standalone SafeCommit authority tables before the
+    // aggregate schema can attempt indexes against a pre-existing lookalike.
+    migrateSafeCommitCloseoutTables(database);
     database.exec(schema);
 
     // P0.2 migration: add product_lane column
@@ -60,6 +67,7 @@ export function createDatabase(databasePath: string): DatabaseSync {
     // Phase 2E-C migration: additive observation job / attempt / escalation
     // tables, fail-closed on any unknown existing schema variant.
     migrateAutoPosterObservationTables(database);
+
     return database;
   } catch (error) {
     database.close();
@@ -334,6 +342,62 @@ export function migrateAutoPosterObservationTables(database: DatabaseSync): bool
     if (foreignKeyViolations.length > 0) {
       throw new Error(
         "Phase 2E-C observation migration failed foreign-key integrity validation.",
+      );
+    }
+    return true;
+  });
+}
+
+export function migrateSafeCommitCloseoutTables(database: DatabaseSync): boolean {
+  const readTableSql = (name: string): string | null => {
+    const row = database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    ).get(name) as { sql: string | null } | undefined;
+    return row?.sql ?? null;
+  };
+
+  const expected: Array<{ name: string; createSql: string }> = [
+    {
+      name: "operator_safecommit_closeouts",
+      createSql: safeCommitCloseoutsTableSql(),
+    },
+    {
+      name: "operator_safecommit_closeout_events",
+      createSql: safeCommitCloseoutEventsTableSql(),
+    },
+  ];
+  const missing: Array<{ name: string; createSql: string }> = [];
+  for (const table of expected) {
+    const currentSql = readTableSql(table.name);
+    if (currentSql === null) {
+      missing.push(table);
+      continue;
+    }
+    if (compactSql(currentSql) !== compactSql(table.createSql)) {
+      throw new Error(
+        `SafeCommit closeout migration refused an unknown ${table.name} schema.`,
+      );
+    }
+  }
+  if (missing.length === 0) {
+    database.exec(safeCommitCloseoutIndexesSql);
+    return false;
+  }
+
+  return withTransaction(database, () => {
+    for (const table of missing) database.exec(table.createSql);
+    database.exec(safeCommitCloseoutIndexesSql);
+    for (const table of expected) {
+      const migratedSql = readTableSql(table.name);
+      if (!migratedSql || compactSql(migratedSql) !== compactSql(table.createSql)) {
+        throw new Error(
+          `SafeCommit closeout migration did not produce the exact reviewed ${table.name} schema.`,
+        );
+      }
+    }
+    if (database.prepare("PRAGMA foreign_key_check").all().length > 0) {
+      throw new Error(
+        "SafeCommit closeout migration failed foreign-key integrity validation.",
       );
     }
     return true;

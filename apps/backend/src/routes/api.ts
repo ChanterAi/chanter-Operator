@@ -8,6 +8,7 @@ import type { GenericMissionService } from "../missions/genericMissionService.js
 import type { MissionGraphService } from "../missions/missionGraphService.js";
 import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
+import type { SafeCommitCloseoutService } from "../safeCommit/safeCommitCloseoutService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -30,6 +31,7 @@ export function createApiRouter(
   missionGraphService?: MissionGraphService,
   autoPosterResultService?: AutoPosterResultProjectionService,
   autoPosterObservationService?: AutoPosterObservationService,
+  safeCommitCloseoutService?: SafeCommitCloseoutService,
 ): Router {
   const router = Router();
 
@@ -40,6 +42,7 @@ export function createApiRouter(
     endpointLabel: "Mission submission",
     forbiddenTokenValues: [
       config.missionControl.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
       config.ledgerIngest.token,
     ],
@@ -50,6 +53,7 @@ export function createApiRouter(
     endpointLabel: "Operator mission control",
     forbiddenTokenValues: [
       config.missionSubmit.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
       config.ledgerIngest.token,
     ],
@@ -61,7 +65,19 @@ export function createApiRouter(
     forbiddenTokenValues: [
       config.missionSubmit.token,
       config.missionControl.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
+    ],
+  });
+  const safeCommitExecutorTokenMiddleware = createCapabilityTokenMiddleware({
+    tokenEnvVar: "OPERATOR_SAFECOMMIT_EXECUTOR_TOKEN",
+    tokenValue: config.safeCommitExecutor.token,
+    endpointLabel: "SafeCommit closeout executor",
+    forbiddenTokenValues: [
+      config.missionSubmit.token,
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
     ],
   });
 
@@ -107,6 +123,17 @@ export function createApiRouter(
     return autoPosterObservationService;
   };
 
+  const requireSafeCommitCloseoutService = (): SafeCommitCloseoutService => {
+    if (!safeCommitCloseoutService) {
+      throw new OperatorError(
+        "SafeCommit closeout approval authority is unavailable.",
+        503,
+        "OPERATOR_SAFECOMMIT_UNAVAILABLE",
+      );
+    }
+    return safeCommitCloseoutService;
+  };
+
   // Phase 2C: true only when the mission id belongs to the generic durable
   // spine; every other id (including unknown ids) keeps the exact legacy path.
   const isGenericMission = (missionId: string): boolean =>
@@ -116,6 +143,7 @@ export function createApiRouter(
     config.missionSubmit.token,
     [
       config.missionControl.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
       config.ledgerIngest.token,
     ],
@@ -124,6 +152,7 @@ export function createApiRouter(
     config.missionControl.token,
     [
       config.missionSubmit.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
       config.ledgerIngest.token,
     ],
@@ -133,7 +162,17 @@ export function createApiRouter(
     [
       config.missionSubmit.token,
       config.missionControl.token,
+      config.safeCommitExecutor.token,
       config.autoPosterRuntime.serviceToken,
+    ],
+  );
+  const safeCommitExecutorReady = capabilityTokenIsDistinct(
+    config.safeCommitExecutor.token,
+    [
+      config.missionSubmit.token,
+      config.missionControl.token,
+      config.autoPosterRuntime.serviceToken,
+      config.ledgerIngest.token,
     ],
   );
 
@@ -153,6 +192,8 @@ export function createApiRouter(
         endpoints: [
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
+          "/api/safecommit-closeouts",
+          "/api/safecommit-closeouts/:requestId",
         ],
       },
       missionControl: {
@@ -164,6 +205,18 @@ export function createApiRouter(
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",
           "/api/runtime-missions/:missionId/stop",
+          "/api/safecommit-closeouts/:requestId/approve",
+          "/api/safecommit-closeouts/:requestId/revoke",
+        ],
+      },
+      safeCommitExecutor: {
+        configured: Boolean(config.safeCommitExecutor.token),
+        isolated: safeCommitExecutorReady,
+        ready: safeCommitExecutorReady,
+        endpoints: [
+          "/api/safecommit-closeouts/:requestId/claim",
+          "/api/safecommit-closeouts/:requestId/invalidate",
+          "/api/safecommit-closeouts/:requestId/complete",
         ],
       },
       ledgerIngest: {
@@ -204,6 +257,114 @@ export function createApiRouter(
   router.get("/lanes", (_request, response) => {
     response.json({ lanes: productLanes });
   });
+
+  router.post("/safecommit-closeouts", missionSubmitTokenMiddleware, (request, response, next) => {
+    try {
+      const closeout = requireSafeCommitCloseoutService().submit(request.body);
+      response.status(closeout.replayed ? 200 : 201).json(closeout);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get(
+    "/safecommit-closeouts/:requestId",
+    missionSubmitTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().get(String(request.params.requestId)),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/safecommit-closeouts/:requestId/approve",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().approve(
+            String(request.params.requestId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/safecommit-closeouts/:requestId/revoke",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().revoke(
+            String(request.params.requestId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/safecommit-closeouts/:requestId/claim",
+    safeCommitExecutorTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().claim(
+            String(request.params.requestId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/safecommit-closeouts/:requestId/invalidate",
+    safeCommitExecutorTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().invalidate(
+            String(request.params.requestId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/safecommit-closeouts/:requestId/complete",
+    safeCommitExecutorTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireSafeCommitCloseoutService().complete(
+            String(request.params.requestId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.post("/agent-run-ledger/entries", ledgerIngestTokenMiddleware, (request, response) => {
     const result = requireAgentRunLedgerService().ingestEntry(request.body);

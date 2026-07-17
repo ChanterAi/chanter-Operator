@@ -81,31 +81,63 @@ describe("Phase 2A — Capability-token middleware", () => {
     const tokens = {
       submit: "submit-token",
       control: "control-token",
+      safeCommitExecutor: "safecommit-executor-token",
       ledger: "ledger-token",
       runtime: "runtime-token",
     };
 
     assert.equal(capabilityTokenIsDistinct(tokens.submit, [
       tokens.control,
+      tokens.safeCommitExecutor,
       tokens.ledger,
       tokens.runtime,
     ]), true);
     assert.equal(capabilityTokenIsDistinct(tokens.ledger, [
       tokens.submit,
       tokens.control,
+      tokens.safeCommitExecutor,
+      tokens.runtime,
+    ]), true);
+    assert.equal(capabilityTokenIsDistinct(tokens.safeCommitExecutor, [
+      tokens.submit,
+      tokens.control,
+      tokens.ledger,
       tokens.runtime,
     ]), true);
 
     assert.equal(capabilityTokenIsDistinct(tokens.submit, [
       tokens.control,
       tokens.submit,
+      tokens.safeCommitExecutor,
       tokens.runtime,
     ]), false);
     assert.equal(capabilityTokenIsDistinct(tokens.ledger, [
       tokens.ledger,
       tokens.control,
+      tokens.safeCommitExecutor,
       tokens.runtime,
     ]), false);
+    for (const collidingRole of [
+      tokens.submit,
+      tokens.control,
+      tokens.ledger,
+      tokens.runtime,
+    ]) {
+      assert.equal(capabilityTokenIsDistinct(collidingRole, [
+        tokens.submit,
+        tokens.control,
+        tokens.safeCommitExecutor,
+        tokens.ledger,
+        tokens.runtime,
+      ].filter((value) => value !== collidingRole)), true);
+      assert.equal(capabilityTokenIsDistinct(tokens.safeCommitExecutor, [
+        tokens.submit,
+        tokens.control,
+        tokens.ledger,
+        tokens.runtime,
+        tokens.safeCommitExecutor,
+      ]), false);
+    }
   });
 
   it("never returns the token in the response", async () => {

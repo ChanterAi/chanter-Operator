@@ -13,6 +13,7 @@ import { createAutoPosterRuntimeMissionExecutor } from "./runtimeMissions/autoPo
 import { OperatorService } from "./services/operatorService.js";
 import { ensureWorkspace } from "./workspace/pathGuard.js";
 import { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
+import { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
 
 export function createRuntime() {
   const database = createDatabase(config.databasePath);
@@ -32,6 +33,7 @@ export function createRuntime() {
     config.autoPosterRuntime.serviceToken,
     config.missionSubmit.token,
     config.missionControl.token,
+    config.safeCommitExecutor.token,
     config.ledgerIngest.token,
   ];
   const agentRunLedgerService = new AgentRunLedgerService(database, protectedValues);
@@ -71,6 +73,9 @@ export function createRuntime() {
     protectedValues,
     observationScheduler: autoPosterObservationService,
   });
+  const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
+    protectedValues,
+  });
   return {
     database,
     service,
@@ -80,5 +85,6 @@ export function createRuntime() {
     missionGraphService,
     autoPosterResultService,
     autoPosterObservationService,
+    safeCommitCloseoutService,
   };
 }

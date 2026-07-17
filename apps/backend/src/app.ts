@@ -9,6 +9,7 @@ import type { GenericMissionService } from "./missions/genericMissionService.js"
 import type { MissionGraphService } from "./missions/missionGraphService.js";
 import type { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
+import type { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
 
 export function createApp(
   service: OperatorService,
@@ -18,12 +19,22 @@ export function createApp(
   missionGraphService?: MissionGraphService,
   autoPosterResultService?: AutoPosterResultProjectionService,
   autoPosterObservationService?: AutoPosterObservationService,
+  safeCommitCloseoutService?: SafeCommitCloseoutService,
 ) {
   const app = express();
   app.disable("x-powered-by");
   app.use("/api/agent-run-ledger/entries", express.json({ limit: "129kb" }));
   app.use(express.json({ limit: "32kb" }));
-  app.use("/api", createApiRouter(service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService, autoPosterResultService, autoPosterObservationService));
+  app.use("/api", createApiRouter(
+    service,
+    runtimeMissionService,
+    agentRunLedgerService,
+    genericMissionService,
+    missionGraphService,
+    autoPosterResultService,
+    autoPosterObservationService,
+    safeCommitCloseoutService,
+  ));
 
   app.use((_request, response) => {
     response.status(404).json({ error: "Route was not found." });

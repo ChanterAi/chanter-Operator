@@ -31,6 +31,7 @@ import { ensureWorkspace } from "../src/workspace/pathGuard.js";
 const TOKEN_CANARY = "short-token-9";
 const MISSION_SUBMIT_TOKEN = "test-mission-submit-token";
 const MISSION_CONTROL_TOKEN = "test-operator-control-token";
+const SAFECOMMIT_EXECUTOR_TOKEN = "test-safecommit-executor-token";
 const LEDGER_INGEST_TOKEN = "test-ledger-ingest-token";
 
 function withSubmitAuth(req: ReturnType<typeof request>) {
@@ -1390,6 +1391,8 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         endpoints: [
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
+          "/api/safecommit-closeouts",
+          "/api/safecommit-closeouts/:requestId",
         ],
       },
       missionControl: {
@@ -1401,6 +1404,18 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",
           "/api/runtime-missions/:missionId/stop",
+          "/api/safecommit-closeouts/:requestId/approve",
+          "/api/safecommit-closeouts/:requestId/revoke",
+        ],
+      },
+      safeCommitExecutor: {
+        configured: true,
+        isolated: true,
+        ready: true,
+        endpoints: [
+          "/api/safecommit-closeouts/:requestId/claim",
+          "/api/safecommit-closeouts/:requestId/invalidate",
+          "/api/safecommit-closeouts/:requestId/complete",
         ],
       },
       ledgerIngest: {
@@ -1421,6 +1436,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       TOKEN_CANARY,
       MISSION_SUBMIT_TOKEN,
       MISSION_CONTROL_TOKEN,
+      SAFECOMMIT_EXECUTOR_TOKEN,
       LEDGER_INGEST_TOKEN,
     ]) {
       expect(serializedHealth).not.toContain(protectedValue);

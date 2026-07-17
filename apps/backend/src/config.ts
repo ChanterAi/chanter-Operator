@@ -103,6 +103,9 @@ export const config = {
   missionControl: {
     token: process.env.OPERATOR_CONTROL_TOKEN?.trim() ?? "",
   },
+  safeCommitExecutor: {
+    token: process.env.OPERATOR_SAFECOMMIT_EXECUTOR_TOKEN?.trim() ?? "",
+  },
   ledgerIngest: {
     token: process.env.OPERATOR_LEDGER_INGEST_TOKEN?.trim() ?? "",
   },

@@ -291,6 +291,84 @@ CREATE INDEX IF NOT EXISTS idx_operator_autoposter_observation_escalations_statu
   ON operator_autoposter_observation_escalations(status, created_at, escalation_id);
 `;
 
+export function safeCommitCloseoutsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_safecommit_closeouts (
+  request_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  schema_version TEXT NOT NULL CHECK (schema_version = 'chanter.operator.safecommit-closeout.v1'),
+  action TEXT NOT NULL CHECK (action = 'safecommit.closeout.execute'),
+  plan_id TEXT NOT NULL UNIQUE,
+  plan_schema_version TEXT NOT NULL CHECK (plan_schema_version = 'chanter.safecommit.closeout.v1'),
+  plan_hash TEXT NOT NULL CHECK (
+    length(plan_hash) = 64 AND plan_hash NOT GLOB '*[^0-9a-f]*'
+  ),
+  requested_by TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'approval_required', 'approved', 'execution_claimed', 'completed',
+    'failed_terminal', 'invalidated', 'revoked'
+  )),
+  approved_by TEXT,
+  approval_basis TEXT CHECK (
+    approval_basis IS NULL OR
+    approval_basis = 'founder_reviewed_exact_plan_and_repository_preflight'
+  ),
+  approval_note TEXT,
+  approved_at TEXT,
+  approved_plan_hash TEXT,
+  approval_evidence_id TEXT UNIQUE,
+  approval_evidence_digest TEXT,
+  claimed_by TEXT,
+  claimed_at TEXT,
+  terminal_actor TEXT,
+  terminal_reason_code TEXT,
+  terminal_reason TEXT,
+  terminal_at TEXT,
+  terminal_evidence_ref TEXT,
+  terminal_evidence_digest TEXT,
+  closeout_evidence_ref TEXT,
+  closeout_evidence_digest TEXT,
+  closeout_outcome TEXT CHECK (
+    closeout_outcome IS NULL OR closeout_outcome IN ('completed', 'failed_terminal')
+  ),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`;
+}
+
+export function safeCommitCloseoutEventsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_safecommit_closeout_events (
+  event_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL REFERENCES operator_safecommit_closeouts(request_id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK (sequence > 0),
+  event_type TEXT NOT NULL,
+  previous_state TEXT CHECK (
+    previous_state IS NULL OR previous_state IN (
+      'approval_required', 'approved', 'execution_claimed', 'completed',
+      'failed_terminal', 'invalidated', 'revoked'
+    )
+  ),
+  new_state TEXT NOT NULL CHECK (new_state IN (
+    'approval_required', 'approved', 'execution_claimed', 'completed',
+    'failed_terminal', 'invalidated', 'revoked'
+  )),
+  actor TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  evidence_ref TEXT,
+  evidence_digest TEXT,
+  UNIQUE(request_id, sequence)
+);`;
+}
+
+export const safeCommitCloseoutIndexesSql = `
+CREATE INDEX IF NOT EXISTS idx_operator_safecommit_closeouts_status
+  ON operator_safecommit_closeouts(status, created_at DESC, request_id);
+CREATE INDEX IF NOT EXISTS idx_operator_safecommit_closeout_events_request
+  ON operator_safecommit_closeout_events(request_id, sequence);
+`;
+
 export const schema = `
 CREATE TABLE IF NOT EXISTS task_intents (
   id TEXT PRIMARY KEY,
@@ -691,6 +769,12 @@ CREATE TABLE IF NOT EXISTS operator_mission_graph_events (
 
 CREATE INDEX IF NOT EXISTS idx_operator_mission_graph_events_graph
   ON operator_mission_graph_events(graph_id, sequence);
+
+${safeCommitCloseoutsTableSql(true)}
+
+${safeCommitCloseoutEventsTableSql(true)}
+
+${safeCommitCloseoutIndexesSql}
 
 CREATE TABLE IF NOT EXISTS agent_run_ledger_ingest_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
