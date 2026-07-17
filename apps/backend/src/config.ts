@@ -21,6 +21,37 @@ const autoPosterRuntimeTimeoutValid =
     autoPosterRuntimeTimeoutParsed >= 100 &&
     autoPosterRuntimeTimeoutParsed <= 120_000);
 
+/**
+ * Phase 2E-C observation policy overrides. Every override must parse to an
+ * integer inside the reviewed closed bounds or it is ignored (the reviewed
+ * P0 defaults apply); the observation service re-validates the effective
+ * policy and refuses to start on any out-of-bounds combination.
+ */
+function parseBoundedInteger(raw: string | undefined, minimum: number, maximum: number): number | undefined {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) return undefined;
+  const parsed = Number(trimmed);
+  return Number.isInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : undefined;
+}
+
+function parseObservationDelays(raw: string | undefined): number[] | undefined {
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) return undefined;
+  const delays = trimmed.split(",").map((value) => Number(value.trim()));
+  const valid =
+    delays.length >= 1 &&
+    delays.length <= 8 &&
+    delays.every((delay) => Number.isInteger(delay) && delay >= 1 && delay <= 600);
+  return valid ? delays : undefined;
+}
+
+const observationDelays = parseObservationDelays(process.env.OPERATOR_OBSERVATION_RETRY_DELAYS_SECONDS);
+const observationMaxAttempts = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_MAX_ATTEMPTS, 1, 12);
+const observationLeaseSeconds = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_LEASE_SECONDS, 5, 600);
+const observationBatchSize = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_BATCH_SIZE, 1, 16);
+
 const loopGovernorTimeoutRaw = process.env.LOOP_GOVERNOR_TIMEOUT_MS?.trim() ?? "";
 const loopGovernorTimeoutParsed = Number(loopGovernorTimeoutRaw);
 const loopGovernorTimeoutValid =
@@ -59,6 +90,12 @@ export const config = {
         ? loopGovernorTimeoutParsed
         : undefined,
     timeoutValid: loopGovernorTimeoutValid,
+  },
+  autoPosterObservation: {
+    ...(observationDelays !== undefined ? { retryDelaysSeconds: observationDelays } : {}),
+    ...(observationMaxAttempts !== undefined ? { maxAttempts: observationMaxAttempts } : {}),
+    ...(observationLeaseSeconds !== undefined ? { leaseSeconds: observationLeaseSeconds } : {}),
+    ...(observationBatchSize !== undefined ? { batchSize: observationBatchSize } : {}),
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",

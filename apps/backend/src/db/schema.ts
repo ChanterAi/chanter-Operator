@@ -127,6 +127,170 @@ export const autoPosterResultEventsIndexSql =
   `CREATE INDEX IF NOT EXISTS idx_operator_autoposter_result_events_node
   ON operator_autoposter_result_events(graph_id, node_id, sequence);`;
 
+/**
+ * Phase 2E-C durable observation job lifecycle (closed world). `pending` has
+ * never been attempted, `waiting` sits between bounded attempts, `leased` and
+ * `observing` are lease-protected in-flight states, and the four remaining
+ * states are terminal: a terminal job is never claimable again.
+ */
+export const AUTOPOSTER_OBSERVATION_JOB_STATUSES = [
+  "pending",
+  "leased",
+  "observing",
+  "waiting",
+  "converged",
+  "escalation_required",
+  "failed_terminal",
+  "cancelled",
+] as const;
+
+const observationJobStatusCheckSql = AUTOPOSTER_OBSERVATION_JOB_STATUSES
+  .map((status) => `'${status}'`)
+  .join(", ");
+
+/** Phase 2E-C durable escalation lifecycle (closed world). */
+export const AUTOPOSTER_OBSERVATION_ESCALATION_STATUSES = [
+  "open",
+  "acknowledged",
+  "resolved",
+  "dismissed",
+] as const;
+
+const observationEscalationStatusCheckSql = AUTOPOSTER_OBSERVATION_ESCALATION_STATUSES
+  .map((status) => `'${status}'`)
+  .join(", ");
+
+/**
+ * Phase 2E-C outcome classes for one completed observation attempt. Exactly
+ * the four spec classes plus `transport_retry` (a bounded typed transport or
+ * contract read failure that consumed an attempt without producing provider
+ * truth — it re-observes like class A but never relabels the AutoPoster job).
+ */
+export const AUTOPOSTER_OBSERVATION_OUTCOME_CLASSES = [
+  "continue_observing",
+  "converged",
+  "escalation_required",
+  "failed_terminal",
+  "transport_retry",
+] as const;
+
+const observationOutcomeClassCheckSql = AUTOPOSTER_OBSERVATION_OUTCOME_CLASSES
+  .map((outcomeClass) => `'${outcomeClass}'`)
+  .join(", ");
+
+/**
+ * Phase 2E-C durable observation job: exactly one row per completed
+ * AutoPoster schedule graph node that reached a valid downstream queue
+ * binding. The Operator owns this scheduling state (leases, attempts,
+ * convergence) — the job never stores provider truth beyond the immutable
+ * identity binding it observes.
+ */
+export function autoPosterObservationJobsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_autoposter_observation_jobs (
+  observation_job_id TEXT PRIMARY KEY,
+  graph_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  mission_id TEXT NOT NULL UNIQUE,
+  workspace_id TEXT NOT NULL,
+  connected_account_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('tiktok', 'youtube')),
+  queue_job_id TEXT NOT NULL UNIQUE,
+  source_binding_json TEXT NOT NULL,
+  source_binding_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    ${observationJobStatusCheckSql}
+  )),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  max_attempts INTEGER NOT NULL CHECK (max_attempts >= 1 AND max_attempts <= 12),
+  next_attempt_at TEXT,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_attempt_at TEXT,
+  last_success_at TEXT,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  convergence_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (graph_id, node_id),
+  FOREIGN KEY (graph_id, node_id) REFERENCES operator_mission_graph_nodes(graph_id, node_id) ON DELETE RESTRICT
+);`;
+}
+
+/**
+ * Phase 2E-C append-only per-attempt telemetry and canonical observation
+ * attempt record. One row per completed attempt; a crash mid-attempt leaves
+ * the durable attempt counter ahead of this table, which is itself truthful
+ * evidence of the interruption. Never tokens, credentials, or raw provider
+ * payloads.
+ */
+export function autoPosterObservationAttemptsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_autoposter_observation_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  observation_job_id TEXT NOT NULL REFERENCES operator_autoposter_observation_jobs(observation_job_id) ON DELETE RESTRICT,
+  graph_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+  provider TEXT NOT NULL,
+  lease_owner TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+  outcome_class TEXT NOT NULL CHECK (outcome_class IN (
+    ${observationOutcomeClassCheckSql}
+  )),
+  refresh_outcome TEXT NOT NULL,
+  projection_status TEXT,
+  reason_code TEXT,
+  retry_delay_seconds INTEGER,
+  next_attempt_at TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  UNIQUE (observation_job_id, attempt_number)
+);`;
+}
+
+/**
+ * Phase 2E-C durable human escalation. Exactly one escalation may ever exist
+ * per observation job (the job parks terminally as `escalation_required`
+ * when it is created), so replay can never duplicate one. Contains a safe
+ * bounded summary and evidence references — never raw provider payloads.
+ */
+export function autoPosterObservationEscalationsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_autoposter_observation_escalations (
+  escalation_id TEXT PRIMARY KEY,
+  observation_job_id TEXT NOT NULL UNIQUE REFERENCES operator_autoposter_observation_jobs(observation_job_id) ON DELETE RESTRICT,
+  graph_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'high', 'critical')),
+  human_action_required INTEGER NOT NULL CHECK (human_action_required IN (0, 1)),
+  recommended_human_action TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    ${observationEscalationStatusCheckSql}
+  )),
+  acknowledged_by TEXT,
+  acknowledged_at TEXT,
+  resolved_by TEXT,
+  resolved_at TEXT,
+  resolution_note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);`;
+}
+
+export const autoPosterObservationIndexesSql = `
+CREATE INDEX IF NOT EXISTS idx_operator_autoposter_observation_jobs_due
+  ON operator_autoposter_observation_jobs(status, next_attempt_at, observation_job_id);
+CREATE INDEX IF NOT EXISTS idx_operator_autoposter_observation_attempts_job
+  ON operator_autoposter_observation_attempts(observation_job_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_operator_autoposter_observation_escalations_status
+  ON operator_autoposter_observation_escalations(status, created_at, escalation_id);
+`;
+
 export const schema = `
 CREATE TABLE IF NOT EXISTS task_intents (
   id TEXT PRIMARY KEY,

@@ -2,8 +2,8 @@ import { createApp } from "./app.js";
 import { config } from "./config.js";
 import { createRuntime } from "./runtime.js";
 
-const { database, service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService, autoPosterResultService } = createRuntime();
-const app = createApp(service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService, autoPosterResultService);
+const { database, service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService, autoPosterResultService, autoPosterObservationService } = createRuntime();
+const app = createApp(service, runtimeMissionService, agentRunLedgerService, genericMissionService, missionGraphService, autoPosterResultService, autoPosterObservationService);
 const server = app.listen(config.port, config.host, () => {
   console.log("CHANTER Operator backend: http://" + config.host + ":" + config.port);
   console.log("Runner mode: mock (task workflow) + read-only local runner" + (config.runnerWorkspaceRoot ? "" : " (disabled)"));

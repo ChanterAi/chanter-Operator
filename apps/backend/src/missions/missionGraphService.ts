@@ -85,6 +85,16 @@ interface MissionGraphServiceOptions {
     graphId: string,
     nodeId: string | null,
   ) => void;
+  /**
+   * Phase 2E-C: durable observation scheduling for completed AutoPoster
+   * schedule nodes. The hook is fire-and-forget from the graph authority's
+   * perspective — it must never mutate graph truth and never throw back
+   * into the scheduler (interrupted scheduling is recreated by the bounded
+   * observation-batch backfill).
+   */
+  observationScheduler?: {
+    onAutoPosterNodeCompleted(graphId: string, nodeId: string): void;
+  };
 }
 
 export interface MissionGraphNodeChildSummary {
@@ -148,6 +158,7 @@ export class MissionGraphService {
   private readonly journal: MissionGraphJournal;
   private readonly protectedValues: string[];
   private readonly failureInjector?: MissionGraphServiceOptions["failureInjector"];
+  private readonly observationScheduler?: MissionGraphServiceOptions["observationScheduler"];
 
   constructor(
     private readonly database: DatabaseSync,
@@ -157,6 +168,7 @@ export class MissionGraphService {
     this.now = options.now ?? (() => new Date());
     this.journal = new MissionGraphJournal(database, options.idFactory ?? randomUUID);
     this.failureInjector = options.failureInjector;
+    this.observationScheduler = options.observationScheduler;
     this.protectedValues = (options.protectedValues ?? [])
       .map((value) => value.trim())
       .filter(Boolean);
@@ -724,6 +736,11 @@ export class MissionGraphService {
         evidenceReferences: mission.evidenceReferences,
       });
       this.injectFailure("after_node_completed_persistence", graph.graphId, nodeId);
+      if (node.product === "auto_poster" && this.observationScheduler) {
+        // Phase 2E-C: the durably completed schedule node gets exactly one
+        // idempotent observation job; the hook never throws into the graph.
+        this.observationScheduler.onAutoPosterNodeCompleted(graph.graphId, nodeId);
+      }
       return;
     }
 

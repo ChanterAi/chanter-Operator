@@ -5,6 +5,7 @@ import { GenericMissionService } from "./missions/genericMissionService.js";
 import { MissionGraphChildDispatcher } from "./missions/missionGraphChildDispatcher.js";
 import { MissionGraphService } from "./missions/missionGraphService.js";
 import { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
+import { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
 import { createLoopGovernorMissionExecutor } from "./missions/loopGovernorRuntime.js";
 import { MockRunner } from "./runners/mockRunner.js";
 import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
@@ -57,13 +58,19 @@ export function createRuntime() {
     genericMissionService,
     runtimeMissionService,
   );
-  const missionGraphService = new MissionGraphService(database, missionGraphChildren, {
-    protectedValues,
-  });
   const autoPosterResultService = new AutoPosterResultProjectionService(
     database,
     runtimeMissionExecutor,
   );
+  const autoPosterObservationService = new AutoPosterObservationService(
+    database,
+    autoPosterResultService,
+    { policy: config.autoPosterObservation },
+  );
+  const missionGraphService = new MissionGraphService(database, missionGraphChildren, {
+    protectedValues,
+    observationScheduler: autoPosterObservationService,
+  });
   return {
     database,
     service,
@@ -72,5 +79,6 @@ export function createRuntime() {
     genericMissionService,
     missionGraphService,
     autoPosterResultService,
+    autoPosterObservationService,
   };
 }

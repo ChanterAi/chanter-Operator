@@ -374,15 +374,55 @@ function classifyObservation(post: AutoPosterPostStatusView): Classification {
   }
 }
 
+/** Phase 2E-C crash simulation boundary: after the strict status read, before durable persistence. */
+export type AutoPosterResultObservationBoundary = "after_status_read_before_persistence";
+
 export class AutoPosterResultProjectionService {
   private readonly now: () => Date;
+  private readonly failureInjector?: (
+    boundary: AutoPosterResultObservationBoundary,
+    graphId: string,
+    nodeId: string,
+  ) => void;
 
   constructor(
     private readonly database: DatabaseSync,
     private readonly executor: Pick<AutoPosterRuntimeMissionExecutor, "configured" | "getPostStatus">,
-    options: { now?: () => Date } = {},
+    options: {
+      now?: () => Date;
+      failureInjector?: (
+        boundary: AutoPosterResultObservationBoundary,
+        graphId: string,
+        nodeId: string,
+      ) => void;
+    } = {},
   ) {
     this.now = options.now ?? (() => new Date());
+    this.failureInjector = options.failureInjector;
+  }
+
+  /**
+   * Phase 2E-C single-node observation: exactly the reviewed Phase 2E-B
+   * per-node refresh (one bounded strict status read, identity fail-closed
+   * validation, idempotent durable projection + append-only evidence) for
+   * one AutoPoster schedule node. Adds no new provider semantics — the
+   * observation loop converges its own job state from this result.
+   */
+  async observeNodeResult(
+    graphId: string,
+    nodeId: string,
+  ): Promise<{ result: AutoPosterNodeRefreshResult; escalation?: AutoPosterResultEscalation }> {
+    const graph = this.requireGraph(graphId);
+    const node = this.autoPosterNodes(graph.graph_id)
+      .find((candidate) => candidate.node_id === String(nodeId || "").trim());
+    if (!node) {
+      throw new OperatorError(
+        "Mission graph node is not an AutoPoster schedule node.",
+        404,
+        "OPERATOR_GRAPH_RESULTS_NOT_APPLICABLE",
+      );
+    }
+    return this.refreshNode(graph, node, this.now().toISOString());
   }
 
   /** Stored projections and batch summary only — never network work. */
@@ -540,6 +580,7 @@ export class AutoPosterResultProjectionService {
         graph, node, queueJobId, binding, failure: status, observedAt, nodeResult,
       });
     }
+    this.failureInjector?.("after_status_read_before_persistence", graph.graph_id, node.node_id);
     const post = status.post;
 
     // 3) Validate the observation against the durable identity binding.

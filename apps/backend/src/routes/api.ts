@@ -7,6 +7,7 @@ import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerServ
 import type { GenericMissionService } from "../missions/genericMissionService.js";
 import type { MissionGraphService } from "../missions/missionGraphService.js";
 import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
+import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -28,6 +29,7 @@ export function createApiRouter(
   genericMissionService?: GenericMissionService,
   missionGraphService?: MissionGraphService,
   autoPosterResultService?: AutoPosterResultProjectionService,
+  autoPosterObservationService?: AutoPosterObservationService,
 ): Router {
   const router = Router();
 
@@ -96,6 +98,13 @@ export function createApiRouter(
       throw new OperatorError("AutoPoster result projections are unavailable.", 503);
     }
     return autoPosterResultService;
+  };
+
+  const requireAutoPosterObservationService = (): AutoPosterObservationService => {
+    if (!autoPosterObservationService) {
+      throw new OperatorError("AutoPoster observation loop is unavailable.", 503);
+    }
+    return autoPosterObservationService;
   };
 
   // Phase 2C: true only when the mission id belongs to the generic durable
@@ -478,6 +487,122 @@ export function createApiRouter(
       next(error);
     }
   });
+
+  // Phase 2E-C autonomous observation loop. The entire surface — including
+  // reads — is an internal Operator control capability: the same control
+  // token as graph approval, and never the submit, runtime, or ledger
+  // tokens. Running a batch performs at most `batchSize` bounded strict
+  // status reads through the Agent Runtime contract; escalation
+  // acknowledge/resolve mutate only the durable Operator escalation record.
+  router.post(
+    "/autoposter-observations/run",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        requireAutoPosterObservationService()
+          .runObservationBatch(request.body ?? {})
+          .then((result) => response.json(result))
+          .catch(next);
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/autoposter-observations/jobs",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(requireAutoPosterObservationService().listJobs({
+          status: request.query.status,
+          graphId: request.query.graphId,
+          due: request.query.due,
+          limit: request.query.limit,
+          offset: request.query.offset,
+        }));
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/autoposter-observations/jobs/:observationJobId",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireAutoPosterObservationService()
+            .getJobDetail(String(request.params.observationJobId)),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/autoposter-observations/escalations",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(requireAutoPosterObservationService().listEscalations({
+          status: request.query.status,
+          graphId: request.query.graphId,
+          limit: request.query.limit,
+          offset: request.query.offset,
+        }));
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.get(
+    "/autoposter-observations/escalations/:escalationId",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireAutoPosterObservationService()
+            .getEscalation(String(request.params.escalationId)),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/autoposter-observations/escalations/:escalationId/acknowledge",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireAutoPosterObservationService()
+            .acknowledgeEscalation(String(request.params.escalationId), request.body ?? {}),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/autoposter-observations/escalations/:escalationId/resolve",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireAutoPosterObservationService()
+            .resolveEscalation(String(request.params.escalationId), request.body ?? {}),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
 
   router.get("/tasks", (_request, response) => {
     response.json({ tasks: service.listTasks() });
