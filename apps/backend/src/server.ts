@@ -12,6 +12,7 @@ const {
   autoPosterGraphIntakeService,
   autoPosterResultService,
   autoPosterObservationService,
+  autoPosterObservationWorker,
   safeCommitCloseoutService,
 } = createRuntime();
 const app = createApp(
@@ -39,11 +40,14 @@ const server = app.listen(config.port, config.host, () => {
         : "unconfigured"),
   );
 });
+autoPosterObservationWorker.start();
 
 function shutdown() {
-  server.close(() => {
-    database.close();
-    process.exit(0);
+  autoPosterObservationWorker.stop().finally(() => {
+    server.close(() => {
+      database.close();
+      process.exit(0);
+    });
   });
 }
 

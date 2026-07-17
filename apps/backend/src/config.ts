@@ -52,6 +52,19 @@ const observationMaxAttempts = parseBoundedInteger(process.env.OPERATOR_OBSERVAT
 const observationLeaseSeconds = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_LEASE_SECONDS, 5, 600);
 const observationBatchSize = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_BATCH_SIZE, 1, 16);
 
+/**
+ * Phase 2F-B autonomous observation worker. Disabled by default (including
+ * in every test run, since nothing sets this env var) — enabling it is an
+ * explicit opt-in. Out-of-bounds overrides are ignored in favor of the safe
+ * default, exactly like the observation policy overrides above; the worker
+ * itself re-validates and refuses to start on any invalid combination.
+ */
+const observationWorkerEnabledRaw = (process.env.OPERATOR_OBSERVATION_WORKER_ENABLED ?? "").trim().toLowerCase();
+const observationWorkerEnabled = observationWorkerEnabledRaw === "true" || observationWorkerEnabledRaw === "1";
+const observationWorkerPollIntervalMs =
+  parseBoundedInteger(process.env.OPERATOR_OBSERVATION_WORKER_POLL_INTERVAL_MS, 1_000, 3_600_000) ?? 30_000;
+const observationWorkerBatchSize = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_WORKER_BATCH_SIZE, 1, 16);
+
 const loopGovernorTimeoutRaw = process.env.LOOP_GOVERNOR_TIMEOUT_MS?.trim() ?? "";
 const loopGovernorTimeoutParsed = Number(loopGovernorTimeoutRaw);
 const loopGovernorTimeoutValid =
@@ -96,6 +109,11 @@ export const config = {
     ...(observationMaxAttempts !== undefined ? { maxAttempts: observationMaxAttempts } : {}),
     ...(observationLeaseSeconds !== undefined ? { leaseSeconds: observationLeaseSeconds } : {}),
     ...(observationBatchSize !== undefined ? { batchSize: observationBatchSize } : {}),
+  },
+  autoPosterObservationWorker: {
+    enabled: observationWorkerEnabled,
+    pollIntervalMs: observationWorkerPollIntervalMs,
+    ...(observationWorkerBatchSize !== undefined ? { batchSize: observationWorkerBatchSize } : {}),
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",
