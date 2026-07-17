@@ -48,7 +48,7 @@ import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/a
 import { OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
 
-const TEST_NOW_MS = Date.parse("2026-07-17T09:00:00.000Z");
+const TEST_NOW_MS = Date.now();
 const NOW = new Date(TEST_NOW_MS).toISOString();
 const REQUESTED_AT = new Date(TEST_NOW_MS + 60_000).toISOString();
 const TIKTOK_AT = new Date(TEST_NOW_MS + 2 * 60 * 60_000).toISOString();
