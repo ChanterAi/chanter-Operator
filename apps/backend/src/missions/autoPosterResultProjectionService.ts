@@ -82,6 +82,8 @@ export interface AutoPosterResultEscalation {
   lockedAt: string | null;
   observedAt: string;
   claimAttempts: number | null;
+  publishAttemptBudget: number | null;
+  attemptBudgetExhausted: boolean | null;
   history: Array<{ at: string | null; event: string; detail: string }>;
   publishId: string | null;
   errorCode: string | null;
@@ -232,7 +234,10 @@ interface CanonicalObservation {
     postedAt: string | null;
     lockedAt: string | null;
     claimAttempts: number;
+    publishAttemptBudget: number;
+    attemptBudgetExhausted: boolean;
     publishId: string;
+    providerVerification: AutoPosterPostStatusView["providerVerification"];
     runtimeMissionId: string;
     runtimeIdempotencyKey: string;
     runtimeAction: string;
@@ -362,7 +367,20 @@ function classifyObservation(post: AutoPosterPostStatusView): Classification {
         return { status: "manual_review_required", escalationReason: "observation_contradiction", severity: "critical" };
       }
       if (post.provider === "youtube") {
-        if (post.providerStatus === "uploaded_private" && post.publishId) {
+        const verification = post.providerVerification;
+        if (
+          post.providerStatus === "uploaded_private"
+          && post.publishId
+          && verification !== null
+          && verification.provider === "youtube"
+          && verification.externalVideoId === post.publishId
+          && verification.channelId === post.accountId
+          && verification.privacyStatus === "private"
+          && verification.uploadMethod === "resumable"
+          && verification.title.length > 0
+          && verification.verifiedAt.length > 0
+          && !["rejected", "deleted", "failed"].includes(verification.uploadStatus.toLowerCase())
+        ) {
           return { status: "uploaded_private", escalationReason: null, severity: null };
         }
         // Posted YouTube work without private-upload evidence is missing its
@@ -760,7 +778,10 @@ export class AutoPosterResultProjectionService {
         postedAt: post.postedAt,
         lockedAt: post.lockedAt,
         claimAttempts: post.claimAttempts,
+        publishAttemptBudget: post.publishAttemptBudget,
+        attemptBudgetExhausted: post.attemptBudgetExhausted,
         publishId: post.publishId,
+        providerVerification: post.providerVerification,
         runtimeMissionId: post.runtimeMissionId,
         runtimeIdempotencyKey: post.runtimeIdempotencyKey,
         runtimeAction: post.runtimeAction,
@@ -1192,6 +1213,8 @@ export class AutoPosterResultProjectionService {
       lockedAt: post?.lockedAt ?? null,
       observedAt,
       claimAttempts: post?.claimAttempts ?? null,
+      publishAttemptBudget: post?.publishAttemptBudget ?? null,
+      attemptBudgetExhausted: post?.attemptBudgetExhausted ?? null,
       history: post?.history ?? [],
       publishId: post?.publishId ? post.publishId : null,
       errorCode: post?.lastResult?.code ?? null,

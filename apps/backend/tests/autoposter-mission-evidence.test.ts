@@ -33,6 +33,7 @@ const SCHEDULED_AT = new Date(TEST_NOW_MS + 60 * 60_000).toISOString();
 const WORKSPACE_ID = "workspace-evidence";
 const OWNER_ID = "owner";
 const TIKTOK_ACCOUNT = "tt-evidence";
+const YOUTUBE_ACCOUNT = "UC-evidence";
 const RUNTIME_TOKEN = "evidence-service-token";
 const SECRET_TOKEN = "super-secret-protected-value";
 
@@ -47,16 +48,26 @@ interface QueueDraft {
   missionPayloadHash: string;
   approved: boolean;
   postedAt: string | null;
+  status: "scheduled" | "posted" | "failed";
+  publishId: string;
+  providerStatus: string;
+  providerVerification: AutoPosterPostStatusView["providerVerification"];
+  claimAttempts: number;
+  publishAttemptBudget: number;
+  lastResult: AutoPosterPostStatusView["lastResult"];
+  history: AutoPosterPostStatusView["history"];
 }
 
-function connectedAccount() {
+function connectedAccount(provider: "tiktok" | "youtube" = "tiktok") {
+  const youtube = provider === "youtube";
+  const accountId = youtube ? YOUTUBE_ACCOUNT : TIKTOK_ACCOUNT;
   return {
-    connectedAccountId: `tiktok:${TIKTOK_ACCOUNT}`,
-    accountId: TIKTOK_ACCOUNT,
-    provider: "tiktok" as const,
-    providerDisplayName: "TikTok",
-    username: "evidence_tiktok",
-    displayName: "Evidence Test Account",
+    connectedAccountId: `${provider}:${accountId}`,
+    accountId,
+    provider,
+    providerDisplayName: youtube ? "YouTube" : "TikTok",
+    username: youtube ? "chantercy" : "evidence_tiktok",
+    displayName: youtube ? "CHANTER" : "Evidence Test Account",
     connectionStatus: "connected" as const,
     publishingReady: true,
     readinessBlockers: [],
@@ -68,10 +79,11 @@ function makeAutoPosterBoundary() {
   const jobs = new Map<string, QueueDraft>();
   const port: AutoPosterOperationsPort = {
     async listConnectedAccounts(params) {
-      return { ok: true, workspaceId: params.workspaceId, accounts: [connectedAccount()], count: 1 };
+      return { ok: true, workspaceId: params.workspaceId, accounts: [connectedAccount(), connectedAccount("youtube")], count: 2 };
     },
     async validateConnectedAccount(params) {
-      return { ok: true, workspaceId: params.workspaceId ?? WORKSPACE_ID, account: connectedAccount() };
+      const provider = params.provider === "youtube" ? "youtube" : "tiktok";
+      return { ok: true, workspaceId: params.workspaceId ?? WORKSPACE_ID, account: connectedAccount(provider) };
     },
     async listQueue() {
       return { ok: true, items: [], count: 0, scope: { accountId: "all" } };
@@ -84,29 +96,32 @@ function makeAutoPosterBoundary() {
         provider: job.provider,
         connectedAccountId: `${job.provider}:${job.accountId}`,
         accountId: job.accountId,
-        username: "evidence_tiktok",
+        username: job.provider === "youtube" ? "chantercy" : "evidence_tiktok",
         workspaceId: params.workspaceId ?? WORKSPACE_ID,
-        status: "scheduled",
+        status: job.status,
         scheduledAt: job.scheduledAt,
         approved: job.approved,
         approvalState: job.approved ? "approved" : "unapproved",
-        approvedAt: null,
-        approvedBy: "",
+        approvedAt: job.approved ? NOW : null,
+        approvedBy: job.approved ? "founder-evidence" : "",
         mediaType: "video",
         captionSummary: "",
         createdAt: NOW,
         updatedAt: NOW,
         postedAt: job.postedAt,
-        publishId: "",
-        providerStatus: "",
+        publishId: job.publishId,
+        providerStatus: job.providerStatus,
+        providerVerification: job.providerVerification,
         lockedAt: null,
-        claimAttempts: 0,
+        claimAttempts: job.claimAttempts,
+        publishAttemptBudget: job.publishAttemptBudget,
+        attemptBudgetExhausted: job.claimAttempts >= job.publishAttemptBudget,
         runtimeMissionId: job.missionId,
         runtimeIdempotencyKey: job.idempotencyKey,
         runtimeAction: job.action,
         runtimePayloadHash: job.missionPayloadHash,
-        lastResult: null,
-        history: [],
+        lastResult: job.lastResult,
+        history: job.history,
         lastErrorMessage: "",
       };
       return { ok: true, post: view };
@@ -131,6 +146,14 @@ function makeAutoPosterBoundary() {
         missionPayloadHash: params.missionPayloadHash,
         approved: false,
         postedAt: null,
+        status: "scheduled",
+        publishId: "",
+        providerStatus: "",
+        providerVerification: null,
+        claimAttempts: 0,
+        publishAttemptBudget: params.provider === "youtube" ? 0 : 5,
+        lastResult: null,
+        history: [],
       };
       jobs.set(params.idempotencyKey, job);
       return { ok: true, duplicate: false, post: asPost(job) };
@@ -229,6 +252,29 @@ function scheduleGraphEnvelope(graphId = "evidence-graph", requestedBy = "founde
   };
 }
 
+function youtubeScheduleGraphEnvelope(graphId = "youtube-evidence-graph") {
+  return {
+    ...scheduleGraphEnvelope(graphId),
+    objective: "Schedule the bounded private YouTube evidence proof.",
+    nodes: [{
+      nodeId: "youtube_node",
+      target: { product: "auto_poster", action: "autoposter.post.schedule" },
+      objective: "Create the YouTube unapproved queue draft.",
+      input: {
+        accountId: YOUTUBE_ACCOUNT,
+        provider: "youtube",
+        mediaUrl: "https://cdn.example.com/evidence.mp4",
+        caption: "Evidence proof",
+        hashtags: "#chanter #evidence",
+        title: "CHANTER private provider proof",
+        description: "Private operational validation artifact.",
+        scheduledAt: SCHEDULED_AT,
+      },
+      dependsOn: [],
+    }],
+  };
+}
+
 describe("Phase — persistent AutoPoster mission evidence bundle", () => {
   it("generates a complete, redacted manifest and converges to exactly one escalation", async () => {
     const { graphs, observation, evidence, evidenceDir, advanceSeconds } = realHarness();
@@ -293,6 +339,194 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     expect(existsSync(path.dirname(first.path))).toBe(true);
     const filesInBundleDir = readdirSync(path.dirname(first.path));
     expect(filesInBundleDir).toEqual(["manifest.json"]);
+  });
+
+  it("retains verified private YouTube artifact, media, and zero-duplicate replay evidence", async () => {
+    const { graphs, observation, evidence, jobs, advanceSeconds } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope());
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+
+    const job = [...jobs.values()][0]!;
+    Object.assign(job, {
+      approved: true,
+      status: "posted",
+      postedAt: NOW,
+      publishId: "yt-private-proof-1",
+      providerStatus: "uploaded_private",
+      claimAttempts: 1,
+      publishAttemptBudget: 1,
+      providerVerification: {
+        provider: "youtube",
+        externalVideoId: "yt-private-proof-1",
+        channelId: YOUTUBE_ACCOUNT,
+        channelTitle: "CHANTER",
+        channelHandle: "@chantercy",
+        title: "CHANTER private provider proof",
+        privacyStatus: "private",
+        uploadStatus: "processed",
+        processingStatus: "succeeded",
+        verifiedAt: NOW,
+        uploadMethod: "resumable",
+      },
+    });
+    advanceSeconds(16);
+    const observed = await observation.runObservationBatch({ leaseOwner: "test-runner" });
+    expect(observed.results[0]?.projectionStatus).toBe("uploaded_private");
+
+    const result = await evidence.generateEvidenceBundle(submitted.graphId, {
+      media: {
+        fileName: "evidence.mp4",
+        sha256: "a".repeat(64),
+        byteSize: 2_323_295,
+        mimeType: "video/mp4",
+      },
+      replay: {
+        outcome: "exact_replay_same_identity",
+        replayed: true,
+        sameGraphId: true,
+        sameResultIdentity: true,
+        providerUploadCountBefore: 1,
+        providerUploadCountAfter: 1,
+        additionalUploadCount: 0,
+        existingResourceMutations: 0,
+      },
+    });
+
+    expect(result.manifest.providerArtifact).toMatchObject({
+      provider: "youtube",
+      configuredAccountId: YOUTUBE_ACCOUNT,
+      verifiedChannelId: YOUTUBE_ACCOUNT,
+      verifiedChannelHandle: "@chantercy",
+      externalYouTubeVideoId: "yt-private-proof-1",
+      uploadMethod: "resumable",
+      verifiedPrivacyStatus: "private",
+      providerUploadCount: 1,
+    });
+    expect(result.manifest.media).toEqual({
+      fileName: "evidence.mp4",
+      sha256: "a".repeat(64),
+      byteSize: 2_323_295,
+      mimeType: "video/mp4",
+    });
+    expect(result.manifest.evidenceReferences).toContain("youtube-video:yt-private-proof-1");
+    expect(result.manifest.replay).toMatchObject({ additionalUploadCount: 0, existingResourceMutations: 0 });
+    expect(result.manifest.safetyAssertions).toEqual({
+      exactlyOneUpload: true,
+      privateVisibilityVerified: true,
+      noPublicTransition: true,
+      noExistingResourceModified: true,
+      zeroProviderMutationProven: false,
+      attemptBudgetExhausted: true,
+      noAutomaticRetryScheduled: false,
+      secretsRedacted: true,
+    });
+  });
+
+  it("retains an exhausted pre-provider real-run closeout with zero external mutations", async () => {
+    const { graphs, observation, evidence, jobs, advanceSeconds } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope());
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+
+    const job = [...jobs.values()][0]!;
+    const attemptTimes = [1, 2, 3, 4, 5].map(
+      (attempt) => new Date(TEST_NOW_MS + attempt * 60_000).toISOString(),
+    );
+    Object.assign(job, {
+      approved: true,
+      status: "failed",
+      postedAt: null,
+      publishId: "",
+      providerStatus: "",
+      providerVerification: null,
+      claimAttempts: 5,
+      publishAttemptBudget: 1,
+      lastResult: {
+        mode: "api",
+        code: "PUBLISH_ATTEMPT_BUDGET_EXHAUSTED",
+        message: "Could not load video media: fetch failed",
+        completedAt: attemptTimes[4],
+        willRetry: false,
+        providerMutationStarted: false,
+        failureBoundary: "before_provider_upload_session",
+      },
+      history: [
+        ...attemptTimes.map((at, index) => ({
+          at,
+          event: "publish_attempt",
+          detail: `Claimed by worker for publishing (attempt ${index + 1}).`,
+        })),
+        { at: attemptTimes[4], event: "failed", detail: "Could not load video media: fetch failed" },
+      ],
+    });
+
+    advanceSeconds(16);
+    const observed = await observation.runObservationBatch({ leaseOwner: "test-runner" });
+    expect(observed.results[0]?.projectionStatus).toBe("failed");
+
+    const input = {
+      replay: {
+        outcome: "exact_replay_same_identity",
+        replayed: true,
+        sameGraphId: true,
+        sameResultIdentity: true,
+        providerUploadCountBefore: 0,
+        providerUploadCountAfter: 0,
+        additionalUploadCount: 0,
+        existingResourceMutations: 0,
+      },
+      operationalCloseout: {
+        guardedSchedulerTickCount: 1,
+        claimAttemptsAtDisconnect: 4,
+        finalClaimAttempts: 5,
+        providerUploadRecordCount: 0,
+        externalMutationCount: 0,
+        youtubeDuplicateCount: 0,
+        failureBoundary: "before_provider_upload_session",
+        terminalClassification: "failed_pre_provider_attempt_budget_exhausted",
+        exactTitle: "CHANTER private provider proof",
+        channelId: YOUTUBE_ACCOUNT,
+        providerReadBackCheckedAt: NOW,
+      },
+    } as const;
+    const first = await evidence.generateEvidenceBundle(submitted.graphId, input);
+    const replayed = await evidence.generateEvidenceBundle(submitted.graphId, input);
+
+    expect(replayed.path).toBe(first.path);
+    expect(first.manifest.providerArtifact).toBeNull();
+    expect(first.manifest.operationalCloseout).toMatchObject({
+      guardedSchedulerTickCount: 1,
+      claimAttemptsAtDisconnect: 4,
+      finalClaimAttempts: 5,
+      claimAttempts: 5,
+      publishAttemptBudget: 1,
+      attemptBudgetExhausted: true,
+      durableDraftStatus: "failed",
+      terminalClassification: "failed_pre_provider_attempt_budget_exhausted",
+      externalMutationCount: 0,
+      externalVideoId: null,
+      providerVerification: null,
+      postedAt: null,
+    });
+    expect((first.manifest.operationalCloseout as Record<string, unknown>).publishAttemptTimestamps)
+      .toEqual(attemptTimes);
+    expect(first.manifest.replay).toMatchObject({
+      providerUploadCountBefore: 0,
+      providerUploadCountAfter: 0,
+      additionalUploadCount: 0,
+    });
+    expect(first.manifest.safetyAssertions).toMatchObject({
+      exactlyOneUpload: false,
+      noPublicTransition: true,
+      zeroProviderMutationProven: true,
+      attemptBudgetExhausted: true,
+      noAutomaticRetryScheduled: true,
+    });
   });
 
   it("fails closed with a clean error for an unknown graph", async () => {
