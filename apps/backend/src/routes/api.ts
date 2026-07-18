@@ -7,6 +7,7 @@ import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerServ
 import type { GenericMissionService } from "../missions/genericMissionService.js";
 import type { MissionGraphService } from "../missions/missionGraphService.js";
 import type { AutoPosterGraphIntakeService } from "../missions/autoPosterGraphIntake.js";
+import type { AutoPosterMissionEvidenceService } from "../missions/autoPosterMissionEvidenceService.js";
 import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "../safeCommit/safeCommitCloseoutService.js";
@@ -35,6 +36,7 @@ export function createApiRouter(
   safeCommitCloseoutService?: SafeCommitCloseoutService,
   // Appended, not inserted: see the matching comment in app.ts.
   autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
+  autoPosterMissionEvidenceService?: AutoPosterMissionEvidenceService,
 ): Router {
   const router = Router();
 
@@ -117,6 +119,13 @@ export function createApiRouter(
       throw new OperatorError("AutoPoster graph mission intake is unavailable.", 503);
     }
     return autoPosterGraphIntakeService;
+  };
+
+  const requireAutoPosterMissionEvidenceService = (): AutoPosterMissionEvidenceService => {
+    if (!autoPosterMissionEvidenceService) {
+      throw new OperatorError("AutoPoster mission evidence is unavailable.", 503);
+    }
+    return autoPosterMissionEvidenceService;
   };
 
   const requireAutoPosterResultService = (): AutoPosterResultProjectionService => {
@@ -676,6 +685,22 @@ export function createApiRouter(
       next(error);
     }
   });
+
+  // Persistent AutoPoster product mission — retained evidence bundle. Same
+  // control-token sensitivity tier as graph approval/refresh; generates (or
+  // regenerates, atomically, in place) the durable JSON manifest for one
+  // mission graph from already-persisted state plus one fresh live safety
+  // re-check. Never mutates graph, mission, projection, or observation truth.
+  router.post(
+    "/mission-graphs/:graphId/evidence",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireAutoPosterMissionEvidenceService()
+        .generateEvidenceBundle(String(request.params.graphId), request.body ?? {})
+        .then((result) => response.status(201).json(result))
+        .catch(next);
+    },
+  );
 
   // Phase 2E-C autonomous observation loop. The entire surface — including
   // reads — is an internal Operator control capability: the same control

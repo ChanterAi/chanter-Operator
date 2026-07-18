@@ -31,7 +31,10 @@
     "test:safecommit-closeout": "npm run test --workspace @chanter/operator-backend -- --run tests/safecommit-closeout.test.ts tests/safecommit-closeout-migration.test.ts tests/capabilityToken.test.ts",
     "test:safecommit-closeout:e2e": "node --import tsx --test tools/safecommit-closeout/safecommit-closeout.integration.test.mts",
     "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
-    "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests"
+    "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests",
+    "autoposter:mission:local": "node --import tsx tools/local-mission/run-mission.mts",
+    "mission:services:stop": "node --import tsx tools/local-mission/stop-services.mts",
+    "autoposter:mission:local:seed-account": "node --import tsx tools/local-mission/seed-connected-account.mts"
   },
   "engines": {
     "node": ">=22.13.0"

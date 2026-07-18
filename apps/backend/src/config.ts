@@ -81,6 +81,11 @@ export const config = {
   auditPath: process.env.OPERATOR_AUDIT_PATH ?? path.join(projectRoot, "data", "audit.jsonl"),
   workspaceRoot:
     process.env.OPERATOR_WORKSPACE_ROOT ?? path.join(projectRoot, "workspace"),
+  /** Retained mission-evidence bundle root (one subdirectory per graph ID). */
+  evidenceDir:
+    process.env.OPERATOR_EVIDENCE_DIR ?? path.join(projectRoot, "var", "evidence"),
+  /** Named operational profile label, carried into every evidence bundle. */
+  runtimeProfileName: process.env.OPERATOR_RUNTIME_PROFILE?.trim() || "default",
   /** P1.0: Workspace where the real read-only runner executes commands (e.g. the git repo root). */
   runnerWorkspaceRoot:
     process.env.OPERATOR_RUNNER_WORKSPACE ?? undefined,

@@ -8,6 +8,7 @@ import { MissionGraphService } from "./missions/missionGraphService.js";
 import { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
 import { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
 import { AutoPosterObservationWorker } from "./missions/autoPosterObservationWorker.js";
+import { AutoPosterMissionEvidenceService } from "./missions/autoPosterMissionEvidenceService.js";
 import { createLoopGovernorMissionExecutor } from "./missions/loopGovernorRuntime.js";
 import { MockRunner } from "./runners/mockRunner.js";
 import { AutoPosterMissionService } from "./runtimeMissions/autoPosterMissionService.js";
@@ -84,6 +85,15 @@ export function createRuntime() {
     runtimeMissionService,
     runtimeMissionExecutor,
   );
+  const autoPosterMissionEvidenceService = new AutoPosterMissionEvidenceService(
+    missionGraphService,
+    runtimeMissionService,
+    autoPosterResultService,
+    autoPosterObservationService,
+    runtimeMissionExecutor,
+    config.evidenceDir,
+    protectedValues,
+  );
   const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
     protectedValues,
   });
@@ -98,6 +108,7 @@ export function createRuntime() {
     autoPosterResultService,
     autoPosterObservationService,
     autoPosterObservationWorker,
+    autoPosterMissionEvidenceService,
     safeCommitCloseoutService,
   };
 }
