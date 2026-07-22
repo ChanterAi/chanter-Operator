@@ -33,6 +33,7 @@
     "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
     "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests",
     "autoposter:mission:local": "node --import tsx tools/local-mission/run-mission.mts",
+    "test:provider-proof-runner": "node --import tsx --test tools/local-mission/provider-proof-mode.test.mts",
     "mission:services:stop": "node --import tsx tools/local-mission/stop-services.mts",
     "autoposter:mission:local:seed-account": "node --import tsx tools/local-mission/seed-connected-account.mts"
   },

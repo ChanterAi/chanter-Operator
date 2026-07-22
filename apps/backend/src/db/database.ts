@@ -41,6 +41,8 @@ export function createDatabase(databasePath: string): DatabaseSync {
     // aggregate schema can attempt indexes against a pre-existing lookalike.
     migrateSafeCommitCloseoutTables(database);
     database.exec(schema);
+    migrateAutoPosterProviderProofColumns(database);
+    migrateMissionGraphReplayUniqueness(database);
 
     // P0.2 migration: add product_lane column
     try {
@@ -73,6 +75,65 @@ export function createDatabase(databasePath: string): DatabaseSync {
     database.close();
     throw error;
   }
+}
+
+/** Additive, reversible custody fields. Existing rows stay non-provider-proof. */
+export function migrateAutoPosterProviderProofColumns(database: DatabaseSync): boolean {
+  const table = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'autoposter_runtime_missions'",
+  ).get();
+  if (!table) return false;
+  const columns = new Set((database.prepare("PRAGMA table_info(autoposter_runtime_missions)").all() as Array<{ name: string }>)
+    .map((column) => column.name));
+  const additions = [
+    ["graph_id", "ALTER TABLE autoposter_runtime_missions ADD COLUMN graph_id TEXT"],
+    ["provider_proof_mode", "ALTER TABLE autoposter_runtime_missions ADD COLUMN provider_proof_mode INTEGER NOT NULL DEFAULT 0 CHECK (provider_proof_mode IN (0, 1))"],
+    ["approved_media_json", "ALTER TABLE autoposter_runtime_missions ADD COLUMN approved_media_json TEXT"],
+  ] as const;
+  let changed = false;
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const [name, sql] of additions) {
+      if (!columns.has(name)) {
+        database.exec(sql);
+        changed = true;
+      }
+    }
+    database.exec("COMMIT");
+    return changed;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * Additive replay migration. Reversal is `DROP TABLE operator_mission_graph_replays`;
+ * the append-only journal remains untouched. Existing duplicates are refused.
+ */
+export function migrateMissionGraphReplayUniqueness(database: DatabaseSync): boolean {
+  const duplicate = database.prepare(`
+    SELECT graph_id, COUNT(*) AS count
+      FROM operator_mission_graph_events
+     WHERE event_type = 'graph_submission_replayed'
+     GROUP BY graph_id
+    HAVING COUNT(*) > 1
+     LIMIT 1
+  `).get() as { graph_id: string; count: number } | undefined;
+  if (duplicate) {
+    throw new Error(`Replay uniqueness migration refused duplicate historical events for graph ${duplicate.graph_id}.`);
+  }
+  const before = Number((database.prepare("SELECT COUNT(*) AS count FROM operator_mission_graph_replays").get() as { count: number }).count);
+  database.prepare(`
+    INSERT OR IGNORE INTO operator_mission_graph_replays (
+      graph_id, event_type, replay_identity, event_id, created_at
+    )
+    SELECT graph_id, event_type, 'authoritative_submission', event_id, timestamp
+      FROM operator_mission_graph_events
+     WHERE event_type = 'graph_submission_replayed'
+  `).run();
+  const after = Number((database.prepare("SELECT COUNT(*) AS count FROM operator_mission_graph_replays").get() as { count: number }).count);
+  return after > before;
 }
 
 const GRAPH_NODE_COLUMNS = [

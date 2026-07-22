@@ -7,6 +7,7 @@ import type { LoopGovernorMissionPort } from "chanter-agent-runtime";
 import { AgentRunLedgerService } from "../src/agentRunLedger/agentRunLedgerService.js";
 import {
   createDatabase,
+  migrateMissionGraphReplayUniqueness,
   migrateMissionGraphNodesForAutoPoster,
 } from "../src/db/database.js";
 import {
@@ -24,6 +25,7 @@ import {
   missionGraphChildTraceId,
 } from "../src/missions/missionGraphCompiler.js";
 import { MissionGraphService } from "../src/missions/missionGraphService.js";
+import { MissionGraphJournal } from "../src/missions/missionGraphJournal.js";
 import { createLoopGovernorMissionExecutor } from "../src/missions/loopGovernorRuntime.js";
 
 const roots: string[] = [];
@@ -427,6 +429,50 @@ describe("Phase 2E-A graph-node SQLite migration", () => {
         NULL, '2030-01-01T00:00:00.000Z', '2030-01-01T00:00:00.000Z',
         '2030-01-01T00:00:00.000Z')
     `).run()).toThrow(/check constraint/i);
+    database.close();
+  });
+
+  it("fails closed when historical authoritative replay events are duplicated", () => {
+    const database = createDatabase(temporaryDatabasePath());
+    const journal = new MissionGraphJournal(database, (() => {
+      let sequence = 0;
+      return () => `replay-migration-${++sequence}`;
+    })());
+    journal.insertGraph({
+      graphId: "replay-duplicate-graph",
+      traceId: "replay-duplicate-trace",
+      idempotencyKey: "replay-duplicate-key",
+      schemaVersion: "chanter.mission.graph.v1",
+      sourceSystem: "operator",
+      requestedBy: "migration-test",
+      tenantUserId: "owner",
+      workspaceId: null,
+      accountId: null,
+      objective: "Prove duplicate replay migration refusal.",
+      compiledGraphJson: "{}",
+      graphHash: "a".repeat(64),
+      requestedAt: "2030-01-01T00:00:00.000Z",
+      timestamp: "2030-01-01T00:00:00.000Z",
+      nodes: [{
+        nodeId: "node",
+        product: "loop_governor",
+        action: "loop_governor.manual_loop.create",
+        objective: "migration canary",
+        inputJson: "{}",
+        dependsOn: [],
+        childMissionId: "replay-child",
+        childTraceId: "replay-child-trace",
+        childIdempotencyKey: "replay-child-key",
+      }],
+    });
+    for (let index = 0; index < 2; index += 1) {
+      journal.appendAuditEvent("replay-duplicate-graph", "graph_submission_replayed", {
+        actor: "migration-test",
+        reason: "synthetic duplicate",
+        timestamp: `2030-01-01T00:00:0${index + 1}.000Z`,
+      });
+    }
+    expect(() => migrateMissionGraphReplayUniqueness(database)).toThrow(/duplicate historical events/i);
     database.close();
   });
 });

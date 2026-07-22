@@ -658,8 +658,10 @@ export function createApiRouter(
   // Phase 2E-B manual AutoPoster result collection. Refresh is an explicit
   // founder/operator control action (same capability token as graph
   // approval; submit/runtime/ledger tokens can never substitute) that reads
-  // at most eight exact persisted queue jobs and never writes to AutoPoster,
-  // calls a provider, re-executes a child, or mutates graph execution state.
+  // at most eight exact persisted queue jobs. For a YouTube record with a
+  // durable provider operation, the refresh delegates one same-session
+  // reconciliation call through Runtime/AutoPoster; it never creates a new
+  // provider session, re-executes a child, or mutates graph execution state.
   router.post(
     "/mission-graphs/:graphId/autoposter-results/refresh",
     missionControlTokenMiddleware,

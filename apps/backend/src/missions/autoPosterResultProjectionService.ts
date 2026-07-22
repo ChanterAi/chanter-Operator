@@ -28,10 +28,21 @@ import type {
 import { withTransaction } from "../db/database.js";
 import { AUTOPOSTER_RESULT_PROJECTION_STATUSES } from "../db/schema.js";
 import { OperatorError } from "../services/operatorService.js";
+import {
+  findForbiddenProviderMaterial,
+  OPERATOR_PROVIDER_MATERIAL_MESSAGE,
+} from "../security/providerSafety.js";
 import type { AutoPosterRuntimeMissionExecutor } from "../runtimeMissions/autoPosterRuntime.js";
+import { isExactPrivateProviderProof } from "./autoPosterProviderPredicates.js";
 
 const AUTOPOSTER_GRAPH_ACTION = "autoposter.post.schedule";
 const MAX_RESULT_READS_PER_REFRESH = 8;
+const TERMINAL_YOUTUBE_PROVIDER_OPERATION_STATES = new Set([
+  "completed_private",
+  "contradictory_public",
+  "provider_missing",
+  "terminal_failure",
+]);
 const ESCALATION_SCHEMA_VERSION = "chanter.autoposter.result-escalation.v1";
 // Known stable AutoPoster admin surfaces. There is no reviewed per-job
 // deep-link contract, so escalations return these routes plus the opaque
@@ -52,6 +63,10 @@ export type AutoPosterResultEscalationReason =
   | "partial_batch"
   | "result_identity_mismatch"
   | "result_collection_unavailable"
+  | "provider_missing"
+  | "provider_visibility_contradiction"
+  | "provider_operation_ambiguous"
+  | "legacy_unproven"
   | "observation_contradiction";
 
 export type AutoPosterResultEscalationSeverity = "info" | "warning" | "high" | "critical";
@@ -170,6 +185,7 @@ interface GraphRow {
   graph_id: string;
   graph_hash: string;
   workspace_id: string | null;
+  tenant_user_id: string;
 }
 
 interface GraphNodeRow {
@@ -238,6 +254,7 @@ interface CanonicalObservation {
     attemptBudgetExhausted: boolean;
     publishId: string;
     providerVerification: AutoPosterPostStatusView["providerVerification"];
+    providerOperation: AutoPosterPostStatusView["providerOperation"];
     runtimeMissionId: string;
     runtimeIdempotencyKey: string;
     runtimeAction: string;
@@ -282,6 +299,14 @@ const RECOMMENDED_HUMAN_ACTIONS: Record<AutoPosterResultEscalationReason, string
     "Stop collection for this node and inspect the graph child, queue job ID, workspace, provider, and account bindings.",
   result_collection_unavailable:
     "Preserve the last confirmed projection and retry the manual refresh later; do not relabel the AutoPoster job.",
+  provider_missing:
+    "The persisted YouTube operation could not find its provider artifact or session; inspect the exact queue job without creating another session.",
+  provider_visibility_contradiction:
+    "YouTube reported public or unlisted visibility against the private-only contract; inspect the exact artifact immediately.",
+  provider_operation_ambiguous:
+    "The persisted YouTube operation remains ambiguous after bounded same-session reconciliation; do not retry or create another session.",
+  legacy_unproven:
+    "This historical YouTube result has no authoritative completed-private provider operation and remains explicitly unproven.",
   observation_contradiction:
     "AutoPoster evidence contradicts itself for one source revision; inspect the canonical job before trusting either snapshot.",
 };
@@ -297,6 +322,10 @@ const SEVERITY_BY_REASON: Record<AutoPosterResultEscalationReason, AutoPosterRes
   partial_batch: "warning",
   result_identity_mismatch: "high",
   result_collection_unavailable: "warning",
+  provider_missing: "critical",
+  provider_visibility_contradiction: "critical",
+  provider_operation_ambiguous: "critical",
+  legacy_unproven: "warning",
   observation_contradiction: "critical",
 };
 
@@ -331,6 +360,25 @@ function classifyFailureReason(
  * to manual review instead of being normalized.
  */
 function classifyObservation(post: AutoPosterPostStatusView): Classification {
+  const operation = post.provider === "youtube" ? post.providerOperation : null;
+  if (operation) {
+    if (operation.operationState === "completed_private") {
+      if (isExactPrivateProviderProof(post)) return { status: "uploaded_private", escalationReason: null, severity: null };
+      return { status: "manual_review_required", escalationReason: "observation_contradiction", severity: "critical" };
+    }
+    if (operation.operationState === "contradictory_public") {
+      return { status: "manual_review_required", escalationReason: "provider_visibility_contradiction", severity: "critical" };
+    }
+    if (operation.operationState === "provider_missing") {
+      return { status: "outcome_unknown", escalationReason: "provider_missing", severity: "critical" };
+    }
+    if (
+      operation.mutationSummary.providerSessionInitiationCount > 0
+      || ["session_persisted", "uploading", "resumable", "outcome_unknown"].includes(operation.operationState)
+    ) {
+      return { status: "outcome_unknown", escalationReason: "provider_operation_ambiguous", severity: "critical" };
+    }
+  }
   const latestEvent = post.history.length > 0 ? post.history[post.history.length - 1]!.event : "";
   const wasRevoked = post.history.some((entry) => entry.event === "approval_revoked");
 
@@ -367,25 +415,7 @@ function classifyObservation(post: AutoPosterPostStatusView): Classification {
         return { status: "manual_review_required", escalationReason: "observation_contradiction", severity: "critical" };
       }
       if (post.provider === "youtube") {
-        const verification = post.providerVerification;
-        if (
-          post.providerStatus === "uploaded_private"
-          && post.publishId
-          && verification !== null
-          && verification.provider === "youtube"
-          && verification.externalVideoId === post.publishId
-          && verification.channelId === post.accountId
-          && verification.privacyStatus === "private"
-          && verification.uploadMethod === "resumable"
-          && verification.title.length > 0
-          && verification.verifiedAt.length > 0
-          && !["rejected", "deleted", "failed"].includes(verification.uploadStatus.toLowerCase())
-        ) {
-          return { status: "uploaded_private", escalationReason: null, severity: null };
-        }
-        // Posted YouTube work without private-upload evidence is missing its
-        // required terminal proof.
-        return { status: "manual_review_required", escalationReason: "observation_contradiction", severity: "critical" };
+        return { status: "manual_review_required", escalationReason: "legacy_unproven", severity: "warning" };
       }
       return { status: "provider_accepted_unverified", escalationReason: null, severity: null };
     }
@@ -405,7 +435,7 @@ export class AutoPosterResultProjectionService {
 
   constructor(
     private readonly database: DatabaseSync,
-    private readonly executor: Pick<AutoPosterRuntimeMissionExecutor, "configured" | "getPostStatus">,
+    private readonly executor: Pick<AutoPosterRuntimeMissionExecutor, "configured" | "getPostStatus" | "reconcileProviderOperation">,
     options: {
       now?: () => Date;
       failureInjector?: (
@@ -463,9 +493,10 @@ export class AutoPosterResultProjectionService {
   /**
    * Founder/operator-triggered refresh: one bounded exact status read per
    * completed AutoPoster node, durable idempotent projection, per-node
-   * independent outcomes, and advisory escalations. Nothing here writes to
-   * AutoPoster, calls a provider, re-executes a child mission, or changes
-   * graph/node execution status.
+   * independent outcomes, and advisory escalations. YouTube records that
+   * already carry a durable provider operation receive one exact Runtime
+   * reconciliation call before projection; this never creates another
+   * provider session, re-executes a child mission, or changes graph state.
    */
   async refreshGraphResults(graphId: string): Promise<AutoPosterResultRefreshResponse> {
     const graph = this.requireGraph(graphId);
@@ -598,11 +629,54 @@ export class AutoPosterResultProjectionService {
         graph, node, queueJobId, binding, failure: status, observedAt, nodeResult,
       });
     }
+    let post = status.post;
+    if (findForbiddenProviderMaterial(post)) {
+      return this.handleCollectionFailure({
+        graph, node, queueJobId, binding,
+        failure: { ok: false, code: "invalid_response", message: OPERATOR_PROVIDER_MATERIAL_MESSAGE },
+        observedAt, nodeResult,
+      });
+    }
+    if (
+      post.provider === "youtube"
+      && post.providerOperation
+      && !TERMINAL_YOUTUBE_PROVIDER_OPERATION_STATES.has(post.providerOperation.operationState)
+    ) {
+      if (!this.executor.reconcileProviderOperation) {
+        return this.handleCollectionFailure({
+          graph, node, queueJobId, binding,
+          failure: {
+            ok: false,
+            code: "unavailable",
+            message: "Runtime provider reconciliation capability is unavailable.",
+          },
+          observedAt,
+          nodeResult,
+        });
+      }
+      const reconciliation = await this.executor.reconcileProviderOperation({
+        postId: queueJobId,
+        workspaceId: binding.workspace_id,
+        accountId: binding.account_id,
+      });
+      if (!reconciliation.ok) {
+        return this.handleCollectionFailure({
+          graph, node, queueJobId, binding, failure: reconciliation, observedAt, nodeResult,
+        });
+      }
+      post = reconciliation.post;
+      if (findForbiddenProviderMaterial(post)) {
+        return this.handleCollectionFailure({
+          graph, node, queueJobId, binding,
+          failure: { ok: false, code: "invalid_response", message: OPERATOR_PROVIDER_MATERIAL_MESSAGE },
+          observedAt, nodeResult,
+        });
+      }
+    }
     this.failureInjector?.("after_status_read_before_persistence", graph.graph_id, node.node_id);
-    const post = status.post;
 
     // 3) Validate the observation against the durable identity binding.
-    const identityViolation = this.identityViolation(node, binding, queueJobId, post);
+    const identityViolation = this.identityViolation(graph, node, binding, queueJobId, post);
     if (identityViolation) {
       const escalation = this.persistMismatch({
         graph, node, queueJobId, binding, post, observedAt, detail: identityViolation,
@@ -696,16 +770,19 @@ export class AutoPosterResultProjectionService {
     ) => AutoPosterNodeRefreshResult;
   }): { result: AutoPosterNodeRefreshResult; escalation?: AutoPosterResultEscalation } {
     const { graph, node, queueJobId, binding, failure, observedAt, nodeResult } = input;
-    const identityFailure = failure.code === "not_found"
-      || (failure.code === "invalid_response" && failure.reasonCode === "status_identity_mismatch");
+    const safeFailure = findForbiddenProviderMaterial(failure)
+      ? { ...failure, message: OPERATOR_PROVIDER_MATERIAL_MESSAGE, details: undefined }
+      : failure;
+    const identityFailure = safeFailure.code === "not_found"
+      || (safeFailure.code === "invalid_response" && safeFailure.reasonCode === "status_identity_mismatch");
     if (identityFailure) {
       // Durable fail-closed verdict: the exact bound job is missing or
       // AutoPoster answered for a different identity.
       const escalation = this.persistMismatch({
         graph, node, queueJobId, binding, post: null, observedAt,
-        detail: failure.code === "not_found"
+        detail: safeFailure.code === "not_found"
           ? "The exact bound queue job was not found in its workspace/account scope."
-          : failure.message,
+          : safeFailure.message,
       });
       return { result: nodeResult("failed", "result_identity_mismatch", queueJobId), escalation };
     }
@@ -720,12 +797,13 @@ export class AutoPosterResultProjectionService {
       reasonCode: "result_collection_unavailable",
       observedAt,
       snapshotHash: null,
-      detail: failure.message,
+      detail: safeFailure.message,
     });
     return { result: nodeResult("failed", "result_collection_unavailable", queueJobId), escalation };
   }
 
   private identityViolation(
+    graph: GraphRow,
     node: GraphNodeRow,
     binding: MissionBindingRow,
     queueJobId: string,
@@ -743,6 +821,36 @@ export class AutoPosterResultProjectionService {
     }
     if (post.runtimeAction && post.runtimeAction !== AUTOPOSTER_GRAPH_ACTION) {
       return "The job's Runtime action binding is not the reviewed schedule action.";
+    }
+    const operation = post.providerOperation;
+    if (operation) {
+      if (operation.queueId !== queueJobId) return "The provider operation identifies a different queue job.";
+      if (operation.provider !== post.provider) return "The provider operation identifies a different provider.";
+      if (operation.accountId !== binding.account_id) return "The provider operation identifies a different account.";
+      if (operation.connectedAccountId !== post.connectedAccountId) return "The provider operation connected-account identity differs.";
+      if (operation.workspaceId !== binding.workspace_id) return "The provider operation identifies a different workspace.";
+      if (operation.userId !== graph.tenant_user_id) return "The provider operation identifies a different tenant user.";
+      if (operation.graphId !== graph.graph_id) return "The provider operation identifies a different graph.";
+      if (operation.approvalActorId !== post.approvedBy || operation.approvalTimestamp !== post.approvedAt) {
+        return "The provider operation approval identity differs from the queue approval.";
+      }
+      if (operation.runtimeMissionId !== node.child_mission_id) return "The provider operation identifies a different Runtime child mission.";
+      if (operation.runtimeAction !== AUTOPOSTER_GRAPH_ACTION) return "The provider operation is not bound to the reviewed schedule action.";
+      if (operation.runtimePayloadHash !== post.runtimePayloadHash) return "The provider operation payload hash differs from the queue job.";
+      const receipt = operation.providerStatusReceipt;
+      if (receipt && (
+        receipt.queueId !== queueJobId
+        || receipt.providerOperationId !== operation.providerOperationId
+        || receipt.providerAttemptId !== operation.providerAttemptId
+        || receipt.configuredAccountId !== binding.account_id
+        || receipt.connectedAccountId !== post.connectedAccountId
+        || receipt.verifiedChannelId !== binding.account_id
+        || receipt.externalVideoId !== post.publishId
+        || receipt.mediaSha256 !== operation.mediaSha256
+      )) return "The provider receipt identity does not match the durable operation binding.";
+      if (operation.externalVideoId !== null && operation.externalVideoId !== post.publishId) {
+        return "The provider operation artifact identity differs from the queue result.";
+      }
     }
     return null;
   }
@@ -782,6 +890,7 @@ export class AutoPosterResultProjectionService {
         attemptBudgetExhausted: post.attemptBudgetExhausted,
         publishId: post.publishId,
         providerVerification: post.providerVerification,
+        providerOperation: post.providerOperation,
         runtimeMissionId: post.runtimeMissionId,
         runtimeIdempotencyKey: post.runtimeIdempotencyKey,
         runtimeAction: post.runtimeAction,
@@ -1063,7 +1172,7 @@ export class AutoPosterResultProjectionService {
 
   private requireGraph(graphId: string): GraphRow {
     const row = this.database.prepare(
-      "SELECT graph_id, graph_hash, workspace_id FROM operator_mission_graphs WHERE graph_id = ?",
+      "SELECT graph_id, graph_hash, workspace_id, tenant_user_id FROM operator_mission_graphs WHERE graph_id = ?",
     ).get(String(graphId || "").trim()) as GraphRow | undefined;
     if (!row) throw new OperatorError("Mission graph was not found.", 404);
     return row;

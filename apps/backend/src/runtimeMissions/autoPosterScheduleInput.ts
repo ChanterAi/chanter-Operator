@@ -1,6 +1,7 @@
 import {
   envelopeToRuntimeMissionRequest,
   validateMissionEnvelope,
+  type AutoPosterApprovedMediaIdentity,
   type JsonValue,
 } from "chanter-agent-runtime";
 
@@ -19,6 +20,8 @@ export const AUTOPOSTER_SCHEDULE_INPUT_FIELDS = Object.freeze([
   "title",
   "description",
   "scheduledAt",
+  "providerProofMode",
+  "approvedMedia",
 ] as const);
 
 const AUTOPOSTER_SCHEDULE_INPUT_FIELD_SET = new Set<string>(
@@ -34,6 +37,8 @@ export interface CanonicalAutoPosterSchedulePayload {
   title: string;
   description: string;
   scheduledAt: string;
+  providerProofMode: boolean;
+  approvedMedia: AutoPosterApprovedMediaIdentity | null;
 }
 
 export interface AutoPosterScheduleInputError {
@@ -65,6 +70,7 @@ export interface AutoPosterScheduleMissionInput
   requestedBy: string;
   tenantUserId: string;
   workspaceId: string | null;
+  graphId: string | null;
   product: "auto_poster";
   action: "autoposter.post.schedule";
 }
@@ -155,6 +161,36 @@ function optionalString(
     };
   }
   return { ok: true, value: normalized };
+}
+
+function approvedMediaIdentity(value: unknown): AutoPosterApprovedMediaIdentity | null {
+  const media = jsonObject(value);
+  if (!media) return null;
+  const expected = ["byteSize", "container", "fileName", "mimeType", "sha256"];
+  const actual = Object.keys(media).sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) return null;
+  const fileName = media.fileName;
+  if (
+    typeof media.sha256 !== "string"
+    || !/^[0-9a-f]{64}$/.test(media.sha256)
+    || !Number.isSafeInteger(media.byteSize)
+    || Number(media.byteSize) <= 0
+    || media.mimeType !== "video/mp4"
+    || media.container !== "mp4"
+    || typeof fileName !== "string"
+    || !fileName
+    || fileName !== fileName.trim()
+    || fileName.length > 255
+    || /[\u0000-\u001f\u007f<>:"/\\|?*]/.test(fileName)
+    || !/\.mp4$/i.test(fileName)
+  ) return null;
+  return {
+    sha256: media.sha256,
+    byteSize: Number(media.byteSize),
+    mimeType: "video/mp4",
+    fileName,
+    container: "mp4",
+  };
 }
 
 export function validateAutoPosterScheduleInput(
@@ -279,6 +315,24 @@ export function validateAutoPosterScheduleInput(
     );
   }
 
+  if (input.providerProofMode !== undefined && typeof input.providerProofMode !== "boolean") {
+    return failure("AUTOPOSTER_PROVIDER_PROOF_MODE_INVALID", "providerProofMode must be a boolean.");
+  }
+  const providerProofMode = input.providerProofMode === true;
+  const approvedMediaSupplied = input.approvedMedia !== undefined && input.approvedMedia !== null;
+  const approvedMedia = !approvedMediaSupplied
+    ? null
+    : approvedMediaIdentity(input.approvedMedia);
+  if (approvedMediaSupplied && !approvedMedia) {
+    return failure("AUTOPOSTER_APPROVED_MEDIA_INVALID", "approvedMedia must be the exact closed-world reviewed MP4 identity.");
+  }
+  if (providerProofMode && (providerValue !== "youtube" || !approvedMedia)) {
+    return failure("AUTOPOSTER_PROVIDER_PROOF_IDENTITY_REQUIRED", "YouTube provider-proof mode requires one complete approvedMedia identity.");
+  }
+  if (!providerProofMode && approvedMediaSupplied) {
+    return failure("AUTOPOSTER_APPROVED_MEDIA_WITHOUT_PROOF", "approvedMedia is only valid in provider-proof mode.");
+  }
+
   const scheduledAt = requiredString(input, "scheduledAt", 64);
   if (!scheduledAt.ok) return scheduledAt.result;
   if (
@@ -314,6 +368,8 @@ export function validateAutoPosterScheduleInput(
       title: title.value,
       description: description.value,
       scheduledAt: normalizedScheduledAt,
+      providerProofMode,
+      approvedMedia,
     },
   };
 }
@@ -330,6 +386,9 @@ export function autoPosterSchedulePayloadJson(
     ...(value.title ? { title: value.title } : {}),
     ...(value.description ? { description: value.description } : {}),
     scheduledAt: value.scheduledAt,
+    ...(value.providerProofMode
+      ? { providerProofMode: true, approvedMedia: value.approvedMedia as unknown as JsonValue }
+      : {}),
   };
 }
 
@@ -402,6 +461,23 @@ export function autoPosterScheduleInputFromEnvelope(
     { mustBeAfter: options.mustBeAfter },
   );
   if (!payload.ok) return payload;
+  const graphId = typeof request.metadata?.graphId === "string"
+    && request.metadata.graphId
+    && request.metadata.graphId === request.metadata.graphId.trim()
+    && request.metadata.graphId.length <= 160
+    && !CONTROL_CHAR_PATTERN.test(request.metadata.graphId)
+    ? request.metadata.graphId
+    : null;
+  if (payload.value.providerProofMode && !graphId) {
+    return {
+      ok: false,
+      error: {
+        code: "AUTOPOSTER_PROVIDER_PROOF_GRAPH_REQUIRED",
+        message: "Provider-proof missions require the immutable Operator graph identity.",
+        status: 409,
+      },
+    };
+  }
 
   return {
     ok: true,
@@ -414,6 +490,7 @@ export function autoPosterScheduleInputFromEnvelope(
       workspaceId: request.tenant.workspaceId ?? null,
       product: "auto_poster",
       action: "autoposter.post.schedule",
+      graphId,
       ...payload.value,
     },
   };

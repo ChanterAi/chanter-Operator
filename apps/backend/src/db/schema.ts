@@ -478,6 +478,9 @@ CREATE TABLE IF NOT EXISTS autoposter_runtime_missions (
   hashtags TEXT NOT NULL,
   title TEXT,
   description TEXT,
+  graph_id TEXT,
+  provider_proof_mode INTEGER NOT NULL DEFAULT 0 CHECK (provider_proof_mode IN (0, 1)),
+  approved_media_json TEXT,
   scheduled_at TEXT NOT NULL,
   idempotency_key TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('approval_required', 'executing', 'succeeded', 'failed', 'denied', 'validation_failed', 'duplicate', 'unavailable')),
@@ -769,6 +772,15 @@ CREATE TABLE IF NOT EXISTS operator_mission_graph_events (
 
 CREATE INDEX IF NOT EXISTS idx_operator_mission_graph_events_graph
   ON operator_mission_graph_events(graph_id, sequence);
+
+CREATE TABLE IF NOT EXISTS operator_mission_graph_replays (
+  graph_id TEXT NOT NULL REFERENCES operator_mission_graphs(graph_id) ON DELETE RESTRICT,
+  event_type TEXT NOT NULL CHECK (event_type = 'graph_submission_replayed'),
+  replay_identity TEXT NOT NULL,
+  event_id TEXT NOT NULL UNIQUE REFERENCES operator_mission_graph_events(event_id) ON DELETE RESTRICT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (graph_id, event_type, replay_identity)
+);
 
 ${safeCommitCloseoutsTableSql(true)}
 

@@ -576,6 +576,46 @@ export class MissionGraphJournal {
     });
   }
 
+  /** Atomic insert-or-read for the one authoritative submission replay event. */
+  appendAuthoritativeReplayEvent(
+    graphId: string,
+    replayIdentity: string,
+    options: MissionGraphEventInput,
+  ): MissionGraphEventRecord {
+    const graph = this.requireGraph(graphId);
+    return this.withSavepoint(() => {
+      const existing = this.database.prepare(`
+        SELECT e.*
+          FROM operator_mission_graph_replays r
+          JOIN operator_mission_graph_events e ON e.event_id = r.event_id
+         WHERE r.graph_id = ? AND r.event_type = 'graph_submission_replayed' AND r.replay_identity = ?
+      `).get(graphId, replayIdentity) as EventRow | undefined;
+      if (existing) return mapEvent(existing);
+      const eventId = this.idFactory();
+      this.appendEvent(graphId, {
+        scope: "graph",
+        nodeId: null,
+        eventType: "graph_submission_replayed",
+        previousState: graph.status,
+        newState: graph.status,
+        actor: options.actor,
+        reason: options.reason,
+        timestamp: options.timestamp,
+        evidenceReferences: options.evidenceReferences ?? [],
+        typedError: options.typedError ?? null,
+      }, eventId);
+      this.database.prepare(`
+        INSERT INTO operator_mission_graph_replays (
+          graph_id, event_type, replay_identity, event_id, created_at
+        ) VALUES (?, 'graph_submission_replayed', ?, ?, ?)
+      `).run(graphId, replayIdentity, eventId, options.timestamp);
+      const created = this.database.prepare(
+        "SELECT * FROM operator_mission_graph_events WHERE event_id = ?",
+      ).get(eventId) as unknown as EventRow;
+      return mapEvent(created);
+    });
+  }
+
   private appendEvent(
     graphId: string,
     event: {
@@ -590,6 +630,7 @@ export class MissionGraphJournal {
       evidenceReferences?: string[];
       typedError?: MissionGraphTypedError | null;
     },
+    eventId = this.idFactory(),
   ): void {
     const sequenceRow = this.database
       .prepare(
@@ -603,7 +644,7 @@ export class MissionGraphJournal {
         evidence_refs_json, typed_error_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      this.idFactory(),
+      eventId,
       graphId,
       Number(sequenceRow.next_sequence),
       event.scope,

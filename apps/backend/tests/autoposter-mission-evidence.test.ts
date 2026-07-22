@@ -23,6 +23,7 @@ import { createLoopGovernorMissionExecutor } from "../src/missions/loopGovernorR
 import { AutoPosterResultProjectionService } from "../src/missions/autoPosterResultProjectionService.js";
 import { AutoPosterObservationService } from "../src/missions/autoPosterObservationService.js";
 import { AutoPosterMissionEvidenceService } from "../src/missions/autoPosterMissionEvidenceService.js";
+import { isExactPrivateProviderProof } from "../src/missions/autoPosterProviderPredicates.js";
 import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
 
@@ -52,6 +53,7 @@ interface QueueDraft {
   publishId: string;
   providerStatus: string;
   providerVerification: AutoPosterPostStatusView["providerVerification"];
+  providerOperation: AutoPosterPostStatusView["providerOperation"];
   claimAttempts: number;
   publishAttemptBudget: number;
   lastResult: AutoPosterPostStatusView["lastResult"];
@@ -112,6 +114,7 @@ function makeAutoPosterBoundary() {
         publishId: job.publishId,
         providerStatus: job.providerStatus,
         providerVerification: job.providerVerification,
+        providerOperation: job.providerOperation,
         lockedAt: null,
         claimAttempts: job.claimAttempts,
         publishAttemptBudget: job.publishAttemptBudget,
@@ -128,6 +131,15 @@ function makeAutoPosterBoundary() {
     },
     async validateMedia() {
       return { ok: true, valid: true, classification: "video", policy: { videoOnly: true, allowedExtensions: [".mp4"] } };
+    },
+    async reconcileProviderOperation(params) {
+      const status = await port.getPostStatus(params);
+      if (!status.ok) return status;
+      return {
+        ok: true,
+        classification: status.post.providerOperation?.operationState ?? "provider_operation_not_found",
+        post: status.post,
+      };
     },
     async schedulePost(params) {
       const existing = jobs.get(params.idempotencyKey);
@@ -150,6 +162,7 @@ function makeAutoPosterBoundary() {
         publishId: "",
         providerStatus: "",
         providerVerification: null,
+        providerOperation: null,
         claimAttempts: 0,
         publishAttemptBudget: params.provider === "youtube" ? 0 : 5,
         lastResult: null,
@@ -268,6 +281,8 @@ function youtubeScheduleGraphEnvelope(graphId = "youtube-evidence-graph") {
         hashtags: "#chanter #evidence",
         title: "CHANTER private provider proof",
         description: "Private operational validation artifact.",
+        providerProofMode: true,
+        approvedMedia: { sha256: "a".repeat(64), byteSize: 2_323_295, mimeType: "video/mp4", fileName: "evidence.mp4", container: "mp4" },
         scheduledAt: SCHEDULED_AT,
       },
       dependsOn: [],
@@ -275,7 +290,232 @@ function youtubeScheduleGraphEnvelope(graphId = "youtube-evidence-graph") {
   };
 }
 
+function completedPrivateOperation(job: QueueDraft): NonNullable<AutoPosterPostStatusView["providerOperation"]> {
+  const mediaSha256 = "a".repeat(64);
+  const providerOperationId = "ytop_evidence_private";
+  const providerAttemptId = "ytattempt_evidence_private";
+  return {
+    schemaVersion: "chanter.autoposter.youtube-provider-operation.v1",
+    providerOperationId,
+    providerAttemptId,
+    provider: "youtube",
+    operationState: "completed_private",
+    queueId: job.id,
+    userId: OWNER_ID,
+    workspaceId: WORKSPACE_ID,
+    accountId: YOUTUBE_ACCOUNT,
+    connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+    approvalActorId: "founder-evidence",
+    approvalTimestamp: NOW,
+    approvedAttemptNumber: 1,
+    runtimeMissionId: job.missionId,
+    graphId: job.missionId.slice("graph:".length, job.missionId.indexOf(":node:")),
+    runtimeAction: job.action,
+    runtimePayloadHash: job.missionPayloadHash,
+    approvedMediaSha256: mediaSha256,
+    providerProofMode: true,
+    approvedMedia: { sha256: mediaSha256, byteSize: 2_323_295, mimeType: "video/mp4", fileName: "evidence.mp4", container: "mp4" },
+    bindingSha256: "b".repeat(64),
+    mediaSha256,
+    mediaByteSize: 2_323_295,
+    mediaMimeType: "video/mp4",
+    mediaContainer: "mp4",
+    mediaFileName: "evidence.mp4",
+    mediaSourceId: "https://cdn.example.com/evidence.mp4",
+    sessionCreatedAt: NOW,
+    uploadStartedAt: NOW,
+    uploadCompletedAt: NOW,
+    acceptedByteOffset: 2_323_295,
+    externalVideoId: "yt-private-proof-1",
+    providerResponseSha256: "c".repeat(64),
+    providerStatusReceiptSha256: "d".repeat(64),
+    providerStatusReceipt: {
+      provider: "youtube",
+      queueId: job.id,
+      providerOperationId,
+      providerAttemptId,
+      userId: OWNER_ID,
+      workspaceId: WORKSPACE_ID,
+      runtimeMissionId: job.missionId,
+      graphId: job.missionId.slice("graph:".length, job.missionId.indexOf(":node:")),
+      mediaSha256,
+      approvedMedia: { sha256: mediaSha256, byteSize: 2_323_295, mimeType: "video/mp4", fileName: "evidence.mp4", container: "mp4" },
+      providerProofMode: true,
+      configuredAccountId: YOUTUBE_ACCOUNT,
+      connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+      verifiedChannelId: YOUTUBE_ACCOUNT,
+      authenticatedChannelId: YOUTUBE_ACCOUNT,
+      safeChannelTitle: "CHANTER",
+      safeChannelHandle: "@chantercy",
+      externalVideoId: "yt-private-proof-1",
+      expectedTitle: "CHANTER private provider proof",
+      exactTitleMatch: true,
+      artifactExists: true,
+      privacyStatus: "private",
+      uploadStatus: "processed",
+      processingStatus: "succeeded",
+      verificationMethod: "youtube.videos.list+youtube.channels.list",
+      verificationTimestamp: NOW,
+      canonicalResponseSha256: "e".repeat(64),
+    },
+    mutationSummary: {
+      providerSessionInitiationCount: 1,
+      mediaUploadAttemptCount: 1,
+      confirmedVideoArtifactCount: 1,
+      existingResourceUpdateCount: 0,
+      deleteCount: 0,
+      reconciliationStatusReadCount: 1,
+    },
+    reconciliationAttemptCount: 1,
+    reconciliationAttemptBudget: 3,
+    reconciliationLease: null,
+    reconciliationFencingToken: 1,
+    lastReconciledAt: NOW,
+    lastOperationErrorCode: null,
+    eventCount: 8,
+    eventDigestSha256: "f".repeat(64),
+  };
+}
+
+function terminalZeroMutationOperation(job: QueueDraft): NonNullable<AutoPosterPostStatusView["providerOperation"]> {
+  return {
+    schemaVersion: "chanter.autoposter.youtube-provider-operation.v1",
+    providerOperationId: "ytop_evidence_terminal",
+    providerAttemptId: "ytattempt_evidence_terminal",
+    provider: "youtube",
+    operationState: "terminal_failure",
+    queueId: job.id,
+    userId: OWNER_ID,
+    workspaceId: WORKSPACE_ID,
+    accountId: YOUTUBE_ACCOUNT,
+    connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+    approvalActorId: "founder-evidence",
+    approvalTimestamp: NOW,
+    approvedAttemptNumber: 1,
+    runtimeMissionId: job.missionId,
+    graphId: job.missionId.slice("graph:".length, job.missionId.indexOf(":node:")),
+    runtimeAction: job.action,
+    runtimePayloadHash: job.missionPayloadHash,
+    approvedMediaSha256: "a".repeat(64),
+    providerProofMode: true,
+    approvedMedia: { sha256: "a".repeat(64), byteSize: 2_323_295, mimeType: "video/mp4", fileName: "evidence.mp4", container: "mp4" },
+    bindingSha256: null,
+    mediaSha256: null,
+    mediaByteSize: null,
+    mediaMimeType: null,
+    mediaContainer: null,
+    mediaFileName: null,
+    mediaSourceId: null,
+    sessionCreatedAt: null,
+    uploadStartedAt: null,
+    uploadCompletedAt: null,
+    acceptedByteOffset: 0,
+    externalVideoId: null,
+    providerResponseSha256: null,
+    providerStatusReceiptSha256: null,
+    providerStatusReceipt: null,
+    mutationSummary: {
+      providerSessionInitiationCount: 0,
+      mediaUploadAttemptCount: 0,
+      confirmedVideoArtifactCount: 0,
+      existingResourceUpdateCount: 0,
+      deleteCount: 0,
+      reconciliationStatusReadCount: 0,
+    },
+    reconciliationAttemptCount: 0,
+    reconciliationAttemptBudget: 3,
+    reconciliationLease: null,
+    reconciliationFencingToken: 0,
+    lastReconciledAt: null,
+    lastOperationErrorCode: "PUBLISH_ATTEMPT_BUDGET_EXHAUSTED",
+    eventCount: 2,
+    eventDigestSha256: "9".repeat(64),
+  };
+}
+
+function completedPrivatePost(job: QueueDraft): AutoPosterPostStatusView {
+  return {
+    id: job.id,
+    provider: "youtube",
+    connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+    accountId: YOUTUBE_ACCOUNT,
+    username: "chantercy",
+    workspaceId: WORKSPACE_ID,
+    status: "posted",
+    scheduledAt: job.scheduledAt,
+    approved: true,
+    approvalState: "approved",
+    approvedAt: NOW,
+    approvedBy: "founder-evidence",
+    mediaType: "video",
+    captionSummary: "",
+    createdAt: NOW,
+    updatedAt: NOW,
+    postedAt: NOW,
+    publishId: "yt-private-proof-1",
+    providerStatus: "uploaded_private",
+    providerVerification: {
+      provider: "youtube",
+      externalVideoId: "yt-private-proof-1",
+      channelId: YOUTUBE_ACCOUNT,
+      channelTitle: "CHANTER",
+      channelHandle: "@chantercy",
+      title: "CHANTER private provider proof",
+      privacyStatus: "private",
+      uploadStatus: "processed",
+      processingStatus: "succeeded",
+      verifiedAt: NOW,
+      uploadMethod: "resumable",
+    },
+    providerOperation: completedPrivateOperation(job),
+    lockedAt: null,
+    claimAttempts: 1,
+    publishAttemptBudget: 1,
+    attemptBudgetExhausted: true,
+    runtimeMissionId: job.missionId,
+    runtimeIdempotencyKey: job.idempotencyKey,
+    runtimeAction: job.action,
+    runtimePayloadHash: job.missionPayloadHash,
+    lastResult: null,
+    history: [],
+    lastErrorMessage: "",
+  };
+}
+
 describe("Phase — persistent AutoPoster mission evidence bundle", () => {
+  it("requires an explicitly successful coherent canonical receipt for exact private proof", async () => {
+    const { graphs, jobs } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope("provider-status-coherence"));
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+    const job = [...jobs.values()][0]!;
+
+    expect(isExactPrivateProviderProof(completedPrivatePost(job))).toBe(true);
+
+    const rejectedUpload = completedPrivatePost(job);
+    rejectedUpload.providerOperation!.providerStatusReceipt!.uploadStatus = "rejected";
+    expect(isExactPrivateProviderProof(rejectedUpload)).toBe(false);
+
+    const failedProcessing = completedPrivatePost(job);
+    failedProcessing.providerOperation!.providerStatusReceipt!.processingStatus = "failed";
+    expect(isExactPrivateProviderProof(failedProcessing)).toBe(false);
+
+    const failedReceiptSuccessfulVerification = completedPrivatePost(job);
+    failedReceiptSuccessfulVerification.providerOperation!.providerStatusReceipt!.uploadStatus = "rejected";
+    failedReceiptSuccessfulVerification.providerOperation!.providerStatusReceipt!.processingStatus = "failed";
+    expect(isExactPrivateProviderProof(failedReceiptSuccessfulVerification)).toBe(false);
+
+    const successfulReceiptFailedVerification = completedPrivatePost(job);
+    successfulReceiptFailedVerification.providerVerification!.processingStatus = "failed";
+    expect(isExactPrivateProviderProof(successfulReceiptFailedVerification)).toBe(false);
+
+    const unknownReceiptStatus = completedPrivatePost(job);
+    unknownReceiptStatus.providerOperation!.providerStatusReceipt!.uploadStatus = "provider_mystery";
+    expect(isExactPrivateProviderProof(unknownReceiptStatus)).toBe(false);
+  });
+
   it("generates a complete, redacted manifest and converges to exactly one escalation", async () => {
     const { graphs, observation, evidence, evidenceDir, advanceSeconds } = realHarness();
     const submitted = graphs.submitGraph(scheduleGraphEnvelope());
@@ -283,7 +523,7 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
       approvedBy: "founder-evidence",
       graphHash: submitted.graphHash,
     });
-    expect(completed.status).toBe("completed");
+    expect(completed.status, JSON.stringify(completed.nodes)).toBe("completed");
 
     advanceSeconds(16);
     await observation.runObservationBatch({ leaseOwner: "test-runner" });
@@ -293,6 +533,17 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     const result = await evidence.generateEvidenceBundle(submitted.graphId, {
       repositoryHeads: { operator: "0123456789abcdef0123456789abcdef01234567", "not-a-repo!!": "zz", short: "ab" },
       runtimeProfile: "local-mission",
+      media: { fileName: "caller-claim.mp4", sha256: "7".repeat(64), byteSize: 10, mimeType: "video/mp4" },
+      replay: {
+        outcome: "exact_replay_same_identity",
+        replayed: true,
+        sameGraphId: true,
+        sameResultIdentity: true,
+        providerUploadCountBefore: 1,
+        providerUploadCountAfter: 1,
+        additionalUploadCount: 0,
+        existingResourceMutations: 0,
+      },
     });
 
     expect(result.path).toBe(path.join(evidenceDir, submitted.graphId, "manifest.json"));
@@ -314,6 +565,10 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     // Only the well-formed head survives sanitization; the malformed entry and the too-short "hash" are dropped.
     expect(result.manifest.repositoryHeads).toEqual({ operator: "0123456789abcdef0123456789abcdef01234567" });
     expect(result.manifest.runtimeProfile).toBe("local-mission");
+    expect(result.manifest.media).toBeNull();
+    expect(result.manifest.providerArtifact).toBeNull();
+    expect((result.manifest.safetyAssertions as Record<string, unknown>).exactlyOneUpload).toBe(false);
+    expect(result.manifest.callerAttestation).toMatchObject({ authoritative: false });
 
     const safety = result.manifest.safety as Record<string, unknown>;
     expect((safety.structuralAssertion as Record<string, unknown>).neverPublished).toBe(true);
@@ -356,6 +611,7 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
       postedAt: NOW,
       publishId: "yt-private-proof-1",
       providerStatus: "uploaded_private",
+      providerOperation: completedPrivateOperation(job),
       claimAttempts: 1,
       publishAttemptBudget: 1,
       providerVerification: {
@@ -374,7 +630,8 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     });
     advanceSeconds(16);
     const observed = await observation.runObservationBatch({ leaseOwner: "test-runner" });
-    expect(observed.results[0]?.projectionStatus).toBe("uploaded_private");
+    expect(observed.results[0]?.projectionStatus, JSON.stringify(observed.results[0])).toBe("uploaded_private");
+    expect(graphs.submitGraph(youtubeScheduleGraphEnvelope()).replayed).toBe(true);
 
     const result = await evidence.generateEvidenceBundle(submitted.graphId, {
       media: {
@@ -401,18 +658,28 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
       verifiedChannelId: YOUTUBE_ACCOUNT,
       verifiedChannelHandle: "@chantercy",
       externalYouTubeVideoId: "yt-private-proof-1",
-      uploadMethod: "resumable",
       verifiedPrivacyStatus: "private",
-      providerUploadCount: 1,
+      providerStatusReceiptSha256: "d".repeat(64),
     });
     expect(result.manifest.media).toEqual({
       fileName: "evidence.mp4",
       sha256: "a".repeat(64),
       byteSize: 2_323_295,
       mimeType: "video/mp4",
+      sourceId: "https://cdn.example.com/evidence.mp4",
+      bindingSha256: "b".repeat(64),
     });
     expect(result.manifest.evidenceReferences).toContain("youtube-video:yt-private-proof-1");
-    expect(result.manifest.replay).toMatchObject({ additionalUploadCount: 0, existingResourceMutations: 0 });
+    expect(result.manifest.mutationSummary).toMatchObject({
+      providerSessionInitiationCount: 1,
+      confirmedVideoArtifactCount: 1,
+      existingResourceUpdateCount: 0,
+      deleteCount: 0,
+    });
+    expect(result.manifest.callerAttestation).toMatchObject({
+      replay: { additionalUploadCount: 0, existingResourceMutations: 0 },
+      authoritative: false,
+    });
     expect(result.manifest.safetyAssertions).toEqual({
       exactlyOneUpload: true,
       privateVisibilityVerified: true,
@@ -420,9 +687,12 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
       noExistingResourceModified: true,
       zeroProviderMutationProven: false,
       attemptBudgetExhausted: true,
-      noAutomaticRetryScheduled: false,
+      noAutomaticRetryScheduled: true,
       secretsRedacted: true,
     });
+    expect((result.manifest.safetyAssertionEvidence as Record<string, string[]>).exactlyOneUpload.length).toBeGreaterThan(3);
+    expect((result.manifest.safetyAssertionEvidence as Record<string, string[]>).secretsRedacted)
+      .toEqual(["final-artifact-secret-scan:passed"]);
   });
 
   it("retains an exhausted pre-provider real-run closeout with zero external mutations", async () => {
@@ -444,6 +714,7 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
       publishId: "",
       providerStatus: "",
       providerVerification: null,
+      providerOperation: terminalZeroMutationOperation(job),
       claimAttempts: 5,
       publishAttemptBudget: 1,
       lastResult: {
@@ -467,7 +738,8 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
 
     advanceSeconds(16);
     const observed = await observation.runObservationBatch({ leaseOwner: "test-runner" });
-    expect(observed.results[0]?.projectionStatus).toBe("failed");
+    expect(observed.results[0]?.projectionStatus, JSON.stringify(observed.results[0])).toBe("failed");
+    expect(graphs.submitGraph(youtubeScheduleGraphEnvelope()).replayed).toBe(true);
 
     const input = {
       replay: {
@@ -500,25 +772,23 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     expect(replayed.path).toBe(first.path);
     expect(first.manifest.providerArtifact).toBeNull();
     expect(first.manifest.operationalCloseout).toMatchObject({
-      guardedSchedulerTickCount: 1,
-      claimAttemptsAtDisconnect: 4,
-      finalClaimAttempts: 5,
       claimAttempts: 5,
       publishAttemptBudget: 1,
       attemptBudgetExhausted: true,
       durableDraftStatus: "failed",
-      terminalClassification: "failed_pre_provider_attempt_budget_exhausted",
-      externalMutationCount: 0,
       externalVideoId: null,
-      providerVerification: null,
       postedAt: null,
+      providerOperationId: "ytop_evidence_terminal",
     });
     expect((first.manifest.operationalCloseout as Record<string, unknown>).publishAttemptTimestamps)
       .toEqual(attemptTimes);
-    expect(first.manifest.replay).toMatchObject({
-      providerUploadCountBefore: 0,
-      providerUploadCountAfter: 0,
-      additionalUploadCount: 0,
+    expect(first.manifest.callerAttestation).toMatchObject({
+      replay: {
+        providerUploadCountBefore: 0,
+        providerUploadCountAfter: 0,
+        additionalUploadCount: 0,
+      },
+      authoritative: false,
     });
     expect(first.manifest.safetyAssertions).toMatchObject({
       exactlyOneUpload: false,
@@ -529,9 +799,144 @@ describe("Phase — persistent AutoPoster mission evidence bundle", () => {
     });
   });
 
+  it("a rejected canonical receipt with successful verification emits no positive provider-proof assertions", async () => {
+    const { graphs, evidence, jobs, evidenceDir } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope("receipt-verification-contradiction"));
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+    const job = [...jobs.values()][0]!;
+    const contradictedPost = completedPrivatePost(job);
+    contradictedPost.providerOperation!.providerStatusReceipt!.uploadStatus = "rejected";
+    contradictedPost.providerOperation!.providerStatusReceipt!.processingStatus = "failed";
+    Object.assign(job, {
+      approved: contradictedPost.approved,
+      status: contradictedPost.status,
+      postedAt: contradictedPost.postedAt,
+      publishId: contradictedPost.publishId,
+      providerStatus: contradictedPost.providerStatus,
+      providerOperation: contradictedPost.providerOperation,
+      providerVerification: contradictedPost.providerVerification,
+      claimAttempts: contradictedPost.claimAttempts,
+      publishAttemptBudget: contradictedPost.publishAttemptBudget,
+    });
+
+    await expect(evidence.generateEvidenceBundle(submitted.graphId)).rejects.toMatchObject({
+      code: "OPERATOR_EVIDENCE_PROVIDER_VERIFICATION_INVALID",
+    });
+    expect(existsSync(path.join(evidenceDir, submitted.graphId))).toBe(false);
+  });
+
+  it("ADV-11 contradictory provider state emits no positive evidence artifact", async () => {
+    const { graphs, evidence, jobs, evidenceDir } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope("adv-11-contradictory-proof"));
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+    const job = [...jobs.values()][0]!;
+    const operation = completedPrivateOperation(job);
+    operation.operationState = "contradictory_public";
+    Object.assign(job, {
+      approved: true,
+      status: "posted",
+      postedAt: NOW,
+      publishId: "yt-private-proof-1",
+      providerStatus: "contradictory_public",
+      providerOperation: operation,
+      providerVerification: {
+        provider: "youtube",
+        externalVideoId: "yt-private-proof-1",
+        channelId: YOUTUBE_ACCOUNT,
+        channelTitle: "CHANTER",
+        channelHandle: "@chantercy",
+        title: "CHANTER private provider proof",
+        privacyStatus: "private",
+        uploadStatus: "processed",
+        processingStatus: "succeeded",
+        verifiedAt: NOW,
+        uploadMethod: "resumable",
+      },
+    });
+    await expect(evidence.generateEvidenceBundle(submitted.graphId)).rejects.toMatchObject({
+      code: "OPERATOR_EVIDENCE_PROVIDER_VERIFICATION_INVALID",
+    });
+    expect(existsSync(path.join(evidenceDir, submitted.graphId))).toBe(false);
+  });
+
+  it("ADV-12 reconciliation activity suppresses zero-mutation proof", async () => {
+    const { graphs, evidence, jobs, evidenceDir } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope("adv-12-zero-mutation"));
+    await graphs.approveGraph(submitted.graphId, {
+      approvedBy: "founder-youtube-proof",
+      graphHash: submitted.graphHash,
+    });
+    const job = [...jobs.values()][0]!;
+    const operation = terminalZeroMutationOperation(job);
+    operation.reconciliationAttemptCount = 1;
+    operation.lastReconciledAt = NOW;
+    Object.assign(job, {
+      approved: true,
+      status: "failed",
+      postedAt: null,
+      publishId: "",
+      providerStatus: "",
+      providerVerification: null,
+      providerOperation: operation,
+      attemptBudgetExhausted: true,
+      lastResult: { completedAt: NOW, willRetry: false },
+    });
+    await expect(evidence.generateEvidenceBundle(submitted.graphId)).rejects.toMatchObject({
+      code: "OPERATOR_EVIDENCE_PUBLISH_SAFETY_VIOLATION",
+    });
+    expect(existsSync(path.join(evidenceDir, submitted.graphId))).toBe(false);
+  });
+
   it("fails closed with a clean error for an unknown graph", async () => {
     const { evidence } = realHarness();
     await expect(evidence.generateEvidenceBundle("no-such-graph")).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("does not misclassify a historical YouTube verification as provider-operation proof", async () => {
+    const { graphs, evidence, jobs } = realHarness();
+    const submitted = graphs.submitGraph(youtubeScheduleGraphEnvelope("historical-youtube-evidence"));
+    await graphs.approveGraph(submitted.graphId, { approvedBy: "founder-evidence", graphHash: submitted.graphHash });
+    const job = [...jobs.values()][0]!;
+    Object.assign(job, {
+      approved: true,
+      status: "posted",
+      postedAt: NOW,
+      publishId: "historical-video",
+      providerStatus: "uploaded_private",
+      providerOperation: null,
+      providerVerification: {
+        provider: "youtube",
+        externalVideoId: "historical-video",
+        channelId: YOUTUBE_ACCOUNT,
+        channelTitle: "CHANTER",
+        channelHandle: "@chantercy",
+        title: "CHANTER private provider proof",
+        privacyStatus: "private",
+        uploadStatus: "processed",
+        processingStatus: "succeeded",
+        verifiedAt: NOW,
+        uploadMethod: "resumable",
+      },
+    });
+
+    await expect(evidence.generateEvidenceBundle(submitted.graphId, {
+      replay: {
+        outcome: "exact_replay_same_identity",
+        replayed: true,
+        sameGraphId: true,
+        sameResultIdentity: true,
+        providerUploadCountBefore: 1,
+        providerUploadCountAfter: 1,
+        additionalUploadCount: 0,
+        existingResourceMutations: 0,
+      },
+    })).rejects.toMatchObject({ code: "OPERATOR_EVIDENCE_PROVIDER_VERIFICATION_INVALID" });
   });
 
   it("fails closed (throws, never writes) when the live safety re-check finds the draft approved or posted", async () => {

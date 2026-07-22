@@ -490,6 +490,22 @@ describe("Phase 2D mission graph spine", () => {
     expect(replay.status).toBe(200);
     expect(replay.body.replayed).toBe(true);
     expect(graphTableCounts(harness.database).graphs).toBe(1);
+    const [concurrentReplayA, concurrentReplayB] = await Promise.all([
+      submitGraph(harness),
+      submitGraph(harness),
+    ]);
+    const replayEventsA = concurrentReplayA.body.events.filter(
+      (event: { eventType: string }) => event.eventType === "graph_submission_replayed",
+    );
+    const replayEventsB = concurrentReplayB.body.events.filter(
+      (event: { eventType: string }) => event.eventType === "graph_submission_replayed",
+    );
+    expect(replayEventsA).toHaveLength(1);
+    expect(replayEventsB).toHaveLength(1);
+    expect(replayEventsA[0].eventId).toBe(replayEventsB[0].eventId);
+    expect((harness.database.prepare(
+      "SELECT COUNT(*) AS count FROM operator_mission_graph_replays WHERE graph_id = ?",
+    ).get(GRAPH_ID) as { count: number }).count).toBe(1);
 
     const changedContent = await submitGraph(harness, graphEnvelope({
       nodes: [

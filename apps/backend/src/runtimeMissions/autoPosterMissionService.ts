@@ -3,10 +3,12 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   AUTOPOSTER_ACTIONS,
   createRuntimeMissionPayloadHash,
+  type AutoPosterApprovedMediaIdentity,
   type AutoPosterConnectedAccountListSuccess,
   type AutoPosterConnectedAccountView,
   type AutoPosterPortFailure,
   type AutoPosterScheduleReconciliationSuccess,
+  type JsonValue,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
   type RuntimeMissionStatus,
@@ -66,6 +68,9 @@ export interface AutoPosterRuntimeMission {
   hashtags: string;
   title: string | null;
   description: string | null;
+  graphId: string | null;
+  providerProofMode: boolean;
+  approvedMedia: AutoPosterApprovedMediaIdentity | null;
   scheduledAt: string;
   idempotencyKey: string;
   status: AutoPosterMissionStatus;
@@ -143,6 +148,9 @@ interface MissionRow {
   hashtags: string;
   title: string | null;
   description: string | null;
+  graph_id: string | null;
+  provider_proof_mode: number;
+  approved_media_json: string | null;
   scheduled_at: string;
   idempotency_key: string;
   status: AutoPosterMissionStatus;
@@ -167,6 +175,9 @@ interface CanonicalScheduleMissionInput {
   hashtags: string;
   title: string;
   description: string;
+  graphId: string | null;
+  providerProofMode: boolean;
+  approvedMedia: AutoPosterApprovedMediaIdentity | null;
   scheduledAt: string;
 }
 
@@ -456,6 +467,11 @@ function mapMission(
     hashtags: row.hashtags,
     title: row.title,
     description: row.description,
+    graphId: row.graph_id,
+    providerProofMode: row.provider_proof_mode === 1,
+    approvedMedia: row.approved_media_json
+      ? JSON.parse(row.approved_media_json) as AutoPosterApprovedMediaIdentity
+      : null,
     scheduledAt: row.scheduled_at,
     idempotencyKey: row.idempotency_key,
     status: row.status,
@@ -673,6 +689,11 @@ export class AutoPosterMissionService {
         ...(input.title ? { title: input.title } : {}),
         ...(input.description ? { description: input.description } : {}),
         scheduledAt: input.scheduledAt,
+        ...(input.providerProofMode ? {
+          graphId: input.graphId!,
+          providerProofMode: true,
+          approvedMedia: input.approvedMedia! as unknown as JsonValue,
+        } : {}),
       },
       idempotencyKey: input.idempotencyKey,
     });
@@ -734,6 +755,9 @@ export class AutoPosterMissionService {
       || input.hashtags !== row.hashtags
       || (input.title || null) !== row.title
       || (input.description || null) !== row.description
+      || input.graphId !== row.graph_id
+      || input.providerProofMode !== (row.provider_proof_mode === 1)
+      || (input.approvedMedia ? JSON.stringify(input.approvedMedia) : null) !== row.approved_media_json
       || input.scheduledAt !== row.scheduled_at
     ) {
       this.bindingMismatch(
@@ -919,8 +943,18 @@ export class AutoPosterMissionService {
       hashtags,
       title,
       description,
+      providerProofMode,
+      approvedMedia,
       scheduledAt: normalizedScheduledAt,
     } = scheduleValidation.value;
+    const graphId = optionalExactIdentifier(input, "graphId", 160);
+    if (providerProofMode && !graphId) {
+      throw new OperatorError(
+        "Provider-proof missions require one immutable graph identity.",
+        409,
+        "AUTOPOSTER_PROVIDER_PROOF_GRAPH_REQUIRED",
+      );
+    }
 
     this.assertContainsNoProtectedValue([
       missionId,
@@ -953,6 +987,9 @@ export class AutoPosterMissionService {
       hashtags,
       title,
       description,
+      graphId,
+      providerProofMode,
+      approvedMedia,
       scheduledAt: normalizedScheduledAt,
     };
     const existing = this.findExistingCreate(canonicalInput);
@@ -1016,9 +1053,10 @@ export class AutoPosterMissionService {
           `INSERT INTO autoposter_runtime_missions (
             mission_id, trace_id, product, action, actor_id, workspace_id,
             account_id, provider, media_url, caption, hashtags, title,
-            description, scheduled_at, idempotency_key, status,
+            description, graph_id, provider_proof_mode, approved_media_json,
+            scheduled_at, idempotency_key, status,
             approval_required, approved_by, runtime_result_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_required', 1, NULL, NULL, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_required', 1, NULL, NULL, ?, ?)`,
         )
         .run(
           resolvedMissionId,
@@ -1034,6 +1072,9 @@ export class AutoPosterMissionService {
           hashtags,
           title || null,
           description || null,
+          graphId,
+          providerProofMode ? 1 : 0,
+          approvedMedia ? JSON.stringify(approvedMedia) : null,
           normalizedScheduledAt,
           resolvedIdempotencyKey,
           timestamp,
@@ -1119,6 +1160,11 @@ export class AutoPosterMissionService {
         ...(mission.title ? { title: mission.title } : {}),
         ...(mission.description ? { description: mission.description } : {}),
         scheduledAt: mission.scheduledAt,
+        ...(mission.providerProofMode ? {
+          graphId: mission.graphId!,
+          providerProofMode: true,
+          approvedMedia: mission.approvedMedia! as unknown as JsonValue,
+        } : {}),
       },
       approval: { approved: true, approvedBy },
       idempotencyKey: mission.idempotencyKey,

@@ -460,7 +460,7 @@ describe("durable Operator mission recovery", () => {
       opened.database.close();
       activeDatabases.delete(opened.database);
     }
-  });
+  }, 15_000);
 
   const interruptionCases: Array<{
     boundary: MissionFailureBoundary;

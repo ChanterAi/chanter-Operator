@@ -654,7 +654,7 @@ describe("Phase 2E-C claiming, leases, and concurrency", () => {
 });
 
 describe("Phase 2E-C bounded backoff and outcome convergence", () => {
-  it("re-observes non-terminal truth on the exact 15/30/60/120 policy and converges terminal success", async () => {
+  it("re-observes on the exact 15/30/60/120 policy and escalates historical YouTube success as unproven", async () => {
     const boundary = makeBoundary();
     const harness = createHarness(boundary);
     await completedGraph(harness);
@@ -725,20 +725,20 @@ describe("Phase 2E-C bounded backoff and outcome convergence", () => {
     });
     const third = await harness.observation.runObservationBatch({});
     const youtubeRun = third.results.find((result) => result.nodeId === "youtube_node")!;
-    expect(youtubeRun.outcomeClass).toBe("converged");
-    expect(youtubeRun.projectionStatus).toBe("uploaded_private");
+    expect(youtubeRun.outcomeClass).toBe("escalation_required");
+    expect(youtubeRun.projectionStatus).toBe("manual_review_required");
     expect(youtubeRun.retryDelaySeconds).toBeNull();
     const tiktokRun = third.results.find((result) => result.nodeId === "tiktok_node")!;
     expect(tiktokRun.outcomeClass).toBe("continue_observing");
     expect(tiktokRun.retryDelaySeconds).toBe(120);
 
-    // Canonical state model, part 1: terminal success converges the durable
+    // Canonical state model, part 1: historical success without a durable
     // observation JOB (this table) — never the mission graph/node execution
-    // record. "Converges the node" in earlier reporting language referred to
-    // this job/result layer, not to operator_mission_graph_nodes.
+    // provider operation escalates the durable observation job and never
+    // rewrites operator_mission_graph_nodes.
     const convergedJob = harness.observation.getJobDetail(youtubeRun.observationJobId);
-    expect(convergedJob.job.status).toBe("converged");
-    expect(convergedJob.job.convergenceReason).toBe("uploaded_private");
+    expect(convergedJob.job.status).toBe("escalation_required");
+    expect(convergedJob.job.convergenceReason).toBe("legacy_unproven");
     expect(convergedJob.job.lastSuccessAt).not.toBeNull();
     expect(convergedJob.job.nextAttemptAt).toBeNull();
     expect(convergedJob.attempts).toHaveLength(3);
@@ -748,14 +748,14 @@ describe("Phase 2E-C bounded backoff and outcome convergence", () => {
     // Canonical state model, part 2: the graph-level RESULT/OUTCOME
     // projection (Phase 2E-B's durable per-node read model, read here
     // through the exact same service the manual refresh route uses) reflects
-    // the terminal success for youtube_node and the still-open state for
+    // the unproven terminal state for youtube_node and the still-open state for
     // tiktok_node — this is the "graph-level result projection" that
     // converges; it is derived from operator_autoposter_result_projections,
     // never from operator_mission_graph_nodes.
     const projectionsAfterConvergence = harness.results.getProjections("phase2ec-graph");
     const youtubeProjection = projectionsAfterConvergence.nodes
       .find((node) => node.nodeId === "youtube_node")!.projection!;
-    expect(youtubeProjection.projectionStatus).toBe("uploaded_private");
+    expect(youtubeProjection.projectionStatus).toBe("manual_review_required");
     const tiktokProjection = projectionsAfterConvergence.nodes
       .find((node) => node.nodeId === "tiktok_node")!.projection!;
     expect(tiktokProjection.projectionStatus).toBe("processing"); // still open per the truth set just above
@@ -767,7 +767,7 @@ describe("Phase 2E-C bounded backoff and outcome convergence", () => {
     expect(tableRows(harness.database, "operator_mission_graph_nodes"))
       .toEqual(executionStateAfterGraphCompletion);
 
-    // A converged job is never claimed or re-polled again.
+    // A terminally escalated job is never claimed or re-polled again.
     const callsAfter = boundary.statusCalls.length;
     harness.advanceSeconds(3600);
     const fourth = await harness.observation.runObservationBatch({});

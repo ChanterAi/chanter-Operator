@@ -74,6 +74,7 @@ interface Boundary {
   statusCalls: AutoPosterPostStatusParams[];
   statusViews: Map<string, AutoPosterPostStatusView>;
   statusFailures: Map<string, AutoPosterPortFailure>;
+  reconciliationCalls: AutoPosterPostStatusParams[];
   providerPublishCalls: number;
   jobByNode(suffix: "tiktok_node" | "youtube_node", graphId?: string): QueueDraft;
   defaultView(job: QueueDraft): AutoPosterPostStatusView;
@@ -101,6 +102,7 @@ function makeBoundary(): Boundary {
   const statusCalls: AutoPosterPostStatusParams[] = [];
   const statusViews = new Map<string, AutoPosterPostStatusView>();
   const statusFailures = new Map<string, AutoPosterPortFailure>();
+  const reconciliationCalls: AutoPosterPostStatusParams[] = [];
 
   const boundary: Boundary = {
     jobs,
@@ -108,6 +110,7 @@ function makeBoundary(): Boundary {
     statusCalls,
     statusViews,
     statusFailures,
+    reconciliationCalls,
     providerPublishCalls: 0,
     port: undefined as unknown as AutoPosterOperationsPort,
     jobByNode(suffix, graphId = "phase2eb-graph") {
@@ -139,6 +142,7 @@ function makeBoundary(): Boundary {
         publishId: "",
         providerStatus: "",
         providerVerification: null,
+        providerOperation: null,
         lockedAt: null,
         claimAttempts: 0,
         publishAttemptBudget: 5,
@@ -192,6 +196,17 @@ function makeBoundary(): Boundary {
         valid: true,
         classification: "video",
         policy: { videoOnly: true, allowedExtensions: [".mp4"] },
+      };
+    },
+    async reconcileProviderOperation(params) {
+      reconciliationCalls.push(params);
+      const job = [...jobs.values()].find((candidate) => candidate.id === params.postId);
+      if (!job) return { ok: false, code: "not_found", message: "not found" };
+      const post = statusViews.get(params.postId) ?? boundary.defaultView(job);
+      return {
+        ok: true,
+        classification: post.providerOperation?.operationState ?? "provider_operation_not_found",
+        post,
       };
     },
     async schedulePost(params) {
@@ -339,7 +354,12 @@ function scheduleNode(nodeId: string, provider: "tiktok" | "youtube") {
       mediaUrl: `https://cdn.example.com/${provider}-${nodeId}.mp4`,
       caption: `${provider} caption`,
       hashtags: "#chanter #phase2eb",
-      ...(youtube ? { title: "Phase 2E-B private upload", description: "Private-only." } : {}),
+      ...(youtube ? {
+        title: "Phase 2E-B private upload",
+        description: "Private-only.",
+        providerProofMode: true,
+        approvedMedia: { sha256: "a".repeat(64), byteSize: 100, mimeType: "video/mp4", fileName: "reviewed.mp4", container: "mp4" },
+      } : {}),
       scheduledAt: youtube ? YOUTUBE_AT : TIKTOK_AT,
     },
     dependsOn: [],
@@ -360,13 +380,107 @@ function graphEnvelope(graphId = "phase2eb-graph") {
   };
 }
 
+function youtubeProviderOperation(
+  job: QueueDraft,
+  state: NonNullable<AutoPosterPostStatusView["providerOperation"]>["operationState"],
+  revision: number,
+): NonNullable<AutoPosterPostStatusView["providerOperation"]> {
+  const providerOperationId = "ytop_phase2eb_exact";
+  const providerAttemptId = "ytattempt_phase2eb_exact";
+  const mediaSha256 = "a".repeat(64);
+  const completed = state === "completed_private";
+  const artifactObserved = completed || state === "contradictory_public";
+  const sessionStarted = !["operation_pending", "media_preflighted", "terminal_failure"].includes(state);
+  return {
+    schemaVersion: "chanter.autoposter.youtube-provider-operation.v1",
+    providerOperationId,
+    providerAttemptId,
+    provider: "youtube",
+    operationState: state,
+    queueId: job.id,
+    userId: OWNER_ID,
+    workspaceId: WORKSPACE_ID,
+    accountId: YOUTUBE_ACCOUNT,
+    connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+    approvalActorId: "founder-provider-proof",
+    approvalTimestamp: sourceRevision(1),
+    approvedAttemptNumber: 1,
+    runtimeMissionId: job.missionId,
+    graphId: job.missionId.slice("graph:".length, job.missionId.indexOf(":node:")),
+    runtimeAction: job.action,
+    runtimePayloadHash: job.missionPayloadHash,
+    approvedMediaSha256: mediaSha256,
+    providerProofMode: true,
+    approvedMedia: { sha256: mediaSha256, byteSize: 100, mimeType: "video/mp4", fileName: "reviewed.mp4", container: "mp4" },
+    bindingSha256: "b".repeat(64),
+    mediaSha256,
+    mediaByteSize: 100,
+    mediaMimeType: "video/mp4",
+    mediaContainer: "mp4",
+    mediaFileName: "reviewed.mp4",
+    mediaSourceId: "https://cdn.example.com/youtube-reviewed.mp4",
+    sessionCreatedAt: sessionStarted ? sourceRevision(revision) : null,
+    uploadStartedAt: sessionStarted ? sourceRevision(revision) : null,
+    uploadCompletedAt: completed ? sourceRevision(revision) : null,
+    acceptedByteOffset: artifactObserved ? 100 : 0,
+    externalVideoId: artifactObserved ? "yt-provider-operation-video" : null,
+    providerResponseSha256: completed ? "c".repeat(64) : null,
+    providerStatusReceiptSha256: completed ? "d".repeat(64) : null,
+    providerStatusReceipt: completed ? {
+      provider: "youtube",
+      queueId: job.id,
+      providerOperationId,
+      providerAttemptId,
+      userId: OWNER_ID,
+      workspaceId: WORKSPACE_ID,
+      runtimeMissionId: job.missionId,
+      graphId: job.missionId.slice("graph:".length, job.missionId.indexOf(":node:")),
+      mediaSha256,
+      approvedMedia: { sha256: mediaSha256, byteSize: 100, mimeType: "video/mp4", fileName: "reviewed.mp4", container: "mp4" },
+      providerProofMode: true,
+      configuredAccountId: YOUTUBE_ACCOUNT,
+      connectedAccountId: `youtube:${YOUTUBE_ACCOUNT}`,
+      verifiedChannelId: YOUTUBE_ACCOUNT,
+      authenticatedChannelId: YOUTUBE_ACCOUNT,
+      safeChannelTitle: "CHANTER",
+      safeChannelHandle: "@chanter",
+      externalVideoId: "yt-provider-operation-video",
+      expectedTitle: "Phase 2E-B private upload",
+      exactTitleMatch: true,
+      artifactExists: true,
+      privacyStatus: "private",
+      uploadStatus: "processed",
+      processingStatus: "succeeded",
+      verificationMethod: "youtube.videos.list+youtube.channels.list",
+      verificationTimestamp: sourceRevision(revision),
+      canonicalResponseSha256: "e".repeat(64),
+    } : null,
+    mutationSummary: {
+      providerSessionInitiationCount: sessionStarted ? 1 : 0,
+      mediaUploadAttemptCount: sessionStarted ? 1 : 0,
+      confirmedVideoArtifactCount: artifactObserved ? 1 : 0,
+      existingResourceUpdateCount: 0,
+      deleteCount: 0,
+      reconciliationStatusReadCount: sessionStarted ? 1 : 0,
+    },
+    reconciliationAttemptCount: sessionStarted ? 1 : 0,
+    reconciliationAttemptBudget: 3,
+    reconciliationLease: null,
+    reconciliationFencingToken: 1,
+    lastReconciledAt: sessionStarted ? sourceRevision(revision) : null,
+    lastOperationErrorCode: completed ? null : state.toUpperCase(),
+    eventCount: sessionStarted ? 6 : 2,
+    eventDigestSha256: "f".repeat(64),
+  };
+}
+
 async function completedGraph(harness: Harness, graphId = "phase2eb-graph"): Promise<void> {
   const submitted = harness.graphs.submitGraph(graphEnvelope(graphId));
   const approved = await harness.graphs.approveGraph(submitted.graphId, {
     approvedBy: "founder-phase2eb",
     graphHash: submitted.graphHash,
   });
-  expect(approved.status).toBe("completed");
+  expect(approved.status, JSON.stringify(approved.nodes)).toBe("completed");
 }
 
 function tableRows(database: DatabaseSync, table: string): unknown[] {
@@ -698,8 +812,8 @@ describe("Phase 2E-B provider-specific projection and batch truth", () => {
     expect(statusOf(unproven, "youtube_node")).toBe("manual_review_required");
     expect(unproven.batch.status).toBe("outcome_unknown");
 
-    // Terminal provider-specific truth: TikTok acceptance is never public
-    // proof; YouTube success is a private upload.
+    // Historical YouTube fields without a durable completed-private provider
+    // operation remain explicitly legacy/unproven.
     boundary.setStatus(tiktok.id, {
       status: "posted",
       postedAt: sourceRevision(5),
@@ -730,9 +844,9 @@ describe("Phase 2E-B provider-specific projection and batch truth", () => {
     });
     const terminal = await refresh();
     expect(statusOf(terminal, "tiktok_node")).toBe("provider_accepted_unverified");
-    expect(statusOf(terminal, "youtube_node")).toBe("uploaded_private");
-    expect(terminal.batch.status).toBe("completed_with_warning");
-    expect(terminal.escalations).toEqual([]);
+    expect(statusOf(terminal, "youtube_node")).toBe("manual_review_required");
+    expect(terminal.batch.status).toBe("outcome_unknown");
+    expect(terminal.escalations.map((item) => item.reasonCode)).toContain("legacy_unproven");
 
     // A later human manual assertion is a manual reconciliation, not
     // provider verification.
@@ -743,11 +857,116 @@ describe("Phase 2E-B provider-specific projection and batch truth", () => {
     });
     const manual = await refresh();
     expect(statusOf(manual, "tiktok_node")).toBe("manually_reconciled");
-    expect(manual.batch.status).toBe("completed_with_warning");
+    expect(manual.batch.status).toBe("outcome_unknown");
 
     const totals = manual.batch.totals;
     expect(totals.manually_reconciled).toBe(1);
-    expect(totals.uploaded_private).toBe(1);
+    expect(totals.manual_review_required).toBe(1);
+  });
+
+  it("reconciles one exact durable provider operation and escalates provider contradictions", async () => {
+    const boundary = makeBoundary();
+    let harness = createHarness(boundary);
+    await completedGraph(harness, "phase2eb-provider-operation");
+    const youtube = boundary.jobByNode("youtube_node", "phase2eb-provider-operation");
+    const completed = youtubeProviderOperation(youtube, "completed_private", 1);
+    boundary.setStatus(youtube.id, {
+      approved: true,
+      approvalState: "approved",
+      approvedAt: sourceRevision(1),
+      approvedBy: "founder-provider-proof",
+      status: "posted",
+      postedAt: sourceRevision(1),
+      publishId: "yt-provider-operation-video",
+      providerStatus: "uploaded_private",
+      providerOperation: completed,
+      providerVerification: {
+        provider: "youtube",
+        externalVideoId: "yt-provider-operation-video",
+        channelId: YOUTUBE_ACCOUNT,
+        channelTitle: "CHANTER",
+        channelHandle: "@chanter",
+        title: "Phase 2E-B private upload",
+        privacyStatus: "private",
+        uploadStatus: "processed",
+        processingStatus: "succeeded",
+        verifiedAt: sourceRevision(1),
+        uploadMethod: "resumable",
+      },
+      claimAttempts: 1,
+      publishAttemptBudget: 1,
+      attemptBudgetExhausted: true,
+      lastResult: { completedAt: sourceRevision(1), willRetry: false },
+      updatedAt: sourceRevision(1),
+    });
+
+    const first = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    const firstNode = first.results.find((result) => result.nodeId === "youtube_node")!;
+    expect(firstNode.projectionStatus, JSON.stringify(firstNode)).toBe("uploaded_private");
+    expect(boundary.reconciliationCalls).toEqual([]);
+    const persisted = harness.results.getProjections("phase2eb-provider-operation").nodes
+      .find((node) => node.nodeId === "youtube_node")!.projection!;
+    const snapshot = (persisted.evidence as { snapshot: AutoPosterPostStatusView }).snapshot;
+    expect(snapshot.providerOperation?.providerStatusReceiptSha256).toBe("d".repeat(64));
+    expect(snapshot.providerOperation?.providerStatusReceipt?.externalVideoId).toBe("yt-provider-operation-video");
+
+    const eventsAfterFirst = eventCount(harness.database, "phase2eb-provider-operation");
+    const replay = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    expect(replay.results.find((result) => result.nodeId === "youtube_node")!.outcome).toBe("replayed");
+    expect(eventCount(harness.database, "phase2eb-provider-operation")).toBe(eventsAfterFirst);
+
+    const databasePath = harness.databasePath;
+    harness.close();
+    harness = createHarness(boundary, databasePath);
+    const restarted = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    expect(restarted.results.find((result) => result.nodeId === "youtube_node")!.outcome).toBe("replayed");
+
+    const badReceipt = youtubeProviderOperation(youtube, "completed_private", 2);
+    badReceipt.providerStatusReceipt!.externalVideoId = "different-video";
+    boundary.setStatus(youtube.id, { providerOperation: badReceipt, updatedAt: sourceRevision(2) });
+    const identityMismatch = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    const mismatchNode = identityMismatch.results.find((result) => result.nodeId === "youtube_node")!;
+    expect(mismatchNode.reasonCode).toBe("result_identity_mismatch");
+    expect(mismatchNode.projectionStatus).toBe("manual_review_required");
+
+    boundary.setStatus(youtube.id, {
+      status: "outcome_unknown",
+      postedAt: null,
+      publishId: "",
+      providerStatus: "provider_missing",
+      providerOperation: youtubeProviderOperation(youtube, "provider_missing", 3),
+      updatedAt: sourceRevision(3),
+    });
+    const missing = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    const missingNode = missing.results.find((result) => result.nodeId === "youtube_node")!;
+    expect(missingNode.projectionStatus).toBe("outcome_unknown");
+    expect(missing.escalations.some((item) => item.reasonCode === "provider_missing")).toBe(true);
+
+    boundary.setStatus(youtube.id, {
+      status: "posted",
+      postedAt: sourceRevision(4),
+      publishId: "yt-provider-operation-video",
+      providerStatus: "contradictory_public",
+      providerOperation: youtubeProviderOperation(youtube, "contradictory_public", 4),
+      updatedAt: sourceRevision(4),
+    });
+    const publicResult = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    const publicNode = publicResult.results.find((result) => result.nodeId === "youtube_node")!;
+    expect(publicNode.projectionStatus).toBe("manual_review_required");
+    expect(publicResult.escalations.some((item) => item.reasonCode === "provider_visibility_contradiction")).toBe(true);
+
+    boundary.setStatus(youtube.id, {
+      status: "outcome_unknown",
+      postedAt: null,
+      publishId: "",
+      providerStatus: "provider_reconciliation_required",
+      providerOperation: youtubeProviderOperation(youtube, "outcome_unknown", 5),
+      updatedAt: sourceRevision(5),
+    });
+    const ambiguous = await harness.results.refreshGraphResults("phase2eb-provider-operation");
+    const ambiguousNode = ambiguous.results.find((result) => result.nodeId === "youtube_node")!;
+    expect(ambiguousNode.projectionStatus).toBe("outcome_unknown");
+    expect(ambiguous.escalations.some((item) => item.reasonCode === "provider_operation_ambiguous")).toBe(true);
   });
 
   it("classifies media failures and revoked approvals with their exact reasons", async () => {

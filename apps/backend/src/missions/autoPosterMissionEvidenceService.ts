@@ -16,8 +16,17 @@ import { renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AutoPosterPostStatusView } from "chanter-agent-runtime";
 import type { AutoPosterRuntimeMissionExecutor } from "../runtimeMissions/autoPosterRuntime.js";
+import {
+  hasProviderProofContradiction,
+  isExactPrivateProviderProof,
+  isStrictZeroProviderMutation,
+} from "./autoPosterProviderPredicates.js";
 import type { AutoPosterMissionService } from "../runtimeMissions/autoPosterMissionService.js";
 import { OperatorError } from "../services/operatorService.js";
+import {
+  findForbiddenProviderMaterial,
+  OPERATOR_PROVIDER_MATERIAL_MESSAGE,
+} from "../security/providerSafety.js";
 import { ensureWorkspace, resolveWorkspacePath } from "../workspace/pathGuard.js";
 import type { AutoPosterObservationService } from "./autoPosterObservationService.js";
 import type { AutoPosterResultProjectionService } from "./autoPosterResultProjectionService.js";
@@ -80,6 +89,26 @@ function redactProtectedValues(value: unknown, protectedValues: readonly string[
     );
   }
   return value;
+}
+
+const FORBIDDEN_EVIDENCE_VALUE_PATTERN =
+  /\bBearer\s+[A-Za-z0-9._~+\/-]+=*|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|https?:\/\/[^\s"']*(?:upload_id=|\/upload-session\/|resumable)/i;
+
+function findForbiddenEvidenceMaterial(
+  value: unknown,
+  protectedValues: readonly string[],
+): string | null {
+  return findForbiddenProviderMaterial(value, protectedValues) ? "forbidden provider material" : null;
+}
+
+function projectionProviderOperation(value: unknown): AutoPosterPostStatusView["providerOperation"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const snapshot = (value as Record<string, unknown>).snapshot;
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+  const operation = (snapshot as Record<string, unknown>).providerOperation;
+  return operation && typeof operation === "object" && !Array.isArray(operation)
+    ? operation as AutoPosterPostStatusView["providerOperation"]
+    : null;
 }
 
 function sanitizeRepositoryHeads(input: Record<string, string> | undefined): Record<string, string> {
@@ -267,12 +296,27 @@ export class AutoPosterMissionEvidenceService {
     const expectedTitle = typeof normalizedNode?.input.title === "string"
       ? normalizedNode.input.title
       : "";
-    const media = sanitizeMediaProof(input.media);
-    const replay = sanitizeReplayProof(input.replay);
-    const operationalCloseout = sanitizeOperationalCloseout(input.operationalCloseout);
-    const publishingSafety = await this.assertPublishingSafety(childMission, expectedTitle, operationalCloseout);
+    // Caller material is retained only as an attestation. It never supplies
+    // positive provider/mutation assertions; those are derived below from
+    // AutoPoster's strict provider operation plus Operator's durable graph
+    // and result-projection evidence.
+    const callerMedia = sanitizeMediaProof(input.media);
+    const callerReplay = sanitizeReplayProof(input.replay);
+    const callerOperationalCloseout = sanitizeOperationalCloseout(input.operationalCloseout);
+    const publishingSafety = await this.assertPublishingSafety(childMission, expectedTitle);
     const statusPost = publishingSafety.post;
-    const verification = statusPost?.providerVerification ?? null;
+    const operation = statusPost?.providerOperation ?? null;
+    const receipt = operation?.providerStatusReceipt ?? null;
+    const persistedOperation = projectionProviderOperation(nodeProjection?.projection?.evidence ?? null);
+    const replayEvent = graph.events.slice().reverse().find((event) => event.eventType === "graph_submission_replayed") ?? null;
+    const operationPersisted = Boolean(
+      operation
+      && persistedOperation
+      && persistedOperation.providerOperationId === operation.providerOperationId
+      && persistedOperation.providerAttemptId === operation.providerAttemptId
+      && persistedOperation.providerStatusReceiptSha256 === operation.providerStatusReceiptSha256
+      && persistedOperation.eventDigestSha256 === operation.eventDigestSha256
+    );
 
     const evidenceReferences = new Set<string>();
     evidenceReferences.add(`graph:${graph.graphId}`);
@@ -281,13 +325,88 @@ export class AutoPosterMissionEvidenceService {
     if (childMission?.evidenceSummary.queueDraftId) {
       evidenceReferences.add(`autoposter-queue:${childMission.evidenceSummary.queueDraftId}`);
     }
-    if (verification?.externalVideoId) {
-      evidenceReferences.add(`youtube-video:${verification.externalVideoId}`);
+    if (receipt?.externalVideoId) {
+      evidenceReferences.add(`youtube-video:${receipt.externalVideoId}`);
     }
+    if (operation) {
+      evidenceReferences.add(`provider-operation:${operation.providerOperationId}`);
+      evidenceReferences.add(`provider-attempt:${operation.providerAttemptId}`);
+      if (operation.mediaSha256) evidenceReferences.add(`media-sha256:${operation.mediaSha256}`);
+      if (operation.providerStatusReceiptSha256) {
+        evidenceReferences.add(`provider-receipt-sha256:${operation.providerStatusReceiptSha256}`);
+      }
+    }
+    if (nodeProjection?.projection?.snapshotHash) {
+      evidenceReferences.add(`operator-projection-sha256:${nodeProjection.projection.snapshotHash}`);
+    }
+    if (replayEvent) evidenceReferences.add(`graph-event:${replayEvent.eventId}`);
     if (job) evidenceReferences.add(`observation-job:${job.observationJobId}`);
     if (escalation) evidenceReferences.add(`escalation:${escalation.escalationId}`);
 
     const runtimeProfile = String(input.runtimeProfile || "").trim().slice(0, MAX_PROFILE_LENGTH) || null;
+    const mutationSummary = operation?.mutationSummary ?? null;
+    const privateReceipt = Boolean(statusPost && isExactPrivateProviderProof(statusPost, {
+      graphId: graph.graphId,
+      childMissionId: node.childMissionId,
+      workspaceId: graph.tenant.workspaceId ?? undefined,
+      userId: graph.tenant.userId,
+      expectedTitle,
+    }));
+    const exactlyOneUpload = Boolean(
+      privateReceipt
+      && operationPersisted
+      && replayEvent
+      && mutationSummary?.providerSessionInitiationCount === 1
+      && mutationSummary.confirmedVideoArtifactCount === 1
+    );
+    const contradictionFree = Boolean(statusPost && !hasProviderProofContradiction(statusPost));
+    const noExistingResourceModified = Boolean(
+      contradictionFree
+      &&
+      operationPersisted
+      && mutationSummary
+      && mutationSummary.existingResourceUpdateCount === 0
+      && mutationSummary.deleteCount === 0
+    );
+    const zeroProviderMutationProven = Boolean(
+      operationPersisted
+      && statusPost
+      && isStrictZeroProviderMutation(statusPost)
+    );
+    const attemptBudgetExhausted = statusPost?.attemptBudgetExhausted === true;
+    const noAutomaticRetryScheduled = Boolean(
+      statusPost
+      && statusPost.lastResult?.willRetry !== true
+      && attemptBudgetExhausted
+      && (
+        statusPost.status === "posted"
+        || statusPost.status === "failed"
+        || statusPost.status === "outcome_unknown"
+        || operation?.operationState === "terminal_failure"
+      )
+    );
+    const operationRefs = operation
+      ? [`provider-operation:${operation.providerOperationId}`, `provider-attempt:${operation.providerAttemptId}`]
+      : [];
+    const receiptRefs = operation?.providerStatusReceiptSha256
+      ? [`provider-receipt-sha256:${operation.providerStatusReceiptSha256}`]
+      : [];
+    const projectionRefs = nodeProjection?.projection?.snapshotHash
+      ? [`operator-projection-sha256:${nodeProjection.projection.snapshotHash}`]
+      : [];
+    const replayRefs = replayEvent ? [`graph-event:${replayEvent.eventId}`] : [];
+    const safetyAssertionEvidence = {
+      exactlyOneUpload: exactlyOneUpload ? [...operationRefs, ...receiptRefs, ...projectionRefs, ...replayRefs] : [],
+      privateVisibilityVerified: privateReceipt ? [...receiptRefs, ...projectionRefs] : [],
+      noPublicTransition: privateReceipt && noExistingResourceModified && statusPost && !hasProviderProofContradiction(statusPost)
+        ? [...receiptRefs, ...operationRefs]
+        : zeroProviderMutationProven ? [...operationRefs, ...projectionRefs] : [],
+      noExistingResourceModified: noExistingResourceModified ? [...operationRefs, ...projectionRefs] : [],
+      zeroProviderMutationProven: zeroProviderMutationProven ? [...operationRefs, ...projectionRefs] : [],
+      attemptBudgetExhausted: attemptBudgetExhausted && statusPost ? [`autoposter-queue:${statusPost.id}`] : [],
+      noAutomaticRetryScheduled: noAutomaticRetryScheduled && statusPost ? [`autoposter-queue:${statusPost.id}`] : [],
+      secretsRedacted: [] as string[],
+    };
     const manifest: Record<string, unknown> = {
       schemaVersion: EVIDENCE_SCHEMA_VERSION,
       generatedAt: this.now().toISOString(),
@@ -315,28 +434,36 @@ export class AutoPosterMissionEvidenceService {
           }
         : null,
       resultProjection: nodeProjection?.projection ?? null,
-      media,
-      providerArtifact: verification && statusPost
+      media: operation?.mediaSha256
         ? {
-            provider: "youtube",
-            configuredAccountId: statusPost.accountId,
-            connectedAccountId: statusPost.connectedAccountId,
-            verifiedChannelId: verification.channelId,
-            verifiedChannelTitle: verification.channelTitle,
-            verifiedChannelHandle: verification.channelHandle,
-            externalYouTubeVideoId: verification.externalVideoId,
-            title: verification.title,
-            uploadMethod: verification.uploadMethod,
-            verifiedPrivacyStatus: verification.privacyStatus,
-            providerUploadStatus: verification.uploadStatus,
-            providerProcessingStatus: verification.processingStatus,
-            providerVerificationTimestamp: verification.verifiedAt,
-            // Internal worker claims are not provider uploads. Only the
-            // independently reconciled provider count may populate this
-            // field; keep it null until replay/read-back proof supplies it.
-            providerUploadCount: replay?.providerUploadCountAfter ?? null,
+            fileName: operation.mediaFileName,
+            sha256: operation.mediaSha256,
+            byteSize: operation.mediaByteSize,
+            mimeType: operation.mediaMimeType,
+            sourceId: operation.mediaSourceId,
+            bindingSha256: operation.bindingSha256,
           }
         : null,
+      providerArtifact: receipt && statusPost && operation
+        ? {
+            provider: "youtube",
+            providerOperationId: operation.providerOperationId,
+            providerAttemptId: operation.providerAttemptId,
+            configuredAccountId: statusPost.accountId,
+            connectedAccountId: statusPost.connectedAccountId,
+            verifiedChannelId: receipt.verifiedChannelId,
+            verifiedChannelTitle: receipt.safeChannelTitle,
+            verifiedChannelHandle: receipt.safeChannelHandle,
+            externalYouTubeVideoId: receipt.externalVideoId,
+            title: receipt.expectedTitle,
+            verifiedPrivacyStatus: receipt.privacyStatus,
+            providerUploadStatus: receipt.uploadStatus,
+            providerProcessingStatus: receipt.processingStatus,
+            providerVerificationTimestamp: receipt.verificationTimestamp,
+            providerStatusReceiptSha256: operation.providerStatusReceiptSha256,
+          }
+        : null,
+      mutationSummary,
       observation: job
         ? {
             observationJobId: job.observationJobId,
@@ -355,10 +482,25 @@ export class AutoPosterMissionEvidenceService {
         : null,
       evidenceReferences: [...evidenceReferences].sort(),
       finalLifecycleState: this.finalLifecycleState(graph.status, job?.status ?? null),
-      replay,
-      operationalCloseout: operationalCloseout && statusPost
+      callerAttestation: {
+        media: callerMedia,
+        replay: callerReplay,
+        operationalCloseout: callerOperationalCloseout,
+        authoritative: false,
+      },
+      validation: {
+        providerOperationPresent: operation !== null,
+        providerOperationPersistedInOperatorProjection: operationPersisted,
+        exactGraphReplayEventPresent: replayEvent !== null,
+        providerReceiptPresent: receipt !== null,
+        identityBound: Boolean(operation && statusPost
+          && operation.queueId === statusPost.id
+          && operation.accountId === statusPost.accountId
+          && operation.connectedAccountId === statusPost.connectedAccountId
+          && operation.runtimeMissionId === node.childMissionId),
+      },
+      operationalCloseout: statusPost
         ? {
-            ...operationalCloseout,
             graphId: graph.graphId,
             graphHash: graph.graphHash,
             nodeId: node.nodeId,
@@ -383,7 +525,9 @@ export class AutoPosterMissionEvidenceService {
               .map((entry) => entry.at),
             providerStatus: statusPost.providerStatus,
             externalVideoId: statusPost.publishId || null,
-            providerVerification: statusPost.providerVerification,
+            providerOperationId: operation?.providerOperationId ?? null,
+            providerAttemptId: operation?.providerAttemptId ?? null,
+            providerStatusReceiptSha256: operation?.providerStatusReceiptSha256 ?? null,
             postedAt: statusPost.postedAt,
             lastResult: statusPost.lastResult,
           }
@@ -391,40 +535,57 @@ export class AutoPosterMissionEvidenceService {
       repositoryHeads: sanitizeRepositoryHeads(input.repositoryHeads),
       runtimeProfile,
       safetyAssertions: {
-        exactlyOneUpload: Boolean(
-          verification
-          && statusPost?.claimAttempts === 1
-          && replay?.providerUploadCountBefore === 1
-          && replay?.providerUploadCountAfter === 1
-          && replay?.additionalUploadCount === 0
-        ),
-        privateVisibilityVerified: verification?.privacyStatus === "private",
-        noPublicTransition: verification?.privacyStatus === "private"
-          || Boolean(
-            operationalCloseout
-            && operationalCloseout.externalMutationCount === 0
-            && operationalCloseout.youtubeDuplicateCount === 0
-          ),
-        noExistingResourceModified: replay?.existingResourceMutations === 0,
-        zeroProviderMutationProven: Boolean(
-          operationalCloseout
-          && operationalCloseout.externalMutationCount === 0
-          && operationalCloseout.providerUploadRecordCount === 0
-          && operationalCloseout.youtubeDuplicateCount === 0
-          && statusPost?.publishId === ""
-          && statusPost?.providerVerification === null
-          && statusPost?.postedAt === null
-        ),
-        attemptBudgetExhausted: statusPost?.attemptBudgetExhausted === true,
-        noAutomaticRetryScheduled: statusPost?.status === "failed"
-          && statusPost.lastResult?.willRetry !== true,
-        secretsRedacted: true,
+        exactlyOneUpload,
+        privateVisibilityVerified: privateReceipt,
+        noPublicTransition: (privateReceipt && noExistingResourceModified) || zeroProviderMutationProven,
+        noExistingResourceModified,
+        zeroProviderMutationProven,
+        attemptBudgetExhausted,
+        noAutomaticRetryScheduled,
+        secretsRedacted: false,
       },
+      safetyAssertionEvidence,
+      residualRisks: [
+        ...(operation ? [] : ["provider_operation_absent"]),
+        ...(operationPersisted ? [] : ["provider_operation_not_persisted_in_operator_projection"]),
+        ...(replayEvent ? [] : ["exact_graph_replay_not_observed"]),
+        ...(receipt ? [] : ["provider_receipt_absent"]),
+      ],
       safety: publishingSafety.safety,
     };
 
     const redacted = redactProtectedValues(manifest, this.protectedValues) as Record<string, unknown>;
-    const bundlePath = this.writeManifestAtomically(graph.graphId, redacted);
+    const scanFailure = findForbiddenEvidenceMaterial(redacted, this.protectedValues);
+    if (scanFailure) {
+      throw new OperatorError(
+        OPERATOR_PROVIDER_MATERIAL_MESSAGE,
+        409,
+        "OPERATOR_EVIDENCE_SECRET_SCAN_FAILED",
+      );
+    }
+    (redacted.safetyAssertions as Record<string, unknown>).secretsRedacted = true;
+    (redacted.safetyAssertionEvidence as Record<string, unknown>).secretsRedacted = [
+      "final-artifact-secret-scan:passed",
+    ];
+    if (findForbiddenEvidenceMaterial(redacted, this.protectedValues)) {
+      throw new OperatorError(
+        OPERATOR_PROVIDER_MATERIAL_MESSAGE,
+        409,
+        "OPERATOR_EVIDENCE_SECRET_SCAN_FAILED",
+      );
+    }
+    const serializedManifest = JSON.stringify(redacted, null, 2);
+    if (
+      FORBIDDEN_EVIDENCE_VALUE_PATTERN.test(serializedManifest)
+      || this.protectedValues.some((protectedValue) => protectedValue && serializedManifest.includes(protectedValue))
+    ) {
+      throw new OperatorError(
+        OPERATOR_PROVIDER_MATERIAL_MESSAGE,
+        409,
+        "OPERATOR_EVIDENCE_SECRET_SCAN_FAILED",
+      );
+    }
+    const bundlePath = this.writeManifestAtomically(graph.graphId, redacted, serializedManifest);
     return { path: bundlePath, manifest: redacted };
   }
 
@@ -439,7 +600,6 @@ export class AutoPosterMissionEvidenceService {
   private async assertPublishingSafety(
     childMission: Awaited<ReturnType<AutoPosterMissionService["getMission"]>> | null,
     expectedTitle: string,
-    operationalCloseout: OperationalCloseoutProof | null,
   ): Promise<PublishingSafetyResult> {
     const output = childMission?.runtimeResult?.output as { publishing?: unknown } | null | undefined;
     const structuralAssertion = {
@@ -474,69 +634,16 @@ export class AutoPosterMissionEvidenceService {
       };
     }
     const post = statusResult.post;
-    if (operationalCloseout) {
-      const publishAttempts = post.history.filter((entry) => entry.event === "publish_attempt");
-      const failureEvidence = `${post.lastResult?.code ?? ""} ${post.lastResult?.message ?? ""} ${post.lastErrorMessage}`;
-      if (
-        post.provider !== "youtube"
-        || post.accountId !== operationalCloseout.channelId
-        || expectedTitle !== operationalCloseout.exactTitle
-        || post.status !== "failed"
-        || post.approved !== true
-        || post.claimAttempts !== operationalCloseout.finalClaimAttempts
-        || publishAttempts.length !== operationalCloseout.finalClaimAttempts
-        || post.attemptBudgetExhausted !== true
-        || post.publishAttemptBudget > post.claimAttempts
-        || post.lastResult?.willRetry === true
-        || post.publishId !== ""
-        || post.providerVerification !== null
-        || post.postedAt !== null
-        || !/media|download|video|fetch failed/i.test(failureEvidence)
-      ) {
-        throw new OperatorError(
-          "Live AutoPoster state does not match the bounded zero-mutation operational closeout proof.",
-          409,
-          "OPERATOR_EVIDENCE_OPERATIONAL_CLOSEOUT_MISMATCH",
-        );
-      }
-      return {
-        post,
-        safety: {
-          structuralAssertion: {
-            terminalPreProviderFailure: true,
-            basis: "durable_attempt_budget_exhausted",
-          },
-          liveReCheck: {
-            performed: true,
-            checkedAt: this.now().toISOString(),
-            approved: post.approved,
-            postedAt: post.postedAt,
-            approvalState: post.approvalState,
-            status: post.status,
-            claimAttempts: post.claimAttempts,
-            publishAttemptBudget: post.publishAttemptBudget,
-            attemptBudgetExhausted: post.attemptBudgetExhausted,
-            externalVideoId: null,
-            providerVerification: null,
-            automaticRetryScheduled: false,
-          },
-        },
-      };
-    }
     if (post.status === "posted" || post.postedAt !== null) {
       const verification = post.providerVerification;
       if (
-        post.provider !== "youtube"
-        || post.providerStatus !== "uploaded_private"
-        || !post.publishId
+        !isExactPrivateProviderProof(post, {
+          graphId: childMission?.graphId ?? undefined,
+          childMissionId: childMission?.missionId,
+          workspaceId: childMission?.workspaceId,
+          expectedTitle,
+        })
         || verification === null
-        || verification.externalVideoId !== post.publishId
-        || verification.channelId !== post.accountId
-        || verification.privacyStatus !== "private"
-        || verification.uploadMethod !== "resumable"
-        || !expectedTitle
-        || verification.title !== expectedTitle
-        || ["rejected", "deleted", "failed"].includes(verification.uploadStatus.toLowerCase())
       ) {
         throw new OperatorError(
           "Live AutoPoster status lacks exact private YouTube provider read-back evidence.",
@@ -563,6 +670,38 @@ export class AutoPosterMissionEvidenceService {
             uploadStatus: verification.uploadStatus,
             processingStatus: verification.processingStatus,
             verifiedAt: verification.verifiedAt,
+          },
+        },
+      };
+    }
+    if (
+      isStrictZeroProviderMutation(post)
+      && post.attemptBudgetExhausted === true
+      && post.lastResult?.willRetry !== true
+      && post.publishId === ""
+      && post.providerVerification === null
+      && post.postedAt === null
+    ) {
+      return {
+        post,
+        safety: {
+          structuralAssertion: {
+            terminalPreProviderFailure: true,
+            basis: "durable_provider_operation_zero_mutation",
+          },
+          liveReCheck: {
+            performed: true,
+            checkedAt: this.now().toISOString(),
+            approved: post.approved,
+            postedAt: post.postedAt,
+            approvalState: post.approvalState,
+            status: post.status,
+            claimAttempts: post.claimAttempts,
+            publishAttemptBudget: post.publishAttemptBudget,
+            attemptBudgetExhausted: post.attemptBudgetExhausted,
+            externalVideoId: null,
+            providerVerification: null,
+            automaticRetryScheduled: false,
           },
         },
       };
@@ -594,11 +733,15 @@ export class AutoPosterMissionEvidenceService {
     return `graph_${graphStatus}`;
   }
 
-  private writeManifestAtomically(graphId: string, manifest: Record<string, unknown>): string {
+  private writeManifestAtomically(
+    graphId: string,
+    manifest: Record<string, unknown>,
+    serializedManifest = JSON.stringify(manifest, null, 2),
+  ): string {
     const bundleDir = ensureWorkspace(resolveWorkspacePath(this.evidenceRoot, graphId));
     const finalPath = path.join(bundleDir, "manifest.json");
     const tempPath = path.join(bundleDir, `.manifest.${createHash("sha256").update(String(this.now().getTime())).digest("hex").slice(0, 12)}.tmp`);
-    writeFileSync(tempPath, JSON.stringify(manifest, null, 2), "utf8");
+    writeFileSync(tempPath, serializedManifest, "utf8");
     renameSync(tempPath, finalPath);
     return finalPath;
   }

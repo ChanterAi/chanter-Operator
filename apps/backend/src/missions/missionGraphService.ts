@@ -205,7 +205,21 @@ export class MissionGraphService {
     const existing = this.journal.getGraph(compiled.graphId);
     if (existing) {
       this.assertExistingSubmitBinding(existing, compiled, graphHash);
-      return this.buildView(existing, true);
+      this.journal.appendAuthoritativeReplayEvent(
+        existing.graphId,
+        `${existing.graphHash}:${existing.idempotencyKey}`,
+        {
+          actor: compiled.source.requestedBy,
+          reason: "Exact graph submission replay returned the existing authoritative graph identity without execution.",
+          timestamp: this.now().toISOString(),
+          evidenceReferences: [
+            `graph:${existing.graphId}`,
+            `graph-sha256:${existing.graphHash}`,
+            `idempotency-key:${existing.idempotencyKey}`,
+          ],
+        },
+      );
+      return this.buildView(this.journal.requireGraph(existing.graphId), true);
     }
 
     const timestamp = this.now().toISOString();
@@ -245,6 +259,23 @@ export class MissionGraphService {
       });
       return { graphId: compiled.graphId, replayed: false };
     });
+    if (created.replayed) {
+      const raced = this.journal.requireGraph(created.graphId);
+      this.journal.appendAuthoritativeReplayEvent(
+        raced.graphId,
+        `${raced.graphHash}:${raced.idempotencyKey}`,
+        {
+          actor: compiled.source.requestedBy,
+          reason: "Exact concurrent graph submission replay returned the existing authoritative graph identity without execution.",
+          timestamp: this.now().toISOString(),
+          evidenceReferences: [
+            `graph:${raced.graphId}`,
+            `graph-sha256:${raced.graphHash}`,
+            `idempotency-key:${raced.idempotencyKey}`,
+          ],
+        },
+      );
+    }
     return this.buildView(this.journal.requireGraph(created.graphId), created.replayed);
   }
 

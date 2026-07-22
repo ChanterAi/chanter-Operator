@@ -11,6 +11,7 @@ import {
   type AutoPosterOperationsPort,
   type AutoPosterPortFailure,
   type AutoPosterPostStatusSuccess,
+  type AutoPosterProviderReconciliationSuccess,
   type AutoPosterScheduleReconciliationSuccess,
   type RuntimeMissionIdempotencyStore,
   type RuntimeMissionRequest,
@@ -47,6 +48,11 @@ export interface AutoPosterRuntimeMissionExecutor {
     workspaceId?: string;
     accountId?: string;
   }): Promise<AutoPosterPostStatusSuccess | AutoPosterPortFailure>;
+  reconcileProviderOperation?(input: {
+    postId: string;
+    workspaceId?: string;
+    accountId: string;
+  }): Promise<AutoPosterProviderReconciliationSuccess | AutoPosterPortFailure>;
   execute(request: RuntimeMissionRequest): Promise<RuntimeMissionResult>;
   reconcileSchedule(
     request: RuntimeMissionRequest,
@@ -101,6 +107,7 @@ function createUnavailablePort(): AutoPosterOperationsPort {
     validateMedia: unavailable,
     schedulePost: unavailable,
     reconcileSchedule: unavailable,
+    reconcileProviderOperation: unavailable,
   };
 }
 
@@ -175,6 +182,15 @@ export function createAutoPosterRuntimeMissionExecutor(
         postId,
         ...(accountId ? { accountId } : {}),
       }),
+    reconcileProviderOperation: ({ postId, workspaceId, accountId }) =>
+      port.reconcileProviderOperation
+        ? port.reconcileProviderOperation({
+            userId,
+            ...(workspaceId ? { workspaceId } : {}),
+            postId,
+            accountId,
+          })
+        : Promise.resolve(unavailableResult()),
     execute: (request) => executeMission(request, {
       registry,
       idempotencyStore,

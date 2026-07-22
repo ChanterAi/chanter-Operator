@@ -141,6 +141,9 @@ export type AutoPosterObservationEscalationReason =
   | "outcome_unknown"
   | "observation_contradiction"
   | "result_identity_mismatch"
+  | "provider_missing"
+  | "provider_visibility_contradiction"
+  | "provider_operation_ambiguous"
   | "observation_window_exhausted";
 
 const ESCALATION_SEVERITY: Record<
@@ -156,6 +159,9 @@ const ESCALATION_SEVERITY: Record<
   outcome_unknown: "critical",
   observation_contradiction: "critical",
   result_identity_mismatch: "high",
+  provider_missing: "critical",
+  provider_visibility_contradiction: "critical",
+  provider_operation_ambiguous: "critical",
   observation_window_exhausted: "warning",
 };
 
@@ -178,6 +184,12 @@ const ESCALATION_HUMAN_ACTION: Record<AutoPosterObservationEscalationReason, str
     "AutoPoster evidence contradicts itself for one source revision; inspect the canonical job before trusting either snapshot.",
   result_identity_mismatch:
     "Stop collection for this node and inspect the graph child, queue job ID, workspace, provider, and account bindings.",
+  provider_missing:
+    "Inspect the exact persisted YouTube operation; do not create a replacement session or retry the upload.",
+  provider_visibility_contradiction:
+    "Inspect the exact YouTube artifact immediately because provider visibility contradicts the private-only contract.",
+  provider_operation_ambiguous:
+    "The exact YouTube operation remains ambiguous; inspect it without retrying or creating another session.",
   observation_window_exhausted:
     "The bounded automatic observation window ended without terminal evidence; inspect the job in AutoPoster or run a manual result refresh later.",
 };
