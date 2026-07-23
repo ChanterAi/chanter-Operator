@@ -527,3 +527,292 @@ export interface AgentRunLedgerRunDetail {
   entry: AgentRunLedgerEntry;
   transitions: AgentRunLedgerEntry[];
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2D–2F durable mission-graph lifecycle read models (Operator Ascension I).
+//
+// These mirror the Operator backend view interfaces exactly (MissionGraphView,
+// AutoPoster result projections, autonomous observation jobs/escalations,
+// retained evidence bundles). Status fields whose exact union is owned by a
+// backend DB constant are typed as `string` on purpose: this is a read-only
+// founder projection, and the UI renders them by de-underscoring the value
+// rather than switching on a closed set, so it never needs to be recompiled
+// when the backend adds a state.
+// ---------------------------------------------------------------------------
+
+export type MissionGraphState =
+  | "approval_required"
+  | "approved"
+  | "running"
+  | "completed"
+  | "failed_recoverable"
+  | "failed_terminal"
+  | "cancelled";
+
+export type MissionGraphNodeState =
+  | "blocked"
+  | "ready"
+  | "running"
+  | "completed"
+  | "failed_recoverable"
+  | "failed_terminal"
+  | "cancelled";
+
+export interface MissionGraphTypedError {
+  code: string;
+  message: string;
+}
+
+export interface MissionGraphEventRecord {
+  eventId: string;
+  graphId: string;
+  sequence: number;
+  scope: "graph" | "node";
+  nodeId: string | null;
+  eventType: string;
+  previousState: string | null;
+  newState: string | null;
+  actor: string;
+  reason: string;
+  timestamp: string;
+  evidenceReferences: string[];
+  typedError: MissionGraphTypedError | null;
+}
+
+export interface MissionGraphNodeChildSummary {
+  status: string;
+  executionState: string | null;
+  nextPermittedActions: string[];
+  downstreamIds: unknown | null;
+  retryCount: number | null;
+}
+
+export interface MissionGraphNodeView {
+  nodeId: string;
+  product: string;
+  action: string;
+  objective: string;
+  dependsOn: string[];
+  childMissionId: string;
+  childTraceId: string;
+  childIdempotencyKey: string;
+  status: MissionGraphNodeState;
+  attempts: number;
+  resultStatus: string | null;
+  resultSummary: unknown | null;
+  typedError: MissionGraphTypedError | null;
+  childMission: MissionGraphNodeChildSummary | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MissionGraphView {
+  replayed: boolean;
+  graphId: string;
+  traceId: string;
+  idempotencyKey: string;
+  schemaVersion: string;
+  source: { system: string; requestedBy: string };
+  objective: string;
+  tenant: { userId: string; workspaceId: string | null; accountId: string | null };
+  graphHash: string;
+  status: MissionGraphState;
+  approvalRequired: true;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  approvedGraphHash: string | null;
+  requestedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  nodeCount: number;
+  normalizedGraph: unknown;
+  nodes: MissionGraphNodeView[];
+  edges: Array<{ fromNodeId: string; toNodeId: string }>;
+  events: MissionGraphEventRecord[];
+}
+
+export interface MissionGraphListResponse {
+  graphs: MissionGraphView[];
+}
+
+// AutoPoster result projections (Phase 2E-B)
+
+export interface AutoPosterResultProjectionView {
+  graphId: string;
+  nodeId: string;
+  graphHash: string;
+  childMissionId: string;
+  childTraceId: string;
+  queueJobId: string;
+  provider: string;
+  connectedAccountId: string;
+  accountId: string;
+  workspaceId: string;
+  sourceStatus: string;
+  providerStatus: string;
+  projectionStatus: string;
+  approved: boolean;
+  sourceUpdatedAt: string;
+  observedAt: string;
+  snapshotHash: string;
+  evidence: unknown;
+  escalationReason: string | null;
+  escalationSeverity: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutoPosterResultBatchSummary {
+  status: "awaiting_results" | "completed_with_warning" | "failed" | "outcome_unknown";
+  nodeCount: number;
+  observedCount: number;
+  totals: Record<string, number>;
+}
+
+export interface AutoPosterResultProjectionsResponse {
+  graphId: string;
+  graphHash: string;
+  nodes: Array<{
+    nodeId: string;
+    childMissionId: string;
+    projection: AutoPosterResultProjectionView | null;
+  }>;
+  batch: AutoPosterResultBatchSummary;
+}
+
+export interface AutoPosterNodeRefreshResult {
+  nodeId: string;
+  childMissionId: string;
+  queueJobId: string | null;
+  outcome: "refreshed" | "replayed" | "stale" | "failed";
+  reasonCode: string | null;
+  projectionStatus: string | null;
+  projection: AutoPosterResultProjectionView | null;
+}
+
+export interface AutoPosterResultRefreshResponse {
+  graphId: string;
+  graphHash: string;
+  refreshedAt: string;
+  results: AutoPosterNodeRefreshResult[];
+  batch: AutoPosterResultBatchSummary;
+  escalations: Array<Record<string, unknown>>;
+}
+
+// Autonomous observation loop (Phase 2E-C / 2F-B)
+
+export interface AutoPosterObservationJobView {
+  observationJobId: string;
+  graphId: string;
+  nodeId: string;
+  missionId: string;
+  workspaceId: string;
+  connectedAccountId: string;
+  accountId: string;
+  provider: string;
+  queueJobId: string;
+  sourceBinding: unknown;
+  sourceBindingHash: string;
+  status: string;
+  attemptCount: number;
+  maxAttempts: number;
+  nextAttemptAt: string | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  convergenceReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutoPosterObservationAttemptView {
+  attemptId: string;
+  observationJobId: string;
+  graphId: string;
+  nodeId: string;
+  attemptNumber: number;
+  provider: string;
+  leaseOwner: string;
+  startedAt: string;
+  finishedAt: string;
+  latencyMs: number;
+  outcomeClass: string;
+  refreshOutcome: string;
+  projectionStatus: string | null;
+  reasonCode: string | null;
+  retryDelaySeconds: number | null;
+  nextAttemptAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface AutoPosterObservationEscalationView {
+  escalationId: string;
+  observationJobId: string;
+  graphId: string;
+  nodeId: string;
+  reasonCode: string;
+  severity: string;
+  humanActionRequired: boolean;
+  recommendedHumanAction: string;
+  summary: string;
+  evidenceReferences: string[];
+  status: string;
+  acknowledgedBy: string | null;
+  acknowledgedAt: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  resolutionNote: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutoPosterObservationJobsResponse {
+  jobs: AutoPosterObservationJobView[];
+  limit: number;
+  offset: number;
+}
+
+export interface AutoPosterObservationJobDetail {
+  job: AutoPosterObservationJobView;
+  attempts: AutoPosterObservationAttemptView[];
+  escalation: AutoPosterObservationEscalationView | null;
+}
+
+export interface AutoPosterObservationEscalationsResponse {
+  escalations: AutoPosterObservationEscalationView[];
+  limit: number;
+  offset: number;
+}
+
+export interface AutoPosterObservationJobRunView {
+  observationJobId: string;
+  graphId: string;
+  nodeId: string;
+  attemptNumber: number;
+  outcomeClass: string;
+  jobStatus: string;
+  projectionStatus: string | null;
+  reasonCode: string | null;
+  retryDelaySeconds: number | null;
+  nextAttemptAt: string | null;
+  escalationId: string | null;
+}
+
+export interface AutoPosterObservationBatchResult {
+  ranAt: string;
+  leaseOwner: string;
+  backfilledJobs: number;
+  claimed: number;
+  results: AutoPosterObservationJobRunView[];
+}
+
+// Retained mission evidence bundle (Phase 2F)
+
+export interface MissionGraphEvidenceResult {
+  path: string;
+  manifest: Record<string, unknown>;
+}

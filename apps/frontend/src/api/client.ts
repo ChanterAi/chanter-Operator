@@ -5,10 +5,20 @@ import type {
   AgentRunLedgerListResponse,
   AgentRunLedgerRunDetail,
   AutoPosterConnectedAccountsResponse,
+  AutoPosterObservationBatchResult,
+  AutoPosterObservationEscalationsResponse,
+  AutoPosterObservationEscalationView,
+  AutoPosterObservationJobDetail,
+  AutoPosterObservationJobsResponse,
+  AutoPosterResultProjectionsResponse,
+  AutoPosterResultRefreshResponse,
   CreateAutoPosterScheduleMissionInput,
   CreateTaskInput,
   EvidenceBundleResponse,
   HealthResponse,
+  MissionGraphEvidenceResult,
+  MissionGraphListResponse,
+  MissionGraphView,
   RuntimeMission,
   TaskDetail,
   TaskIntent,
@@ -194,5 +204,131 @@ export function listAgentRunLedgerRuns(
 export function getAgentRunLedgerRun(runId: string): Promise<AgentRunLedgerRunDetail> {
   return request<AgentRunLedgerRunDetail>(
     `/api/agent-run-ledger/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2D–2F mission-graph lifecycle (Operator Ascension I).
+//
+// Reads to /api/mission-graphs and /api/mission-graphs/:id are unauthenticated
+// projection reads. Every control action (approve/resume/cancel/refresh/
+// evidence) and the entire /api/autoposter-observations surface — reads
+// included — require the independent Operator control capability. As in the
+// established AutoPoster mission panel, the browser never holds a token: the
+// local Vite dev/preview proxy injects the correct submit/control token for
+// the exact allowlisted path. No credential is ever handled here.
+// ---------------------------------------------------------------------------
+
+export async function listMissionGraphs(limit = 50): Promise<MissionGraphView[]> {
+  const result = await request<MissionGraphListResponse>(`/api/mission-graphs?limit=${limit}`);
+  return result.graphs;
+}
+
+export function getMissionGraph(graphId: string): Promise<MissionGraphView> {
+  return request<MissionGraphView>(`/api/mission-graphs/${encodeURIComponent(graphId)}`);
+}
+
+export function approveMissionGraph(
+  graphId: string,
+  approvedBy: string,
+  graphHash: string,
+): Promise<MissionGraphView> {
+  return request<MissionGraphView>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/approve`,
+    { method: "POST", body: JSON.stringify({ approvedBy, graphHash }) },
+  );
+}
+
+export function resumeMissionGraph(graphId: string): Promise<MissionGraphView> {
+  return request<MissionGraphView>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/resume`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export function cancelMissionGraph(
+  graphId: string,
+  cancelledBy: string,
+  reason: string,
+): Promise<MissionGraphView> {
+  return request<MissionGraphView>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/cancel`,
+    { method: "POST", body: JSON.stringify({ cancelledBy, reason }) },
+  );
+}
+
+export function getAutoPosterResults(
+  graphId: string,
+): Promise<AutoPosterResultProjectionsResponse> {
+  return request<AutoPosterResultProjectionsResponse>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/autoposter-results`,
+  );
+}
+
+export function refreshAutoPosterResults(
+  graphId: string,
+): Promise<AutoPosterResultRefreshResponse> {
+  return request<AutoPosterResultRefreshResponse>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/autoposter-results/refresh`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export function generateMissionGraphEvidence(
+  graphId: string,
+): Promise<MissionGraphEvidenceResult> {
+  return request<MissionGraphEvidenceResult>(
+    `/api/mission-graphs/${encodeURIComponent(graphId)}/evidence`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export function listObservationJobs(graphId?: string): Promise<AutoPosterObservationJobsResponse> {
+  const suffix = graphId ? `?graphId=${encodeURIComponent(graphId)}` : "";
+  return request<AutoPosterObservationJobsResponse>(`/api/autoposter-observations/jobs${suffix}`);
+}
+
+export function getObservationJob(observationJobId: string): Promise<AutoPosterObservationJobDetail> {
+  return request<AutoPosterObservationJobDetail>(
+    `/api/autoposter-observations/jobs/${encodeURIComponent(observationJobId)}`,
+  );
+}
+
+export function listObservationEscalations(
+  graphId?: string,
+): Promise<AutoPosterObservationEscalationsResponse> {
+  const suffix = graphId ? `?graphId=${encodeURIComponent(graphId)}` : "";
+  return request<AutoPosterObservationEscalationsResponse>(
+    `/api/autoposter-observations/escalations${suffix}`,
+  );
+}
+
+export function runObservationBatch(): Promise<AutoPosterObservationBatchResult> {
+  return request<AutoPosterObservationBatchResult>(
+    "/api/autoposter-observations/run",
+    { method: "POST", body: "{}" },
+  );
+}
+
+export function acknowledgeObservationEscalation(
+  escalationId: string,
+  acknowledgedBy: string,
+): Promise<AutoPosterObservationEscalationView> {
+  return request<AutoPosterObservationEscalationView>(
+    `/api/autoposter-observations/escalations/${encodeURIComponent(escalationId)}/acknowledge`,
+    { method: "POST", body: JSON.stringify({ acknowledgedBy }) },
+  );
+}
+
+export function resolveObservationEscalation(
+  escalationId: string,
+  resolvedBy: string,
+  note: string,
+): Promise<AutoPosterObservationEscalationView> {
+  // The backend resolve route reads the free-text note from `note` (and
+  // defaults disposition to "resolved"); it ignores any other key.
+  return request<AutoPosterObservationEscalationView>(
+    `/api/autoposter-observations/escalations/${encodeURIComponent(escalationId)}/resolve`,
+    { method: "POST", body: JSON.stringify({ resolvedBy, note }) },
   );
 }

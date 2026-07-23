@@ -1610,3 +1610,199 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
     grid-column: auto;
   }
 }
+
+/* ==========================================================================
+   Mission Workspace (Operator Ascension I) — durable mission-graph lifecycle
+   ========================================================================== */
+
+.mission-workspace {
+  min-height: calc(100vh - 119px);
+  padding: 22px;
+  background: #090c11;
+}
+
+.mission-workspace__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  max-width: 1600px;
+  margin: 0 auto 16px;
+}
+
+.mission-workspace__header h1 {
+  margin: 4px 0 6px;
+  font-size: clamp(22px, 2.4vw, 32px);
+  font-weight: 650;
+}
+
+.mission-workspace__header p:not(.eyebrow) {
+  margin: 0;
+  color: #8d97a8;
+  font-size: 12px;
+  max-width: 720px;
+}
+
+/* Health projection strip */
+.mission-health {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  max-width: 1600px;
+  margin: 0 auto 16px;
+}
+
+.mission-health__tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #202630;
+  border-radius: 10px;
+  background: #0d1015;
+}
+
+.mission-health__label {
+  color: #5f6a7b;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  font-weight: 700;
+}
+
+.mission-health__tile strong { font-size: 18px; font-weight: 650; }
+.mission-health__alert { color: #d16c79; }
+
+.mission-workspace__layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(480px, 1fr);
+  gap: 14px;
+  max-width: 1600px;
+  margin: 0 auto;
+  align-items: start;
+}
+
+.mission-list-card,
+.mission-detail-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #202630;
+  border-radius: 10px;
+  background: #0d1015;
+}
+
+/* Mission list */
+.mission-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.mission-list__button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 11px 13px;
+  border: 1px solid #202630;
+  border-radius: 9px;
+  background: #0b0e13;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease;
+}
+
+.mission-list__button:hover:not(:disabled) { border-color: #38414f; }
+.mission-list__button--selected { border-color: #4c7bd0; background: #101623; }
+.mission-list__button:disabled { opacity: .55; cursor: default; }
+.mission-list__button strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.mission-list__button small { color: #8d97a8; font-size: 11px; overflow-wrap: anywhere; }
+
+/* Detail */
+.mission-detail { display: flex; flex-direction: column; gap: 18px; }
+.mission-detail__status { display: flex; gap: 10px; align-items: center; }
+
+.mission-detail__next {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #2b3550;
+  border-radius: 8px;
+  background: #0f1523;
+  color: #b9c6de;
+  font-size: 12px;
+}
+.mission-detail__next strong { color: #dbe6f7; }
+
+.mission-detail__section { border-top: 1px solid #1a1f28; padding-top: 14px; }
+.mission-detail__section:first-of-type { border-top: none; padding-top: 0; }
+.mission-detail__section h3 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: #cdd5e2; }
+.mission-detail__edges { margin: 10px 0 0; color: #8d97a8; font-size: 11px; }
+.mission-detail__batch { margin: 0 0 8px; color: #b9c6de; font-size: 12px; }
+.mission-detail__note { margin: 0; color: #8d97a8; font-size: 12px; }
+
+/* Key/value grids */
+.mission-kv { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; }
+.mission-kv--compact { grid-template-columns: 1fr; gap: 4px; }
+.mission-kv > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mission-kv dt { color: #5f6a7b; font-size: 9px; text-transform: uppercase; letter-spacing: .07em; font-weight: 700; }
+.mission-kv dd { margin: 0; font-size: 12px; color: #dbe0e8; overflow-wrap: anywhere; }
+.mission-kv code { font-size: 11px; color: #a9c7ef; overflow-wrap: anywhere; }
+
+/* Controls */
+.mission-controls { display: flex; flex-direction: column; gap: 10px; }
+.mission-control-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.mission-control-row--secondary { align-items: center; }
+.mission-control-row label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #8d97a8; }
+
+/* Atoms / nodes */
+.mission-nodes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.mission-node { padding: 12px; border: 1px solid #202630; border-radius: 9px; background: #0b0e13; }
+.mission-node__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.mission-node__head strong { font-size: 13px; }
+.mission-node__head code { font-size: 11px; color: #a9c7ef; }
+.mission-node__error { margin: 8px 0 0; padding: 8px 10px; border-radius: 6px; background: #1c1013; color: #e6a6ae; font-size: 11px; }
+.mission-node__error code { color: #f0c2c8; }
+
+/* Projections + jobs */
+.mission-projections, .mission-jobs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.mission-projections li { display: flex; gap: 10px; font-size: 12px; color: #b9c6de; flex-wrap: wrap; }
+.mission-projections strong { min-width: 150px; }
+.mission-jobs li { display: flex; align-items: center; gap: 10px; font-size: 12px; flex-wrap: wrap; }
+.mission-jobs small { color: #8d97a8; }
+
+/* Escalations */
+.mission-escalation-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.mission-escalation-list > li { padding: 12px; border: 1px solid #3a2730; border-radius: 9px; background: #150e12; }
+.mission-escalation__head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mission-escalation-list p { margin: 8px 0 0; font-size: 12px; color: #d7c3c9; }
+.mission-escalation__action { color: #e0aa5b !important; }
+
+/* Evidence */
+.mission-evidence .mission-kv code { color: #9bd7b5; }
+
+/* Event timeline */
+.mission-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.mission-events > li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+  padding: 8px 10px; border-left: 2px solid #2b3550; background: #0b0e13; border-radius: 0 6px 6px 0; font-size: 11px;
+}
+.mission-events__seq { color: #5f6a7b; font-variant-numeric: tabular-nums; }
+.mission-events__type { color: #dbe0e8; font-weight: 600; }
+.mission-events__transition { color: #a9c7ef; }
+.mission-events__meta { color: #7a8496; }
+.mission-events__reason { color: #8d97a8; width: 100%; }
+.mission-events__error { width: 100%; color: #e6a6ae; }
+
+/* Extra status dot colors used by the mission-graph + observation lifecycle */
+.status--running .status__dot,
+.status--observing .status__dot,
+.status--leased .status__dot { background: #6e9fd0; }
+.status--converged .status__dot { background: #65c391; }
+.status--ready .status__dot,
+.status--pending .status__dot,
+.status--waiting .status__dot { background: #e0aa5b; }
+.status--blocked .status__dot,
+.status--escalation_required .status__dot,
+.status--failed_recoverable .status__dot,
+.status--failed_terminal .status__dot { background: #d16c79; }
+
+@media (max-width: 1100px) {
+  .mission-workspace__layout { grid-template-columns: 1fr; }
+  .mission-health { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

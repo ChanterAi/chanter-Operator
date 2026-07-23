@@ -10,12 +10,31 @@ const OPERATOR_PROJECT_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
+// POST submission routes: injected with the mission-submit capability. The
+// Phase 2D–2F mission-graph submission routes join the legacy runtime-mission
+// routes here — submission can never approve.
 const MISSION_SUBMIT_PATHS = [
   /^\/api\/runtime-missions$/,
   /^\/api\/runtime-missions\/autoposter\/schedule$/,
+  /^\/api\/mission-graphs$/,
+  /^\/api\/mission-graphs\/autoposter-schedule$/,
 ];
-const MISSION_CONTROL_PATHS = [
+// POST control routes: injected with the independent mission-control
+// capability (approve/resume/cancel/refresh/evidence/observation actions).
+const MISSION_CONTROL_POST_PATHS = [
   /^\/api\/runtime-missions\/[^/]+\/(?:approve|reconcile|resume|stop)$/,
+  /^\/api\/mission-graphs\/[^/]+\/(?:approve|resume|cancel)$/,
+  /^\/api\/mission-graphs\/[^/]+\/autoposter-results\/refresh$/,
+  /^\/api\/mission-graphs\/[^/]+\/evidence$/,
+  /^\/api\/autoposter-observations\/run$/,
+  /^\/api\/autoposter-observations\/escalations\/[^/]+\/(?:acknowledge|resolve)$/,
+];
+// GET reads that the backend classifies as internal control capability: the
+// entire autonomous-observation surface (jobs and escalations, list + detail)
+// is control-gated, so its projection reads carry the control token too.
+const MISSION_CONTROL_GET_PATHS = [
+  /^\/api\/autoposter-observations\/jobs(?:\/[^/]+)?$/,
+  /^\/api\/autoposter-observations\/escalations(?:\/[^/]+)?$/,
 ];
 
 function operatorApiProxy(
@@ -27,14 +46,29 @@ function operatorApiProxy(
       target: OPERATOR_API_ORIGIN,
       configure(proxy) {
         proxy.on("proxyReq", (proxyRequest, request) => {
-          if (request.method !== "POST") return;
+          const method = request.method ?? "GET";
+          if (method !== "POST" && method !== "GET") return;
+          // Only inject for requests the browser itself marks as originating
+          // from the Operator UI. Both signals are set by the browser and
+          // cannot be forged from page scripts; GET fetches omit Origin, so
+          // Sec-Fetch-Site carries the same-origin proof for the read routes.
+          const sameOrigin =
+            request.headers.origin === OPERATOR_UI_ORIGIN ||
+            request.headers["sec-fetch-site"] === "same-origin";
+          if (!sameOrigin) return;
           const pathname = new URL(request.url ?? "/", OPERATOR_UI_ORIGIN).pathname;
-          if (request.headers.origin !== OPERATOR_UI_ORIGIN) return;
-          const capabilityToken = MISSION_SUBMIT_PATHS.some((pattern) => pattern.test(pathname))
-            ? missionSubmitToken
-            : MISSION_CONTROL_PATHS.some((pattern) => pattern.test(pathname))
+          let capabilityToken = "";
+          if (method === "POST") {
+            capabilityToken = MISSION_SUBMIT_PATHS.some((pattern) => pattern.test(pathname))
+              ? missionSubmitToken
+              : MISSION_CONTROL_POST_PATHS.some((pattern) => pattern.test(pathname))
+                ? missionControlToken
+                : "";
+          } else {
+            capabilityToken = MISSION_CONTROL_GET_PATHS.some((pattern) => pattern.test(pathname))
               ? missionControlToken
               : "";
+          }
           if (!capabilityToken) return;
           proxyRequest.setHeader("Authorization", `Bearer ${capabilityToken}`);
         });

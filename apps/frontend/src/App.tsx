@@ -8,6 +8,7 @@ import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { ReadonlyRunnerPanel } from "./components/ReadonlyRunnerPanel";
 import { AutoPosterMissionPanel } from "./components/AutoPosterMissionPanel";
 import { AgentRunLedgerPanel } from "./components/AgentRunLedgerPanel";
+import { MissionWorkspacePanel } from "./components/MissionWorkspacePanel";
 
 type Operation = "creating" | "approving" | "rejecting" | "cancelling" | "retrying" | "adding-evidence" | "adding-commit-review";
 
@@ -22,7 +23,7 @@ export default function App() {
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
-  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "agent-run-ledger">("cockpit");
+  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "mission-workspace" | "agent-run-ledger">("cockpit");
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -139,6 +140,14 @@ export default function App() {
         >
           AutoPoster Mission
         </button>
+        <button
+          className={"tab-nav__button" + (activeTab === "mission-workspace" ? " tab-nav__button--active" : "")}
+          onClick={() => setActiveTab("mission-workspace")}
+          type="button"
+          aria-pressed={activeTab === "mission-workspace"}
+        >
+          Mission Workspace
+        </button>
         <a
           className={"tab-nav__button" + (activeTab === "agent-run-ledger" ? " tab-nav__button--active" : "")}
           href="#agent-run-ledger"
@@ -210,6 +219,8 @@ export default function App() {
         </div>
       ) : activeTab === "autoposter-mission" ? (
         <AutoPosterMissionPanel />
+      ) : activeTab === "mission-workspace" ? (
+        <MissionWorkspacePanel />
       ) : (
         <AgentRunLedgerPanel />
       )}
