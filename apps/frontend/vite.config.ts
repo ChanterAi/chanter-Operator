@@ -4,7 +4,14 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, loadEnv, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 
-const OPERATOR_API_ORIGIN = "http://127.0.0.1:3001";
+// The Operator backend origin the dev/preview proxy forwards `/api` to.
+// Defaults to the standard local port; override with OPERATOR_API_ORIGIN (or a
+// bare OPERATOR_PORT) to drive the UI against another running Operator instance
+// — e.g. the connected local-mission host on :3101.
+const OPERATOR_API_ORIGIN =
+  process.env.OPERATOR_API_ORIGIN?.trim() ||
+  (process.env.OPERATOR_PORT?.trim() ? `http://127.0.0.1:${process.env.OPERATOR_PORT.trim()}` : "") ||
+  "http://127.0.0.1:3001";
 const OPERATOR_UI_ORIGIN = "http://127.0.0.1:5173";
 const OPERATOR_PROJECT_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

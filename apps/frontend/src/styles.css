@@ -1806,3 +1806,13 @@ pre { margin: 0; padding: 14px; overflow: auto; border: 1px solid #202630; borde
   .mission-workspace__layout { grid-template-columns: 1fr; }
   .mission-health { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* Ascension II — connected-proof truth labels */
+.mission-truth-labels { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 4px; }
+.truth-chip {
+  font-size: 10px; font-weight: 650; letter-spacing: .03em;
+  padding: 3px 9px; border-radius: 999px;
+  border: 1px solid #303642; background: #0b0e13; color: #aab2c0;
+}
+.truth-chip--ok { border-color: #2b5a41; background: #0f1a14; color: #9bd7b5; }
+.truth-chip--warn { border-color: #6a4a26; background: #1c140b; color: #e0aa5b; }

@@ -204,6 +204,9 @@ export function MissionWorkspacePanel() {
   );
   const openEscalations = escalations.filter((item) => item.status === "open").length;
 
+  const autoposterConnected = health?.runtimeMissions?.autoposter?.configured ?? false;
+  const publishingEnabled = health?.runtimeMissions?.autoposter?.publishingEnabled ?? false;
+
   const backlog = graphs.filter((item) => !TERMINAL_GRAPH_STATES.has(item.status)).length;
   const awaitingApproval = graphs.filter((item) => item.status === "approval_required").length;
   const lastCompleted = graphs.find((item) => item.status === "completed") ?? null;
@@ -255,6 +258,18 @@ export function MissionWorkspacePanel() {
         <div className="mission-health__tile">
           <span className="mission-health__label">Last failed</span>
           <strong>{lastFailed ? lastFailed.graphId.slice(0, 8) : "None"}</strong>
+        </div>
+        <div className="mission-health__tile">
+          <span className="mission-health__label">AutoPoster runtime</span>
+          <strong className={autoposterConnected ? undefined : "mission-health__alert"}>
+            {autoposterConnected ? "Connected" : "Unconfigured"}
+          </strong>
+        </div>
+        <div className="mission-health__tile">
+          <span className="mission-health__label">Publishing</span>
+          <strong className={publishingEnabled ? "mission-health__alert" : undefined}>
+            {publishingEnabled ? "ENABLED" : "Blocked"}
+          </strong>
         </div>
       </section>
 
@@ -336,6 +351,20 @@ export function MissionWorkspacePanel() {
                 <span className={`status status--${graphStatusClass(graph.status)}`}>
                   <span className="status__dot" />
                   {humanize(graph.status)}
+                </span>
+              </div>
+
+              {/* Truth labels — only what the Operator can itself verify. The
+                  Firestore mode (emulator vs real) is owned by AutoPoster and is
+                  recorded authoritatively in the retained evidence bundle, not
+                  claimed here. */}
+              <div className="mission-truth-labels" aria-label="Proof truth labels">
+                <span className={"truth-chip" + (autoposterConnected ? " truth-chip--ok" : " truth-chip--warn")}>
+                  {autoposterConnected ? "Connected proof" : "Runtime unconfigured"}
+                </span>
+                <span className="truth-chip">Provider not contacted</span>
+                <span className={"truth-chip" + (publishingEnabled ? " truth-chip--warn" : " truth-chip--ok")}>
+                  {publishingEnabled ? "Publishing ENABLED" : "Public publishing blocked"}
                 </span>
               </div>
 
@@ -539,6 +568,15 @@ export function MissionWorkspacePanel() {
                             source {humanize(entry.projection.sourceStatus)}
                             {entry.projection.escalationReason
                               ? ` · escalation: ${humanize(entry.projection.escalationReason)}`
+                              : ""}
+                            {entry.projection.queueJobId ? (
+                              <>
+                                {" · draft "}
+                                <code>{entry.projection.queueJobId}</code>
+                              </>
+                            ) : null}
+                            {entry.projection.observedAt
+                              ? ` · observed ${entry.projection.observedAt}`
                               : ""}
                           </span>
                         ) : (

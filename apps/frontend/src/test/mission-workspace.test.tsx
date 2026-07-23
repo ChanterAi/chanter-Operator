@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as client from "../api/client";
@@ -242,5 +242,25 @@ describe("Mission Workspace panel", () => {
     await user.type(screen.getByLabelText("Actor"), "founder");
     await user.click(screen.getByRole("button", { name: "Acknowledge" }));
     expect(ackSpy).toHaveBeenCalledWith("esc-001", "founder");
+  });
+
+  it("renders connected-proof truth labels and runtime/publishing health from backend health", async () => {
+    // mockHealthHealthy reports autoposter.configured=true and
+    // publishingEnabled=false — the panel must surface those verifiable facts
+    // and never overclaim provider proof.
+    mockDetail();
+    render(<MissionWorkspacePanel />);
+
+    expect(await screen.findByText("Atoms (1)")).toBeInTheDocument();
+    const labels = screen.getByLabelText("Proof truth labels");
+    expect(within(labels).getByText("Connected proof")).toBeInTheDocument();
+    expect(within(labels).getByText("Provider not contacted")).toBeInTheDocument();
+    expect(within(labels).getByText("Public publishing blocked")).toBeInTheDocument();
+
+    // Health tiles reflect the same verifiable backend signals.
+    expect(screen.getByText("AutoPoster runtime")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    // No production-provider-proof language anywhere.
+    expect(document.body.textContent).not.toMatch(/production provider proof/i);
   });
 });
