@@ -816,3 +816,29 @@ export interface MissionGraphEvidenceResult {
   path: string;
   manifest: Record<string, unknown>;
 }
+
+// AutoPoster connected-health projection (verified Firestore-mode truth label).
+export type ConnectedHealthPrimaryLabel =
+  | "unconfigured"
+  | "unreachable"
+  | "health_stale"
+  | "firestore_emulator"
+  | "firestore_real"
+  | "firestore_unavailable"
+  | "health_unknown";
+
+export interface ConnectedHealthProjection {
+  configured: boolean;
+  autoPosterReachable: boolean;
+  storageMode: "emulator" | "real" | "unavailable" | "unknown" | null;
+  storageReachable: boolean | null;
+  publishingBlocked: boolean;
+  runtimeConfigured: boolean;
+  observedAt: string | null;
+  fetchedAt: string;
+  ageMs: number | null;
+  stale: boolean;
+  staleThresholdMs: number;
+  primaryLabel: ConnectedHealthPrimaryLabel;
+  error?: string;
+}

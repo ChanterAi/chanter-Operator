@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import {
   approveRuntimeMission,
   createAutoPosterScheduleMission,
+  fetchAutoPosterConnectedHealth,
   listAutoPosterConnectedAccounts,
   listRuntimeMissions,
   reconcileRuntimeMission,
@@ -11,11 +12,13 @@ import {
 import type {
   AutoPosterConnectedAccount,
   AutoPosterProvider,
+  ConnectedHealthProjection,
   CreateAutoPosterScheduleMissionInput,
   RuntimeJsonValue,
   RuntimeMission,
   RuntimeMissionResult,
 } from "../api/types";
+import { AutoPosterConnectedHealthBadge } from "./AutoPosterConnectedHealthBadge";
 
 type MissionOperation =
   | "loading"
@@ -152,6 +155,7 @@ export function AutoPosterMissionPanel() {
   const [workspaceId, setWorkspaceId] = useState("");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [connectedAccounts, setConnectedAccounts] = useState<AutoPosterConnectedAccount[]>([]);
+  const [connectedHealth, setConnectedHealth] = useState<ConnectedHealthProjection | null>(null);
   const [mediaUrl, setMediaUrl] = useState("");
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
@@ -199,6 +203,28 @@ export function AutoPosterMissionPanel() {
 
     return () => {
       active = false;
+    };
+  }, []);
+
+  // Poll the cheap connected-health read so the truth label stays fresh without
+  // any write or provider call. Failures degrade to the projection's own
+  // unreachable state, never an unhandled rejection.
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      fetchAutoPosterConnectedHealth()
+        .then((projection) => {
+          if (active) setConnectedHealth(projection);
+        })
+        .catch(() => {
+          /* projection carries its own unreachable state; ignore transient errors */
+        });
+    };
+    load();
+    const timer = setInterval(load, 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
     };
   }, []);
 
@@ -320,6 +346,8 @@ export function AutoPosterMissionPanel() {
           <span>This mission cannot publish; any returned queue draft must remain unapproved.</span>
         </div>
       </header>
+
+      <AutoPosterConnectedHealthBadge projection={connectedHealth} />
 
       {error && <div className="error-banner runtime-mission-error" role="alert">{error}</div>}
 

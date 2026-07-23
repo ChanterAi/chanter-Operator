@@ -17,6 +17,7 @@ import {
   createCapabilityTokenMiddleware,
 } from "../middleware/capabilityToken.js";
 import { config } from "../config.js";
+import { createAutoPosterConnectedHealthService } from "../runtimeMissions/autoPosterConnectedHealthService.js";
 import { validateMissionEnvelope } from "chanter-agent-runtime";
 
 function normalizeActionType(value: unknown): ActionType {
@@ -470,6 +471,17 @@ export function createApiRouter(
       return;
     }
     response.json(requireRuntimeMissionService().getMission(missionId));
+  });
+
+  // Cheap, read-only AutoPoster connected-health projection (verified Firestore
+  // mode + freshness). Built from config so it needs no extra wiring; degrades
+  // to an explicit unconfigured/unreachable state rather than throwing.
+  const connectedHealthService = createAutoPosterConnectedHealthService(config.autoPosterRuntime);
+  router.get("/runtime-missions/autoposter/connected-health", (_request, response, next) => {
+    connectedHealthService
+      .getConnectedHealth()
+      .then((projection) => response.json(projection))
+      .catch(next);
   });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {
