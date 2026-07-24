@@ -7,6 +7,7 @@ import { TaskDetailPanel } from "./components/TaskDetailPanel";
 import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { ReadonlyRunnerPanel } from "./components/ReadonlyRunnerPanel";
 import { AutoPosterMissionPanel } from "./components/AutoPosterMissionPanel";
+import { CapabilityWorkspacePanel } from "./components/CapabilityWorkspacePanel";
 import { AgentRunLedgerPanel } from "./components/AgentRunLedgerPanel";
 import { MissionWorkspacePanel } from "./components/MissionWorkspacePanel";
 
@@ -23,7 +24,7 @@ export default function App() {
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
-  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "mission-workspace" | "agent-run-ledger">("cockpit");
+  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "mission-workspace" | "agent-run-ledger" | "capabilities">("cockpit");
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -156,6 +157,14 @@ export default function App() {
         >
           Agent Run Ledger
         </a>
+        <a
+          className={"tab-nav__button" + (activeTab === "capabilities" ? " tab-nav__button--active" : "")}
+          href="#capabilities"
+          onClick={() => setActiveTab("capabilities")}
+          aria-current={activeTab === "capabilities" ? "page" : undefined}
+        >
+          Capabilities
+        </a>
       </nav>
 
       {error && <div className="error-banner" role="alert">{error}<button onClick={() => setError("")} type="button" aria-label="Dismiss error">&times;</button></div>}
@@ -221,6 +230,8 @@ export default function App() {
         <AutoPosterMissionPanel />
       ) : activeTab === "mission-workspace" ? (
         <MissionWorkspacePanel />
+      ) : activeTab === "capabilities" ? (
+        <CapabilityWorkspacePanel />
       ) : (
         <AgentRunLedgerPanel />
       )}

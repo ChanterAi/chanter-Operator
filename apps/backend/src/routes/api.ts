@@ -18,6 +18,7 @@ import {
 } from "../middleware/capabilityToken.js";
 import { config } from "../config.js";
 import { createAutoPosterConnectedHealthService } from "../runtimeMissions/autoPosterConnectedHealthService.js";
+import { createForgeCapabilityService } from "../capabilities/forgeCapabilityService.js";
 import { validateMissionEnvelope } from "chanter-agent-runtime";
 
 function normalizeActionType(value: unknown): ActionType {
@@ -482,6 +483,17 @@ export function createApiRouter(
       .getConnectedHealth()
       .then((projection) => response.json(projection))
       .catch(next);
+  });
+
+  // SDK Forge Capability Workspace (§14) — read-only projection of the capability
+  // registry. Degrades to an explicit unconfigured/unreachable state.
+  const forgeCapabilityService = createForgeCapabilityService(config.forge);
+  router.get("/capabilities", (_request, response, next) => {
+    forgeCapabilityService.listCapabilities().then((p) => response.json(p)).catch(next);
+  });
+  router.get("/capabilities/:capabilityId", (request, response, next) => {
+    const version = typeof request.query.version === "string" ? request.query.version : undefined;
+    forgeCapabilityService.describeCapability(request.params.capabilityId, version).then((d) => response.json(d)).catch(next);
   });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {

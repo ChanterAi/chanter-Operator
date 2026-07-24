@@ -99,6 +99,12 @@ export const config = {
         : undefined,
     timeoutValid: autoPosterRuntimeTimeoutValid,
   },
+  forge: {
+    // SDK Forge capability registry (read-only projection into the Operator
+    // Capability Workspace). Reuses the SDK token env.
+    baseUrl: process.env.CHANTER_FORGE_BASE_URL?.trim() ?? "",
+    token: process.env.CHANTER_SDK_TOKEN?.trim() ?? "",
+  },
   loopGovernorRuntime: {
     pythonExecutable: process.env.LOOP_GOVERNOR_PYTHON?.trim() ?? "",
     governorRoot: process.env.LOOP_GOVERNOR_ROOT?.trim() ?? "",

@@ -842,3 +842,22 @@ export interface ConnectedHealthProjection {
   primaryLabel: ConnectedHealthPrimaryLabel;
   error?: string;
 }
+
+// SDK Forge Capability Workspace projection.
+export interface CapabilitySummary {
+  capabilityId: string;
+  version: string;
+  category: string;
+  riskClass: string;
+  status: string;
+  health: { healthy: boolean; success: number; failure: number; lastSuccessAt: string | null } | null;
+}
+
+export interface CapabilityWorkspaceProjection {
+  configured: boolean;
+  reachable: boolean;
+  count: number;
+  capabilities: CapabilitySummary[];
+  fetchedAt: string;
+  error?: string;
+}

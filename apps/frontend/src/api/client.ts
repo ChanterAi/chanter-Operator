@@ -12,6 +12,7 @@ import type {
   AutoPosterObservationJobsResponse,
   AutoPosterResultProjectionsResponse,
   AutoPosterResultRefreshResponse,
+  CapabilityWorkspaceProjection,
   ConnectedHealthProjection,
   CreateAutoPosterScheduleMissionInput,
   CreateTaskInput,
@@ -66,6 +67,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchAutoPosterConnectedHealth(): Promise<ConnectedHealthProjection> {
   return request<ConnectedHealthProjection>("/api/runtime-missions/autoposter/connected-health");
+}
+
+export async function fetchForgeCapabilities(): Promise<CapabilityWorkspaceProjection> {
+  return request<CapabilityWorkspaceProjection>("/api/capabilities");
 }
 
 export async function listTasks(): Promise<TaskIntent[]> {
