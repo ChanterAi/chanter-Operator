@@ -861,3 +861,60 @@ export interface CapabilityWorkspaceProjection {
   fetchedAt: string;
   error?: string;
 }
+
+// CHANTER LIVE MISSION SHOWCASE I (§8) — Platform Readiness demo presentation.
+export interface DemoReadinessBadges {
+  readOnlyMission: boolean;
+  realInternetCapability: boolean;
+  localAI: boolean;
+  humanApprovalRequired: boolean;
+  externalWrites: number;
+  evidenceRetained: boolean;
+}
+
+export interface DemoReadinessAtom {
+  atomId: string;
+  title: string;
+  status: string;
+  capability: string | null;
+  provenance: string | null;
+  durationMs: number | null;
+}
+
+export interface DemoReadinessClaim {
+  claim: string;
+  sourceRefs: string[];
+}
+
+export interface DemoReadinessState {
+  present: boolean;
+  missionId?: string;
+  title?: string;
+  objective?: string;
+  status?: string;
+  currentPhase?: { atomId: string; title: string; status: string } | null;
+  progress?: { done: number; total: number };
+  currentCapability?: string | null;
+  localModel?: string | null;
+  internetSource?: string | null;
+  liveProvenance?: string[];
+  approvalState?: string;
+  finalResult?: { verdict?: string; readiness?: string } | null;
+  evidenceState?: { retained: boolean; evidenceRef?: string; manifestHash?: string };
+  badges?: DemoReadinessBadges;
+  brief?: { readiness: string; wordCount: number | null; strongestProof?: DemoReadinessClaim | null } | null;
+  claims?: { validated: DemoReadinessClaim[]; rejected: Array<{ claim: string; reason: string }>; readiness: { final: string; claimed: string; downgraded: boolean } } | null;
+  counters?: { providerReads: number; providerWrites: number; modelCalls: number };
+  atoms?: DemoReadinessAtom[];
+  graphHash?: string;
+  updatedAt?: string;
+  replayed?: boolean;
+}
+
+export interface DemoReadinessResponse {
+  configured: boolean;
+  reachable: boolean;
+  state: DemoReadinessState | null;
+  fetchedAt: string;
+  error?: string;
+}

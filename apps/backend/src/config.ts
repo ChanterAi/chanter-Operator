@@ -105,6 +105,13 @@ export const config = {
     baseUrl: process.env.CHANTER_FORGE_BASE_URL?.trim() ?? "",
     token: process.env.CHANTER_SDK_TOKEN?.trim() ?? "",
   },
+  demoReadiness: {
+    // Platform Readiness demo presentation server (chanter-sdk-forge/demo).
+    // Read-only projection + thin control proxy into the Operator Mission
+    // Workspace. Defaults to the standard local demo port; the mission is
+    // read-only and holds no secrets, so no token is required.
+    baseUrl: process.env.CHANTER_DEMO_BASE_URL?.trim() || "http://127.0.0.1:4900",
+  },
   loopGovernorRuntime: {
     pythonExecutable: process.env.LOOP_GOVERNOR_PYTHON?.trim() ?? "",
     governorRoot: process.env.LOOP_GOVERNOR_ROOT?.trim() ?? "",

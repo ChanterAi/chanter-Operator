@@ -19,6 +19,7 @@ import {
 import { config } from "../config.js";
 import { createAutoPosterConnectedHealthService } from "../runtimeMissions/autoPosterConnectedHealthService.js";
 import { createForgeCapabilityService } from "../capabilities/forgeCapabilityService.js";
+import { createDemoReadinessService } from "../demoReadiness/demoReadinessService.js";
 import { validateMissionEnvelope } from "chanter-agent-runtime";
 
 function normalizeActionType(value: unknown): ActionType {
@@ -494,6 +495,39 @@ export function createApiRouter(
   router.get("/capabilities/:capabilityId", (request, response, next) => {
     const version = typeof request.query.version === "string" ? request.query.version : undefined;
     forgeCapabilityService.describeCapability(request.params.capabilityId, version).then((d) => response.json(d)).catch(next);
+  });
+
+  // CHANTER LIVE MISSION SHOWCASE I (§8) — Platform Readiness demo presentation
+  // mode. Read-only projection + thin control proxy over the disposable demo
+  // presentation server. The demo lane is read-only and holds no secrets, so
+  // (like the capability projection) it carries no capability token. Degrades to
+  // an explicit unconfigured/unreachable state; never throws.
+  const demoReadinessService = createDemoReadinessService(config.demoReadiness);
+  router.get("/demo/platform-readiness/state", (request, response, next) => {
+    const missionId = typeof request.query.missionId === "string" ? request.query.missionId : undefined;
+    demoReadinessService.getState(missionId).then((p) => response.json(p)).catch(next);
+  });
+  router.get("/demo/platform-readiness/brief", (request, response, next) => {
+    const missionId = typeof request.query.missionId === "string" ? request.query.missionId : undefined;
+    demoReadinessService.getBrief(missionId).then((p) => response.json(p)).catch(next);
+  });
+  router.post("/demo/platform-readiness/start", (request, response, next) => {
+    const key = typeof request.body?.idempotencyKey === "string" ? request.body.idempotencyKey : undefined;
+    demoReadinessService.start(key).then((p) => response.json(p)).catch(next);
+  });
+  router.post("/demo/platform-readiness/approve", (request, response, next) => {
+    const missionId = typeof request.body?.missionId === "string" ? request.body.missionId : undefined;
+    const actor = typeof request.body?.actor === "string" ? request.body.actor : undefined;
+    demoReadinessService.approve(missionId, actor).then((p) => response.json(p)).catch(next);
+  });
+  router.post("/demo/platform-readiness/reject", (request, response, next) => {
+    const missionId = typeof request.body?.missionId === "string" ? request.body.missionId : undefined;
+    const actor = typeof request.body?.actor === "string" ? request.body.actor : undefined;
+    const reason = typeof request.body?.reason === "string" ? request.body.reason : undefined;
+    demoReadinessService.reject(missionId, actor, reason).then((p) => response.json(p)).catch(next);
+  });
+  router.post("/demo/platform-readiness/reset", (_request, response, next) => {
+    demoReadinessService.reset().then((p) => response.json(p)).catch(next);
   });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {

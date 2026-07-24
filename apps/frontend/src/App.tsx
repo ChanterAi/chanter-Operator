@@ -8,6 +8,7 @@ import { TaskQueuePanel } from "./components/TaskQueuePanel";
 import { ReadonlyRunnerPanel } from "./components/ReadonlyRunnerPanel";
 import { AutoPosterMissionPanel } from "./components/AutoPosterMissionPanel";
 import { CapabilityWorkspacePanel } from "./components/CapabilityWorkspacePanel";
+import { PlatformReadinessPanel } from "./components/PlatformReadinessPanel";
 import { AgentRunLedgerPanel } from "./components/AgentRunLedgerPanel";
 import { MissionWorkspacePanel } from "./components/MissionWorkspacePanel";
 
@@ -24,7 +25,7 @@ export default function App() {
   const [detailError, setDetailError] = useState("");
   const [error, setError] = useState("");
   const [readiness, setReadiness] = useState<ReadinessState>({ kind: "loading" });
-  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "mission-workspace" | "agent-run-ledger" | "capabilities">("cockpit");
+  const [activeTab, setActiveTab] = useState<"cockpit" | "runner" | "autoposter-mission" | "mission-workspace" | "platform-readiness" | "agent-run-ledger" | "capabilities">("cockpit");
 
   const refreshTasks = useCallback(async () => {
     const nextTasks = await listTasks();
@@ -149,6 +150,14 @@ export default function App() {
         >
           Mission Workspace
         </button>
+        <button
+          className={"tab-nav__button" + (activeTab === "platform-readiness" ? " tab-nav__button--active" : "")}
+          onClick={() => setActiveTab("platform-readiness")}
+          type="button"
+          aria-pressed={activeTab === "platform-readiness"}
+        >
+          Platform Readiness
+        </button>
         <a
           className={"tab-nav__button" + (activeTab === "agent-run-ledger" ? " tab-nav__button--active" : "")}
           href="#agent-run-ledger"
@@ -230,6 +239,8 @@ export default function App() {
         <AutoPosterMissionPanel />
       ) : activeTab === "mission-workspace" ? (
         <MissionWorkspacePanel />
+      ) : activeTab === "platform-readiness" ? (
+        <PlatformReadinessPanel />
       ) : activeTab === "capabilities" ? (
         <CapabilityWorkspacePanel />
       ) : (

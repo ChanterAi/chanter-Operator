@@ -14,6 +14,7 @@ import type {
   AutoPosterResultRefreshResponse,
   CapabilityWorkspaceProjection,
   ConnectedHealthProjection,
+  DemoReadinessResponse,
   CreateAutoPosterScheduleMissionInput,
   CreateTaskInput,
   EvidenceBundleResponse,
@@ -71,6 +72,37 @@ export async function fetchAutoPosterConnectedHealth(): Promise<ConnectedHealthP
 
 export async function fetchForgeCapabilities(): Promise<CapabilityWorkspaceProjection> {
   return request<CapabilityWorkspaceProjection>("/api/capabilities");
+}
+
+// CHANTER LIVE MISSION SHOWCASE I (§8) — Platform Readiness demo presentation.
+export function fetchDemoReadinessState(missionId?: string): Promise<DemoReadinessResponse> {
+  const suffix = missionId ? `?missionId=${encodeURIComponent(missionId)}` : "";
+  return request<DemoReadinessResponse>(`/api/demo/platform-readiness/state${suffix}`);
+}
+
+export function startDemoReadiness(idempotencyKey?: string): Promise<DemoReadinessResponse> {
+  return request<DemoReadinessResponse>("/api/demo/platform-readiness/start", {
+    method: "POST",
+    body: JSON.stringify(idempotencyKey ? { idempotencyKey } : {}),
+  });
+}
+
+export function approveDemoReadiness(missionId: string, actor = "founder"): Promise<DemoReadinessResponse> {
+  return request<DemoReadinessResponse>("/api/demo/platform-readiness/approve", {
+    method: "POST",
+    body: JSON.stringify({ missionId, actor }),
+  });
+}
+
+export function rejectDemoReadiness(missionId: string, actor = "founder"): Promise<DemoReadinessResponse> {
+  return request<DemoReadinessResponse>("/api/demo/platform-readiness/reject", {
+    method: "POST",
+    body: JSON.stringify({ missionId, actor }),
+  });
+}
+
+export function resetDemoReadiness(): Promise<DemoReadinessResponse> {
+  return request<DemoReadinessResponse>("/api/demo/platform-readiness/reset", { method: "POST", body: "{}" });
 }
 
 export async function listTasks(): Promise<TaskIntent[]> {
