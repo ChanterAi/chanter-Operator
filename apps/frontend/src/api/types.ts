@@ -886,9 +886,35 @@ export interface DemoReadinessClaim {
   sourceRefs: string[];
 }
 
+export interface DemoResilienceBadges {
+  failureDetected: boolean;
+  statePersisted: boolean;
+  recoveryAvailable: boolean;
+  checkpointReused: boolean;
+  noDuplicateExecution: boolean;
+  externalWrites: number;
+  evidenceRetained: boolean;
+}
+
+export interface DemoResilienceView {
+  scenario: string;
+  injectedFailure: string | null;
+  affectedComponent: string | null;
+  missionStatus: string;
+  blocker?: { atomId: string; atomStatus: string; code?: string; reason?: string; resetAt?: string } | null;
+  retryBudget?: { used: number; allowed: number };
+  checkpointReused?: string[];
+  lastDurableState?: string;
+  recoveryStatus?: string;
+  smallestSafeNextAction?: string;
+  duplicatePrevention?: { oneMissionPerKey: boolean; assessmentRevisions: number; evidenceBundles: number };
+  badges?: DemoResilienceBadges;
+}
+
 export interface DemoReadinessState {
   present: boolean;
   missionId?: string;
+  resilience?: DemoResilienceView | null;
   title?: string;
   objective?: string;
   status?: string;

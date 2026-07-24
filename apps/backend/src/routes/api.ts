@@ -529,6 +529,17 @@ export function createApiRouter(
   router.post("/demo/platform-readiness/reset", (_request, response, next) => {
     demoReadinessService.reset().then((p) => response.json(p)).catch(next);
   });
+  // §7 resilience controls — read-only demo lane; local demo mode only (the demo
+  // server fails closed outside demo mode). No capability token.
+  router.post("/demo/platform-readiness/inject", (request, response, next) => {
+    const scenario = typeof request.body?.scenario === "string" ? request.body.scenario : "";
+    const key = typeof request.body?.idempotencyKey === "string" ? request.body.idempotencyKey : undefined;
+    demoReadinessService.injectResilience(scenario, key).then((p) => response.json(p)).catch(next);
+  });
+  router.post("/demo/platform-readiness/recover", (request, response, next) => {
+    const missionId = typeof request.body?.missionId === "string" ? request.body.missionId : undefined;
+    demoReadinessService.recover(missionId).then((p) => response.json(p)).catch(next);
+  });
 
   router.get("/runtime-missions/autoposter/connected-accounts", (request, response, next) => {
     let missions: AutoPosterMissionService;

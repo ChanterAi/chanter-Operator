@@ -105,6 +105,20 @@ export function resetDemoReadiness(): Promise<DemoReadinessResponse> {
   return request<DemoReadinessResponse>("/api/demo/platform-readiness/reset", { method: "POST", body: "{}" });
 }
 
+export function injectDemoResilience(scenario: string): Promise<DemoReadinessResponse> {
+  return request<DemoReadinessResponse>("/api/demo/platform-readiness/inject", {
+    method: "POST",
+    body: JSON.stringify({ scenario }),
+  });
+}
+
+export function recoverDemoReadiness(missionId?: string): Promise<DemoReadinessResponse & { recovered?: boolean; code?: string; retryAfter?: string }> {
+  return request<DemoReadinessResponse & { recovered?: boolean; code?: string; retryAfter?: string }>("/api/demo/platform-readiness/recover", {
+    method: "POST",
+    body: JSON.stringify(missionId ? { missionId } : {}),
+  });
+}
+
 export async function listTasks(): Promise<TaskIntent[]> {
   const result = await request<{ tasks: TaskIntent[] }>("/api/tasks");
   return result.tasks;

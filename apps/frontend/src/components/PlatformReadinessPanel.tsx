@@ -10,11 +10,15 @@ import { useCallback, useEffect, useState } from "react";
 import {
   approveDemoReadiness,
   fetchDemoReadinessState,
+  injectDemoResilience,
+  recoverDemoReadiness,
   rejectDemoReadiness,
   resetDemoReadiness,
   startDemoReadiness,
 } from "../api/client";
-import type { DemoReadinessAtom, DemoReadinessResponse, DemoReadinessState } from "../api/types";
+
+const RESILIENCE_SCENARIOS = ["internet-down", "model-down", "evidence-down", "rate-limit", "worker-pause", "process-kill"];
+import type { DemoReadinessAtom, DemoReadinessResponse, DemoReadinessState, DemoResilienceView } from "../api/types";
 
 export type Tone = "ok" | "warn" | "muted" | "error";
 
@@ -42,12 +46,28 @@ export function badgeList(state: DemoReadinessState): Array<{ label: string; on:
   ];
 }
 
+// §7 resilience truth badges.
+export function resilienceBadgeList(r: DemoResilienceView): Array<{ label: string; on: boolean }> {
+  const b = r.badges;
+  if (!b) return [];
+  return [
+    { label: "Failure detected", on: b.failureDetected },
+    { label: "State persisted", on: b.statePersisted },
+    { label: "Recovery available", on: b.recoveryAvailable },
+    { label: "Checkpoint reused", on: b.checkpointReused },
+    { label: "No duplicate execution", on: b.noDuplicateExecution },
+    { label: `External writes: ${b.externalWrites}`, on: b.externalWrites === 0 },
+    { label: "Evidence retained", on: b.evidenceRetained },
+  ];
+}
+
 const TONE_COLOR: Record<Tone, string> = { ok: "#1a7f37", warn: "#9a6700", error: "#b42318", muted: "#57606a" };
 const hourKey = () => `operator-ui-${new Date().toISOString().slice(0, 13)}`;
 
 export function PlatformReadinessPanel() {
   const [projection, setProjection] = useState<DemoReadinessResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const [scenario, setScenario] = useState(RESILIENCE_SCENARIOS[0]);
 
   const load = useCallback(() => {
     fetchDemoReadinessState().then(setProjection).catch(() => { /* projection carries its own state */ });
@@ -67,6 +87,8 @@ export function PlatformReadinessPanel() {
   const doApprove = async () => { if (!missionId) return; setBusy(true); try { setProjection(await approveDemoReadiness(missionId, "founder")); } finally { setBusy(false); load(); } };
   const doReject = async () => { if (!missionId) return; setBusy(true); try { setProjection(await rejectDemoReadiness(missionId, "founder")); } finally { setBusy(false); load(); } };
   const doReset = async () => { setBusy(true); try { setProjection(await resetDemoReadiness()); } finally { setBusy(false); load(); } };
+  const doInject = async () => { setBusy(true); try { setProjection(await injectDemoResilience(scenario)); } finally { setBusy(false); load(); } };
+  const doRecover = async () => { if (!missionId) return; setBusy(true); try { setProjection(await recoverDemoReadiness(missionId)); } finally { setBusy(false); load(); } };
 
   return (
     <section className="platform-readiness" aria-labelledby="platform-readiness-heading">
@@ -102,6 +124,14 @@ export function PlatformReadinessPanel() {
             {state?.replayed && <span style={{ alignSelf: "center", color: "#9a6700", fontSize: 12 }}>replayed — idempotent, no duplicate</span>}
           </div>
 
+          <div className="platform-readiness__resilience-controls" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+            <span style={{ fontSize: 12, color: "#57606a" }}>Resilience (demo-only):</span>
+            <select value={scenario} onChange={(e) => setScenario(e.target.value)} aria-label="Resilience scenario">
+              {RESILIENCE_SCENARIOS.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <button type="button" onClick={doInject} disabled={busy}>⚡ Inject failure</button>
+          </div>
+
           {!state?.present ? (
             <p role="note">No mission yet. Click “Start mission”.</p>
           ) : (
@@ -135,6 +165,33 @@ export function PlatformReadinessPanel() {
                   <dt>Evidence</dt><dd>{state.evidenceState?.retained ? `retained · ${state.evidenceState.evidenceRef}` : "not yet"}</dd>
                   <dt>Readiness</dt><dd>{state.brief?.readiness ?? state.claims?.readiness.final ?? "—"}</dd>
                 </dl>
+              </div>
+            </div>
+          )}
+
+          {state?.resilience && (
+            <div style={{ marginTop: 16, border: "1px solid #d0d7de", borderRadius: 8, padding: 12 }}>
+              <h3 style={{ fontSize: 13, textTransform: "uppercase", color: "#57606a", marginTop: 0 }}>
+                Resilience — scenario: {state.resilience.scenario}
+              </h3>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "8px 0" }}>
+                {resilienceBadgeList(state.resilience).map((badge) => (
+                  <span key={badge.label} style={{ border: "1px solid #d0d7de", borderRadius: 999, padding: "3px 10px", fontSize: 12, color: badge.on ? TONE_COLOR.ok : TONE_COLOR.muted }}>
+                    {badge.label}
+                  </span>
+                ))}
+              </div>
+              <dl style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 12px", fontSize: 13 }}>
+                <dt>Injected failure</dt><dd>{state.resilience.injectedFailure ?? "—"}{state.resilience.affectedComponent ? ` @ ${state.resilience.affectedComponent}` : ""}</dd>
+                <dt>Blocker</dt><dd>{state.resilience.blocker ? `${state.resilience.blocker.atomId} [${state.resilience.blocker.code}] — ${state.resilience.blocker.reason ?? ""}` : "none"}</dd>
+                <dt>Retry budget</dt><dd>{state.resilience.retryBudget ? `${state.resilience.retryBudget.used} used / ${state.resilience.retryBudget.allowed} allowed` : "—"}</dd>
+                <dt>Checkpoint reuse</dt><dd>{state.resilience.checkpointReused && state.resilience.checkpointReused.length ? `${state.resilience.checkpointReused.length} atom(s) reused` : "—"}</dd>
+                <dt>Recovery status</dt><dd>{state.resilience.recoveryStatus ?? "—"}</dd>
+                <dt>Smallest safe next action</dt><dd><b>{state.resilience.smallestSafeNextAction ?? "—"}</b></dd>
+                <dt>Duplicate prevention</dt><dd>{state.resilience.duplicatePrevention ? `one mission/key · ${state.resilience.duplicatePrevention.assessmentRevisions} revision(s) · ${state.resilience.duplicatePrevention.evidenceBundles} evidence bundle(s)` : "—"}</dd>
+              </dl>
+              <div className="platform-readiness__controls" style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button type="button" onClick={doRecover} disabled={busy || !state.resilience.badges?.recoveryAvailable}>⟳ Recover</button>
               </div>
             </div>
           )}

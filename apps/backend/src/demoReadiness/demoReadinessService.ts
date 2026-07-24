@@ -80,6 +80,8 @@ export interface DemoReadinessService {
   reject(missionId?: string, actor?: string, reason?: string): Promise<DemoReadinessResponse>;
   reset(): Promise<DemoReadinessResponse>;
   getBrief(missionId?: string): Promise<{ configured: boolean; reachable: boolean; markdown: string | null; error?: string }>;
+  injectResilience(scenario: string, idempotencyKey?: string): Promise<DemoReadinessResponse>;
+  recover(missionId?: string): Promise<DemoReadinessResponse & { recovered?: boolean; code?: string; retryAfter?: string }>;
 }
 
 export function createDemoReadinessService(config: DemoReadinessConfig, deps: Deps = {}): DemoReadinessService {
@@ -139,6 +141,21 @@ export function createDemoReadinessService(config: DemoReadinessConfig, deps: De
         return { configured, reachable: true, markdown };
       } catch {
         return { configured, reachable: false, markdown: null, error: "unreachable" };
+      }
+    },
+    injectResilience(scenario: string, idempotencyKey?: string) {
+      return call(`/demo/resilience/inject`, { method: "POST", body: JSON.stringify({ scenario, ...(idempotencyKey ? { idempotencyKey } : {}) }) });
+    },
+    async recover(missionId?: string) {
+      const fetchedAt = new Date(now()).toISOString();
+      if (!configured) return { configured, reachable: false, state: null, fetchedAt };
+      try {
+        const res = await doFetch(`${baseUrl}/demo/recover`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ missionId }) });
+        if (!res.ok) return { configured, reachable: false, state: null, fetchedAt, error: `http_${res.status}` };
+        const body = (await res.json()) as { recovered?: boolean; code?: string; retryAfter?: string; state?: DemoReadinessState };
+        return { configured, reachable: true, state: body.state ?? { present: false }, fetchedAt, recovered: body.recovered, code: body.code, retryAfter: body.retryAfter };
+      } catch {
+        return { configured, reachable: false, state: null, fetchedAt, error: "unreachable" };
       }
     },
   };
