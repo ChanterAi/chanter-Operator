@@ -19,6 +19,7 @@ export const AUTOPOSTER_SCHEDULE_INPUT_FIELDS = Object.freeze([
   "hashtags",
   "title",
   "description",
+  "soundMode",
   "scheduledAt",
   "providerProofMode",
   "approvedMedia",
@@ -36,6 +37,8 @@ export interface CanonicalAutoPosterSchedulePayload {
   hashtags: string;
   title: string;
   description: string;
+  soundMode: "keep_original" | "mute" | "tiktok_recommended";
+  soundModeExplicit: boolean;
   scheduledAt: string;
   providerProofMode: boolean;
   approvedMedia: AutoPosterApprovedMediaIdentity | null;
@@ -193,6 +196,25 @@ function approvedMediaIdentity(value: unknown): AutoPosterApprovedMediaIdentity 
   };
 }
 
+function validStagedMediaUri(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.protocol === "chanter-autoposter-staged:"
+    && parsed.hostname === "v1"
+    && !parsed.username
+    && !parsed.password
+    && !parsed.port
+    && !parsed.search
+    && !parsed.hash
+    && /^\/[A-Za-z0-9_-]+\.[0-9a-f]{64}$/.test(parsed.pathname)
+  );
+}
+
 export function validateAutoPosterScheduleInput(
   value: unknown,
   options: AutoPosterScheduleInputOptions = {},
@@ -265,6 +287,7 @@ export function validateAutoPosterScheduleInput(
 
   const mediaUrlValue = requiredString(input, "mediaUrl", 2_048);
   if (!mediaUrlValue.ok) return mediaUrlValue.result;
+  const stagedMedia = validStagedMediaUri(mediaUrlValue.value);
   let parsedMediaUrl: URL;
   try {
     parsedMediaUrl = new URL(mediaUrlValue.value);
@@ -275,23 +298,41 @@ export function validateAutoPosterScheduleInput(
     );
   }
   if (
-    parsedMediaUrl.protocol !== "https:"
-    || parsedMediaUrl.username
-    || parsedMediaUrl.password
-    || parsedMediaUrl.hash
+    !stagedMedia
+    && (
+      parsedMediaUrl.protocol !== "https:"
+      || parsedMediaUrl.username
+      || parsedMediaUrl.password
+      || parsedMediaUrl.hash
+    )
   ) {
     return failure(
       "AUTOPOSTER_MEDIA_URL_INVALID",
-      "mediaUrl must be an HTTPS URL without credentials or a fragment.",
+      "mediaUrl must be an HTTPS URL without credentials or a fragment, or an exact staged-upload URI.",
     );
   }
-  for (const key of parsedMediaUrl.searchParams.keys()) {
-    if (SENSITIVE_QUERY_KEY_PATTERN.test(key)) {
-      return failure(
-        "AUTOPOSTER_MEDIA_URL_SENSITIVE",
-        "mediaUrl must not contain credential or signature query parameters.",
-      );
+  if (!stagedMedia) {
+    for (const key of parsedMediaUrl.searchParams.keys()) {
+      if (SENSITIVE_QUERY_KEY_PATTERN.test(key)) {
+        return failure(
+          "AUTOPOSTER_MEDIA_URL_SENSITIVE",
+          "mediaUrl must not contain credential or signature query parameters.",
+        );
+      }
     }
+  }
+
+  const soundModeExplicit = input.soundMode !== undefined;
+  const soundMode = soundModeExplicit ? input.soundMode : "keep_original";
+  if (
+    soundMode !== "keep_original"
+    && soundMode !== "mute"
+    && soundMode !== "tiktok_recommended"
+  ) {
+    return failure(
+      "AUTOPOSTER_SOUND_MODE_INVALID",
+      "soundMode must be keep_original, mute, or tiktok_recommended.",
+    );
   }
 
   const caption = requiredString(input, "caption", 2_200, true);
@@ -367,6 +408,8 @@ export function validateAutoPosterScheduleInput(
       hashtags: hashtags.value,
       title: title.value,
       description: description.value,
+      soundMode,
+      soundModeExplicit,
       scheduledAt: normalizedScheduledAt,
       providerProofMode,
       approvedMedia,
@@ -385,6 +428,7 @@ export function autoPosterSchedulePayloadJson(
     hashtags: value.hashtags,
     ...(value.title ? { title: value.title } : {}),
     ...(value.description ? { description: value.description } : {}),
+    ...(value.soundModeExplicit ? { soundMode: value.soundMode } : {}),
     scheduledAt: value.scheduledAt,
     ...(value.providerProofMode
       ? { providerProofMode: true, approvedMedia: value.approvedMedia as unknown as JsonValue }

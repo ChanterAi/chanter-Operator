@@ -14,6 +14,7 @@ import {
   missionGraphNodesTableSql,
   PHASE_2D_GRAPH_NODE_PRODUCT_CHECK,
   PHASE_2E_GRAPH_NODE_PRODUCT_CHECK,
+  platformAutoPosterCommandsTableSql,
   safeCommitCloseoutEventsTableSql,
   safeCommitCloseoutIndexesSql,
   safeCommitCloseoutsTableSql,
@@ -42,6 +43,7 @@ export function createDatabase(databasePath: string): DatabaseSync {
     migrateSafeCommitCloseoutTables(database);
     database.exec(schema);
     migrateAutoPosterProviderProofColumns(database);
+    migrateAutoPosterSoundModeColumns(database);
     migrateMissionGraphReplayUniqueness(database);
 
     // P0.2 migration: add product_lane column
@@ -69,6 +71,10 @@ export function createDatabase(databasePath: string): DatabaseSync {
     // Phase 2E-C migration: additive observation job / attempt / escalation
     // tables, fail-closed on any unknown existing schema variant.
     migrateAutoPosterObservationTables(database);
+
+    // P0 canonical Platform command/linkage authority: one additive table in
+    // this same Operator database, never a second persistence system.
+    migratePlatformAutoPosterCommandsTable(database);
 
     return database;
   } catch (error) {
@@ -105,6 +111,80 @@ export function migrateAutoPosterProviderProofColumns(database: DatabaseSync): b
     database.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * Backward-compatible sound-policy custody. Historical rows resolve to the
+ * previous omitted behavior (`keep_original`, not explicitly supplied);
+ * canonical Platform commands persist an explicit closed-world value.
+ */
+export function migrateAutoPosterSoundModeColumns(database: DatabaseSync): boolean {
+  const table = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'autoposter_runtime_missions'",
+  ).get();
+  if (!table) return false;
+  const readColumns = () => database
+    .prepare("PRAGMA table_info(autoposter_runtime_missions)")
+    .all() as unknown as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      dflt_value: string | null;
+    }>;
+  const columns = new Map(readColumns().map((column) => [column.name, column]));
+  const expected = [
+    {
+      name: "sound_mode",
+      sql: `ALTER TABLE autoposter_runtime_missions
+        ADD COLUMN sound_mode TEXT NOT NULL DEFAULT 'keep_original'
+        CHECK (sound_mode IN ('keep_original', 'mute', 'tiktok_recommended'))`,
+      type: "TEXT",
+      defaultValue: "'keep_original'",
+    },
+    {
+      name: "sound_mode_explicit",
+      sql: `ALTER TABLE autoposter_runtime_missions
+        ADD COLUMN sound_mode_explicit INTEGER NOT NULL DEFAULT 0
+        CHECK (sound_mode_explicit IN (0, 1))`,
+      type: "INTEGER",
+      defaultValue: "0",
+    },
+    {
+      name: "graph_id_forwarded",
+      sql: `ALTER TABLE autoposter_runtime_missions
+        ADD COLUMN graph_id_forwarded INTEGER NOT NULL DEFAULT 0
+        CHECK (graph_id_forwarded IN (0, 1))`,
+      type: "INTEGER",
+      defaultValue: "0",
+    },
+  ] as const;
+
+  for (const column of expected) {
+    const existing = columns.get(column.name);
+    if (
+      existing
+      && (
+        existing.notnull !== 1
+        || existing.type.toUpperCase() !== column.type
+        || String(existing.dflt_value) !== column.defaultValue
+      )
+    ) {
+      throw new Error(
+        `AutoPoster sound-mode migration refused an unknown ${column.name} column.`,
+      );
+    }
+  }
+
+  const missing = expected.filter((column) => !columns.has(column.name));
+  if (missing.length === 0) return false;
+  return withTransaction(database, () => {
+    for (const column of missing) database.exec(column.sql);
+    const migrated = new Map(readColumns().map((column) => [column.name, column]));
+    if (expected.some((column) => !migrated.has(column.name))) {
+      throw new Error("AutoPoster sound-mode migration did not produce the reviewed columns.");
+    }
+    return true;
+  });
 }
 
 /**
@@ -403,6 +483,44 @@ export function migrateAutoPosterObservationTables(database: DatabaseSync): bool
     if (foreignKeyViolations.length > 0) {
       throw new Error(
         "Phase 2E-C observation migration failed foreign-key integrity validation.",
+      );
+    }
+    return true;
+  });
+}
+
+/**
+ * Additive Platform command/linkage migration. A lookalike table whose SQL is
+ * not the reviewed definition is refused; it is never rewritten or adopted.
+ */
+export function migratePlatformAutoPosterCommandsTable(database: DatabaseSync): boolean {
+  const tableName = "operator_platform_autoposter_commands";
+  const expectedSql = platformAutoPosterCommandsTableSql();
+  const row = database.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+  ).get(tableName) as { sql: string | null } | undefined;
+  if (row?.sql) {
+    if (compactSql(row.sql) !== compactSql(expectedSql)) {
+      throw new Error(
+        "Platform canonical command migration refused an unknown operator_platform_autoposter_commands schema.",
+      );
+    }
+    return false;
+  }
+
+  return withTransaction(database, () => {
+    database.exec(expectedSql);
+    const created = database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    ).get(tableName) as { sql: string | null } | undefined;
+    if (!created?.sql || compactSql(created.sql) !== compactSql(expectedSql)) {
+      throw new Error(
+        "Platform canonical command migration did not produce the reviewed schema.",
+      );
+    }
+    if (database.prepare("PRAGMA foreign_key_check").all().length > 0) {
+      throw new Error(
+        "Platform canonical command migration failed foreign-key integrity validation.",
       );
     }
     return true;

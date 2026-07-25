@@ -11,6 +11,7 @@ import type { AutoPosterMissionEvidenceService } from "../missions/autoPosterMis
 import type { AutoPosterResultProjectionService } from "../missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "../safeCommit/safeCommitCloseoutService.js";
+import type { PlatformAutoPosterCommandService } from "../platform/platformAutoPosterCommandService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -40,6 +41,7 @@ export function createApiRouter(
   // Appended, not inserted: see the matching comment in app.ts.
   autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
   autoPosterMissionEvidenceService?: AutoPosterMissionEvidenceService,
+  platformAutoPosterCommandService?: PlatformAutoPosterCommandService,
 ): Router {
   const router = Router();
 
@@ -129,6 +131,17 @@ export function createApiRouter(
       throw new OperatorError("AutoPoster mission evidence is unavailable.", 503);
     }
     return autoPosterMissionEvidenceService;
+  };
+
+  const requirePlatformAutoPosterCommandService = (): PlatformAutoPosterCommandService => {
+    if (!platformAutoPosterCommandService) {
+      throw new OperatorError(
+        "Platform AutoPoster command authority is unavailable.",
+        503,
+        "PLATFORM_COMMAND_AUTHORITY_UNAVAILABLE",
+      );
+    }
+    return platformAutoPosterCommandService;
   };
 
   const requireAutoPosterResultService = (): AutoPosterResultProjectionService => {
@@ -641,6 +654,55 @@ export function createApiRouter(
         return;
       }
       response.json(requireRuntimeMissionService().stopAndEscalate(missionId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Canonical Platform -> Operator -> Runtime -> AutoPoster path. Submission
+  // durably binds immutable command bytes before graph creation and can never
+  // approve. Execute requires the separate control capability and authorizes
+  // only creation of one unapproved draft; publication remains human-gated.
+  router.post(
+    "/platform/autoposter-commands",
+    missionSubmitTokenMiddleware,
+    (request, response, next) => {
+      requirePlatformAutoPosterCommandService()
+        .submit(request.body)
+        .then((command) => response.status(command.replayed ? 200 : 201).json(command))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/platform/autoposter-commands/:commandId/execute",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requirePlatformAutoPosterCommandService()
+        .execute(String(request.params.commandId), request.body)
+        .then((command) => response.json(command))
+        .catch(next);
+    },
+  );
+
+  // Loopback-safe stored projections. Reads perform no graph, Runtime,
+  // AutoPoster, observation, or evidence work.
+  router.get("/platform/autoposter-commands", (request, response, next) => {
+    try {
+      const parsedLimit = Number(request.query.limit ?? 50);
+      response.json({
+        commands: requirePlatformAutoPosterCommandService().list(parsedLimit),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/platform/autoposter-commands/:commandId", (request, response, next) => {
+    try {
+      response.json(
+        requirePlatformAutoPosterCommandService().get(String(request.params.commandId)),
+      );
     } catch (error) {
       next(error);
     }

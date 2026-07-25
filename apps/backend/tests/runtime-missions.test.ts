@@ -152,6 +152,9 @@ function makePort(overrides: Partial<AutoPosterOperationsPort> = {}): {
           status: "scheduled",
           scheduledAt: params.scheduledAt,
           approved: false,
+          campaignId: `autoposter-campaign:${params.missionId}`,
+          approvalId: `autoposter-approval:${params.missionId}`,
+          evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
         },
       };
     },
@@ -752,6 +755,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
             status: "scheduled",
             scheduledAt: params.scheduledAt,
             approved: false,
+            campaignId: `autoposter-campaign:${params.missionId}`,
+            approvalId: `autoposter-approval:${params.missionId}`,
+            evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
           },
         };
       },
@@ -1051,6 +1057,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
             status: "scheduled",
             scheduledAt: params.scheduledAt,
             approved: false,
+            campaignId: `autoposter-campaign:${params.missionId}`,
+            approvalId: `autoposter-approval:${params.missionId}`,
+            evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
           },
         };
       },
@@ -1240,6 +1249,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
             status: "scheduled",
             scheduledAt: params.scheduledAt,
             approved: false,
+            campaignId: `autoposter-campaign:${params.missionId}`,
+            approvalId: `autoposter-approval:${params.missionId}`,
+            evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
           },
         };
       },
@@ -1478,6 +1490,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       status: string;
       scheduledAt: string;
       approved: boolean;
+      campaignId: string;
+      approvalId: string;
+      evidenceBundleId: string;
     } | null = null;
     const reconciliationCalls: unknown[] = [];
     const { port } = makePort({
@@ -1490,6 +1505,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
           status: "scheduled",
           scheduledAt: params.scheduledAt,
           approved: false,
+          campaignId: `autoposter-campaign:${params.missionId}`,
+          approvalId: `autoposter-approval:${params.missionId}`,
+          evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
         };
         throw new Error("Simulated Runtime interruption after durable queue creation.");
       },

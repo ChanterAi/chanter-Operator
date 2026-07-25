@@ -130,8 +130,12 @@ interface StoredPost {
   runtimeIdempotencyKey: string;
   runtimeScheduledBy: string;
   runtimeMissionId: string;
+  runtimeGraphId: string;
   runtimeAction: string;
   runtimePayloadHash: string;
+  campaignId: string;
+  approvalId: string;
+  evidenceBundleId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -267,8 +271,14 @@ function createStorageBoundary(): StorageBoundary {
         runtimeIdempotencyKey: defaults.runtimeIdempotencyKey,
         runtimeScheduledBy: defaults.runtimeScheduledBy,
         runtimeMissionId: defaults.runtimeMissionId,
+        runtimeGraphId: defaults.runtimeGraphId,
         runtimeAction: defaults.runtimeAction,
         runtimePayloadHash: defaults.runtimePayloadHash,
+        campaignId:
+          defaults.campaignId
+          || `autoposter-campaign:${defaults.runtimeMissionId || id}`,
+        approvalId: defaults.approvalId,
+        evidenceBundleId: defaults.evidenceBundleId,
         createdAt: timestamp,
         updatedAt: timestamp,
       };

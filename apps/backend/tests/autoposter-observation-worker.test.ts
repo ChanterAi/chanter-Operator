@@ -389,6 +389,9 @@ function makeAutoPosterBoundary(): FakeAutoPosterBoundary {
       const existing = jobs.get(params.idempotencyKey);
       const asPost = (job: typeof existing extends undefined ? never : NonNullable<typeof existing>) => ({
         id: job.id, accountId: job.accountId, provider: job.provider, status: "scheduled", scheduledAt: job.scheduledAt, approved: false,
+        campaignId: `autoposter-campaign:${job.missionId}`,
+        approvalId: `autoposter-approval:${job.missionId}`,
+        evidenceBundleId: `autoposter-evidence:${params.graphId ?? job.missionId}`,
       });
       if (existing) return { ok: true, duplicate: true, post: asPost(existing) };
       const job = {

@@ -219,6 +219,9 @@ function makeBoundary(): Boundary {
         status: "scheduled",
         scheduledAt: job.scheduledAt,
         approved: false,
+        campaignId: `autoposter-campaign:${job.missionId}`,
+        approvalId: `autoposter-approval:${job.missionId}`,
+        evidenceBundleId: `autoposter-evidence:${params.graphId ?? job.missionId}`,
       });
       if (existing) return { ok: true, duplicate: true, post: asPost(existing) };
       const job: QueueDraft = {

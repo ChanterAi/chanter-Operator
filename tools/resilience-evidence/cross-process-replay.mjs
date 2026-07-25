@@ -99,8 +99,14 @@ const storage = {
       runtimeIdempotencyKey: defaults.runtimeIdempotencyKey,
       runtimeScheduledBy: defaults.runtimeScheduledBy,
       runtimeMissionId: defaults.runtimeMissionId,
+      runtimeGraphId: defaults.runtimeGraphId,
       runtimeAction: defaults.runtimeAction,
       runtimePayloadHash: defaults.runtimePayloadHash,
+      campaignId:
+        defaults.campaignId
+        || `autoposter-campaign:${defaults.runtimeMissionId || defaults.documentId}`,
+      approvalId: defaults.approvalId,
+      evidenceBundleId: defaults.evidenceBundleId,
     };
     jobs.push(post);
     return [post];
@@ -149,8 +155,10 @@ const server = http.createServer(async (request, response) => {
         hashtags: body.hashtags,
         requestedBy: body.requestedBy,
         runtimeMissionId: body.missionId,
+        runtimeGraphId: body.graphId,
         runtimeAction: body.action,
         runtimePayloadHash: body.missionPayloadHash,
+        soundMode: body.soundMode,
         requireSingle: true,
         schedule: {
           mode: "explicit",
@@ -172,6 +180,7 @@ const server = http.createServer(async (request, response) => {
         accountId: body.accountId,
         scheduledAt: body.scheduledAt,
         runtimeMissionId: body.missionId,
+        runtimeGraphId: body.graphId,
         runtimeAction: body.action,
         runtimePayloadHash: body.missionPayloadHash,
       });

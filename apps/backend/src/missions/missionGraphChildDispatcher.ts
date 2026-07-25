@@ -58,6 +58,14 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
     && actual.every((key, index) => key === expected[index]);
 }
 
+function stableDownstreamId(value: unknown): value is string {
+  return typeof value === "string"
+    && Boolean(value)
+    && value === value.trim()
+    && value.length <= 256
+    && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 function projectGenericMission(mission: GenericRuntimeMission): MissionGraphChildMission {
   const executionState = mission.execution?.state ?? null;
   const downstreamIds = mission.execution?.downstreamIds ?? null;
@@ -102,11 +110,19 @@ function autoPosterSuccessProjection(
   | { safe: false } {
   const output = jsonObject(mission.runtimeResult?.output);
   const post = jsonObject(output?.post);
+  const expectedEvidenceBundleId = mission.graphIdForwarded
+    ? mission.graphId
+      ? `autoposter-evidence:${mission.graphId}`
+      : null
+    : `autoposter-evidence:${mission.missionId}`;
   if (
     !output
     || !post
     || !hasExactKeys(output, ["duplicate", "post", "publishing"])
-    || !hasExactKeys(post, ["id", "accountId", "provider", "status", "scheduledAt", "approved"])
+    || !hasExactKeys(post, [
+      "id", "accountId", "provider", "status", "scheduledAt", "approved",
+      "campaignId", "approvalId", "evidenceBundleId",
+    ])
     || typeof output.duplicate !== "boolean"
     || output.publishing !== "blocked_until_human_approval"
     || post.id !== evidence.queueDraftId
@@ -116,6 +132,10 @@ function autoPosterSuccessProjection(
     || post.status !== "scheduled"
     || post.scheduledAt !== mission.scheduledAt
     || post.approved !== false
+    || !stableDownstreamId(post.campaignId)
+    || post.approvalId !== `autoposter-approval:${mission.missionId}`
+    || expectedEvidenceBundleId === null
+    || post.evidenceBundleId !== expectedEvidenceBundleId
     || evidence.persistedDraftStatus !== "scheduled"
     || evidence.releaseApprovalState !== "required"
     || evidence.publishingState !== "blocked_until_human_approval"
@@ -128,6 +148,10 @@ function autoPosterSuccessProjection(
   }
   const downstreamIds = {
     queueDraftId: evidence.queueDraftId,
+    campaignId: post.campaignId,
+    jobIds: [evidence.queueDraftId],
+    approvalId: post.approvalId,
+    evidenceBundleId: post.evidenceBundleId,
     provider: mission.provider,
     accountId: mission.accountId,
     scheduledAt: mission.scheduledAt,
@@ -186,6 +210,9 @@ function projectAutoPosterMission(mission: AutoPosterRuntimeMission): MissionGra
     evidenceReferences: [
       `child-mission:${mission.missionId}`,
       ...(projected.safe ? [`autoposter-queue:${projected.downstreamIds.queueDraftId}`] : []),
+      ...(projected.safe ? [`autoposter-campaign:${projected.downstreamIds.campaignId}`] : []),
+      ...(projected.safe ? [`approval-id:${projected.downstreamIds.approvalId}`] : []),
+      ...(projected.safe ? [`evidence-bundle-id:${projected.downstreamIds.evidenceBundleId}`] : []),
     ],
   };
 }

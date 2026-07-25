@@ -112,8 +112,12 @@ interface StoredPost {
   runtimeIdempotencyKey: string;
   runtimeScheduledBy: string;
   runtimeMissionId: string;
+  runtimeGraphId: string;
   runtimeAction: string;
   runtimePayloadHash: string;
+  campaignId: string;
+  approvalId: string;
+  evidenceBundleId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -239,8 +243,14 @@ function createStorageBoundary(): StorageBoundary {
         runtimeIdempotencyKey: defaults.runtimeIdempotencyKey,
         runtimeScheduledBy: defaults.runtimeScheduledBy,
         runtimeMissionId: defaults.runtimeMissionId,
+        runtimeGraphId: defaults.runtimeGraphId,
         runtimeAction: defaults.runtimeAction,
         runtimePayloadHash: defaults.runtimePayloadHash,
+        campaignId:
+          defaults.campaignId
+          || `autoposter-campaign:${defaults.runtimeMissionId || id}`,
+        approvalId: defaults.approvalId,
+        evidenceBundleId: defaults.evidenceBundleId,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -753,8 +763,12 @@ test("Phase 2E-A real contract: partial resume and idempotency conflict create n
     runtimeIdempotencyKey: childMissionId,
     runtimeScheduledBy: "other-caller",
     runtimeMissionId: "different-mission-binding",
+    runtimeGraphId: conflict.graphId,
     runtimeAction: "autoposter.post.schedule",
     runtimePayloadHash: "0".repeat(64),
+    campaignId: "autoposter-campaign:different-mission-binding",
+    approvalId: "autoposter-approval:different-mission-binding",
+    evidenceBundleId: `autoposter-evidence:${conflict.graphId}`,
     createdAt: seedTimestamp,
     updatedAt: seedTimestamp,
   });
