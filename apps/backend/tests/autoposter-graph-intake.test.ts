@@ -64,6 +64,9 @@ interface QueueDraft {
   missionId: string;
   action: string;
   missionPayloadHash: string;
+  campaignId: string;
+  approvalId: string;
+  evidenceBundleId: string;
 }
 
 interface FakeAutoPosterBoundary {
@@ -176,6 +179,9 @@ function makeAutoPosterBoundary(): FakeAutoPosterBoundary {
         missionId: params.missionId,
         action: params.action,
         missionPayloadHash: params.missionPayloadHash,
+        campaignId: `autoposter-campaign:${params.missionId}`,
+        approvalId: `autoposter-approval:${params.missionId}`,
+        evidenceBundleId: `autoposter-evidence:${params.graphId}`,
       };
       jobs.set(params.idempotencyKey, job);
       return { ok: true, duplicate: false, post: job };

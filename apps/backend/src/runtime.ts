@@ -17,6 +17,7 @@ import { OperatorService } from "./services/operatorService.js";
 import { ensureWorkspace } from "./workspace/pathGuard.js";
 import { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
 import { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
+import { PlatformAutoPosterCommandService } from "./platform/platformAutoPosterCommandService.js";
 
 export function createRuntime() {
   const database = createDatabase(config.databasePath);
@@ -94,6 +95,14 @@ export function createRuntime() {
     config.evidenceDir,
     protectedValues,
   );
+  const platformAutoPosterCommandService = new PlatformAutoPosterCommandService(
+    database,
+    missionGraphService,
+    runtimeMissionService,
+    runtimeMissionExecutor,
+    autoPosterMissionEvidenceService,
+    { protectedValues },
+  );
   const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
     protectedValues,
   });
@@ -109,6 +118,7 @@ export function createRuntime() {
     autoPosterObservationService,
     autoPosterObservationWorker,
     autoPosterMissionEvidenceService,
+    platformAutoPosterCommandService,
     safeCommitCloseoutService,
   };
 }

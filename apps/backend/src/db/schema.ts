@@ -35,6 +35,53 @@ export function missionGraphNodesTableSql(
 }
 
 /**
+ * Canonical Platform -> Operator AutoPoster command/linkage authority.
+ *
+ * One row is the complete durable cross-system identity binding. It is not a
+ * second graph, mission, or publishing database: immutable command bytes are
+ * persisted first, then linked to existing authorities as they materialize.
+ */
+export function platformAutoPosterCommandsTableSql(ifNotExists = false): string {
+  return `CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}operator_platform_autoposter_commands (
+  command_id TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL CHECK (schema_version = 'chanter.platform.autoposter.create-work.v1'),
+  tenant_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  intake_key TEXT NOT NULL,
+  canonical_json TEXT NOT NULL,
+  command_hash TEXT NOT NULL CHECK (length(command_hash) = 64),
+  graph_id TEXT UNIQUE,
+  graph_hash TEXT,
+  child_mission_id TEXT,
+  runtime_execution_id TEXT,
+  campaign_id TEXT,
+  job_ids_json TEXT NOT NULL DEFAULT '[]',
+  approval_id TEXT,
+  evidence_bundle_id TEXT,
+  evidence_manifest_path TEXT,
+  evidence_available INTEGER NOT NULL DEFAULT 0 CHECK (evidence_available IN (0, 1)),
+  trace_id TEXT,
+  lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN (
+    'accepted', 'approval_required', 'executing', 'failed_recoverable', 'completed', 'failed'
+  )),
+  product_state TEXT NOT NULL CHECK (product_state IN (
+    'not_started', 'recovery_required', 'draft_created', 'failed'
+  )),
+  draft_execution_approval_state TEXT NOT NULL CHECK (draft_execution_approval_state IN (
+    'required', 'approved'
+  )),
+  publication_approval_state TEXT NOT NULL CHECK (publication_approval_state = 'human_required'),
+  error_code TEXT,
+  error_message TEXT,
+  requested_at TEXT NOT NULL,
+  executed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (tenant_id, actor_id, intake_key)
+);`;
+}
+
+/**
  * Phase 2E-B bounded Operator projection of one AutoPoster publishing
  * lifecycle observation. These are the only ten states the projection may
  * derive; exact AutoPoster source/provider statuses are stored verbatim
@@ -478,7 +525,12 @@ CREATE TABLE IF NOT EXISTS autoposter_runtime_missions (
   hashtags TEXT NOT NULL,
   title TEXT,
   description TEXT,
+  sound_mode TEXT NOT NULL DEFAULT 'keep_original' CHECK (sound_mode IN (
+    'keep_original', 'mute', 'tiktok_recommended'
+  )),
+  sound_mode_explicit INTEGER NOT NULL DEFAULT 0 CHECK (sound_mode_explicit IN (0, 1)),
   graph_id TEXT,
+  graph_id_forwarded INTEGER NOT NULL DEFAULT 0 CHECK (graph_id_forwarded IN (0, 1)),
   provider_proof_mode INTEGER NOT NULL DEFAULT 0 CHECK (provider_proof_mode IN (0, 1)),
   approved_media_json TEXT,
   scheduled_at TEXT NOT NULL,

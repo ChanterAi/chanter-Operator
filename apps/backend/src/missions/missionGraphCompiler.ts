@@ -45,7 +45,7 @@ const GRAPH_TENANT_FIELDS = new Set(["userId", "workspaceId", "accountId"]);
 const GRAPH_NODE_FIELDS = new Set(["nodeId", "target", "objective", "input", "dependsOn"]);
 const GRAPH_NODE_TARGET_FIELDS = new Set(["product", "action"]);
 const VALID_SOURCE_SYSTEMS = new Set([
-  "operator", "mcp", "mission_compiler", "loop_governor", "human",
+  "operator", "platform", "mcp", "mission_compiler", "loop_governor", "human",
 ]);
 
 export interface MissionGraphCompileError {

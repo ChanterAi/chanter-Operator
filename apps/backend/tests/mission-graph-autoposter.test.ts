@@ -50,6 +50,9 @@ interface QueueDraft {
   missionId: string;
   action: string;
   missionPayloadHash: string;
+  campaignId: string;
+  approvalId: string;
+  evidenceBundleId: string;
 }
 
 interface FakeAutoPosterBoundary {
@@ -181,6 +184,9 @@ function makeAutoPosterBoundary(): FakeAutoPosterBoundary {
         missionId: params.missionId,
         action: params.action,
         missionPayloadHash: params.missionPayloadHash,
+        campaignId: `autoposter-campaign:${params.missionId}`,
+        approvalId: `autoposter-approval:${params.missionId}`,
+        evidenceBundleId: `autoposter-evidence:${params.graphId ?? params.missionId}`,
       };
       jobs.set(params.idempotencyKey, job);
       return { ok: true, duplicate: false, post: job };
@@ -284,6 +290,7 @@ interface Harness {
   database: DatabaseSync;
   databasePath: string;
   autoPoster: AutoPosterMissionService;
+  children: MissionGraphChildDispatcher;
   graphs: MissionGraphService;
   close(): void;
 }
@@ -334,9 +341,10 @@ function createHarness(
     ),
     { agentRunLedgerService: ledger, now: () => new Date(NOW) },
   );
+  const children = new MissionGraphChildDispatcher(generic, autoPoster);
   const graphs = new MissionGraphService(
     database,
-    new MissionGraphChildDispatcher(generic, autoPoster),
+    children,
     {
       now: () => new Date(NOW),
       failureInjector: options.graphFailureInjector,
@@ -347,6 +355,7 @@ function createHarness(
     database,
     databasePath,
     autoPoster,
+    children,
     graphs,
     close: () => {
       if (closed) return;
@@ -568,6 +577,47 @@ describe("Phase 2E-A AutoPoster graph authority", () => {
     expect(resumed.status).toBe("completed");
     expect(boundary.jobs.size).toBe(1);
     expect(tableCount(harness.database, "autoposter_runtime_missions")).toBe(1);
+    harness.close();
+  });
+
+  it("preserves mission-derived evidence IDs for pre-migration graph children", async () => {
+    const boundary = makeAutoPosterBoundary();
+    const harness = createHarness(boundary);
+    const missionId = "legacy-autoposter-graph-child";
+    const traceId = "legacy-autoposter-graph-child-trace";
+    const idempotencyKey = "legacy-autoposter-graph-child-key";
+    await harness.autoPoster.createScheduleMission({
+      missionId,
+      traceId,
+      idempotencyKey,
+      requestedBy: "founder-phase2e",
+      tenantUserId: OWNER_ID,
+      workspaceId: WORKSPACE_ID,
+      accountId: TIKTOK_ACCOUNT,
+      provider: "tiktok",
+      mediaUrl: "https://cdn.example.com/legacy-child.mp4",
+      caption: "Legacy graph child",
+      hashtags: "#chanter #legacy",
+      scheduledAt: TIKTOK_AT,
+    });
+    await harness.autoPoster.approveAndExecute(missionId, "founder-phase2e");
+    const projected = harness.children.getMission({
+      product: "auto_poster",
+      action: "autoposter.post.schedule",
+      childMissionId: missionId,
+      childTraceId: traceId,
+      childIdempotencyKey: idempotencyKey,
+    });
+    expect(projected.outcome).toBe("completed");
+    expect(boundary.scheduleCalls).toHaveLength(1);
+    expect(boundary.scheduleCalls[0]?.graphId).toBeUndefined();
+    expect(projected.resultSummary).toMatchObject({
+      approvalId: `autoposter-approval:${missionId}`,
+      evidenceBundleId: `autoposter-evidence:${missionId}`,
+      approved: false,
+    });
+    expect(boundary.jobs.size).toBe(1);
+    expect(boundary.providerPublishCalls).toBe(0);
     harness.close();
   });
 

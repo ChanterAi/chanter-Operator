@@ -53,6 +53,8 @@ export type AutoPosterMissionStatus =
   | "executing"
   | RuntimeMissionStatus;
 
+export type AutoPosterSoundMode = "keep_original" | "mute" | "tiktok_recommended";
+
 export interface AutoPosterRuntimeMission {
   replayed: boolean;
   missionId: string;
@@ -68,7 +70,10 @@ export interface AutoPosterRuntimeMission {
   hashtags: string;
   title: string | null;
   description: string | null;
+  soundMode: AutoPosterSoundMode;
+  soundModeExplicit: boolean;
   graphId: string | null;
+  graphIdForwarded: boolean;
   providerProofMode: boolean;
   approvedMedia: AutoPosterApprovedMediaIdentity | null;
   scheduledAt: string;
@@ -148,7 +153,10 @@ interface MissionRow {
   hashtags: string;
   title: string | null;
   description: string | null;
+  sound_mode: AutoPosterSoundMode;
+  sound_mode_explicit: number;
   graph_id: string | null;
+  graph_id_forwarded: number;
   provider_proof_mode: number;
   approved_media_json: string | null;
   scheduled_at: string;
@@ -175,7 +183,10 @@ interface CanonicalScheduleMissionInput {
   hashtags: string;
   title: string;
   description: string;
+  soundMode: AutoPosterSoundMode;
+  soundModeExplicit: boolean;
   graphId: string | null;
+  graphIdForwarded: boolean;
   providerProofMode: boolean;
   approvedMedia: AutoPosterApprovedMediaIdentity | null;
   scheduledAt: string;
@@ -467,7 +478,10 @@ function mapMission(
     hashtags: row.hashtags,
     title: row.title,
     description: row.description,
+    soundMode: row.sound_mode,
+    soundModeExplicit: row.sound_mode_explicit === 1,
     graphId: row.graph_id,
+    graphIdForwarded: row.graph_id_forwarded === 1,
     providerProofMode: row.provider_proof_mode === 1,
     approvedMedia: row.approved_media_json
       ? JSON.parse(row.approved_media_json) as AutoPosterApprovedMediaIdentity
@@ -688,9 +702,10 @@ export class AutoPosterMissionService {
         hashtags: input.hashtags,
         ...(input.title ? { title: input.title } : {}),
         ...(input.description ? { description: input.description } : {}),
+        ...(input.soundModeExplicit ? { soundMode: input.soundMode } : {}),
         scheduledAt: input.scheduledAt,
+        ...(input.graphIdForwarded && input.graphId ? { graphId: input.graphId } : {}),
         ...(input.providerProofMode ? {
-          graphId: input.graphId!,
           providerProofMode: true,
           approvedMedia: input.approvedMedia! as unknown as JsonValue,
         } : {}),
@@ -755,6 +770,8 @@ export class AutoPosterMissionService {
       || input.hashtags !== row.hashtags
       || (input.title || null) !== row.title
       || (input.description || null) !== row.description
+      || input.soundMode !== row.sound_mode
+      || input.soundModeExplicit !== (row.sound_mode_explicit === 1)
       || input.graphId !== row.graph_id
       || input.providerProofMode !== (row.provider_proof_mode === 1)
       || (input.approvedMedia ? JSON.stringify(input.approvedMedia) : null) !== row.approved_media_json
@@ -774,6 +791,7 @@ export class AutoPosterMissionService {
         traceId: row.trace_id,
         idempotencyKey: row.idempotency_key,
         workspaceId: row.workspace_id,
+        graphIdForwarded: row.graph_id_forwarded === 1,
       });
       if (expectedHash !== execution.missionPayloadHash) {
         this.bindingMismatch(
@@ -943,6 +961,8 @@ export class AutoPosterMissionService {
       hashtags,
       title,
       description,
+      soundMode,
+      soundModeExplicit,
       providerProofMode,
       approvedMedia,
       scheduledAt: normalizedScheduledAt,
@@ -987,7 +1007,10 @@ export class AutoPosterMissionService {
       hashtags,
       title,
       description,
+      soundMode,
+      soundModeExplicit,
       graphId,
+      graphIdForwarded: graphId !== null,
       providerProofMode,
       approvedMedia,
       scheduledAt: normalizedScheduledAt,
@@ -1053,10 +1076,11 @@ export class AutoPosterMissionService {
           `INSERT INTO autoposter_runtime_missions (
             mission_id, trace_id, product, action, actor_id, workspace_id,
             account_id, provider, media_url, caption, hashtags, title,
-            description, graph_id, provider_proof_mode, approved_media_json,
+            description, sound_mode, sound_mode_explicit, graph_id, graph_id_forwarded,
+            provider_proof_mode, approved_media_json,
             scheduled_at, idempotency_key, status,
             approval_required, approved_by, runtime_result_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_required', 1, NULL, NULL, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approval_required', 1, NULL, NULL, ?, ?)`,
         )
         .run(
           resolvedMissionId,
@@ -1072,7 +1096,10 @@ export class AutoPosterMissionService {
           hashtags,
           title || null,
           description || null,
+          soundMode,
+          soundModeExplicit ? 1 : 0,
           graphId,
+          graphId ? 1 : 0,
           providerProofMode ? 1 : 0,
           approvedMedia ? JSON.stringify(approvedMedia) : null,
           normalizedScheduledAt,
@@ -1159,9 +1186,10 @@ export class AutoPosterMissionService {
         hashtags: mission.hashtags,
         ...(mission.title ? { title: mission.title } : {}),
         ...(mission.description ? { description: mission.description } : {}),
+        ...(mission.soundModeExplicit ? { soundMode: mission.soundMode } : {}),
         scheduledAt: mission.scheduledAt,
+        ...(mission.graphIdForwarded && mission.graphId ? { graphId: mission.graphId } : {}),
         ...(mission.providerProofMode ? {
-          graphId: mission.graphId!,
           providerProofMode: true,
           approvedMedia: mission.approvedMedia! as unknown as JsonValue,
         } : {}),

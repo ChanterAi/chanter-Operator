@@ -12,6 +12,7 @@ import type { AutoPosterMissionEvidenceService } from "./missions/autoPosterMiss
 import type { AutoPosterResultProjectionService } from "./missions/autoPosterResultProjectionService.js";
 import type { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
+import type { PlatformAutoPosterCommandService } from "./platform/platformAutoPosterCommandService.js";
 
 export function createApp(
   service: OperatorService,
@@ -27,6 +28,9 @@ export function createApp(
   // silently misalign every existing positional argument at runtime).
   autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
   autoPosterMissionEvidenceService?: AutoPosterMissionEvidenceService,
+  // Canonical Platform linkage is appended to preserve every existing
+  // positional test/app call site.
+  platformAutoPosterCommandService?: PlatformAutoPosterCommandService,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -43,6 +47,7 @@ export function createApp(
     safeCommitCloseoutService,
     autoPosterGraphIntakeService,
     autoPosterMissionEvidenceService,
+    platformAutoPosterCommandService,
   ));
 
   app.use((_request, response) => {

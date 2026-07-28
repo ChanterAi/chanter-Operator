@@ -165,6 +165,10 @@ class DurableAutoPosterPort implements AutoPosterOperationsPort {
       missionId: params.missionId ?? "",
       action: params.action ?? "",
       missionPayloadHash: params.missionPayloadHash ?? "",
+      campaignId: `autoposter-campaign:${params.missionId ?? ""}`,
+      approvalId: `autoposter-approval:${params.missionId ?? ""}`,
+      evidenceBundleId:
+        `autoposter-evidence:${params.graphId ?? params.missionId ?? ""}`,
     };
     this.inject("before_autoposter_durable_create");
     this.jobs.push(job);
@@ -250,6 +254,9 @@ class DurableAutoPosterPort implements AutoPosterOperationsPort {
       status: job.status,
       scheduledAt: job.scheduledAt,
       approved: job.approved,
+      campaignId: job.campaignId,
+      approvalId: job.approvalId,
+      evidenceBundleId: job.evidenceBundleId,
     };
   }
 
