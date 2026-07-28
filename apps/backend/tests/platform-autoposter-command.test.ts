@@ -30,8 +30,8 @@ import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/a
 import { OperatorError, OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
 
-const NOW = "2026-07-26T09:00:00.000Z";
-const SCHEDULED_AT = "2026-07-27T12:00:00+03:00";
+const NOW = "2099-07-26T09:00:00.000Z";
+const SCHEDULED_AT = "2099-07-27T12:00:00+03:00";
 const TENANT_ID = "workspace-platform-p0";
 const ACTOR_ID = "platform-user-0001";
 const ACCOUNT_ID = "tt:opaque/account@01";
