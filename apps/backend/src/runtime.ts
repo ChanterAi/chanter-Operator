@@ -30,9 +30,10 @@ export function createRuntime() {
     workspaceRoot,
     config.runnerWorkspaceRoot,
   );
-  const runtimeMissionExecutor = createAutoPosterRuntimeMissionExecutor(
-    config.autoPosterRuntime,
-  );
+  const runtimeMissionExecutor = createAutoPosterRuntimeMissionExecutor({
+    ...config.autoPosterRuntime,
+    ...(config.approvalAuthority ? { approvalAuthority: config.approvalAuthority } : {}),
+  });
   const protectedValues = [
     config.autoPosterRuntime.serviceToken,
     config.missionSubmit.token,
@@ -49,9 +50,10 @@ export function createRuntime() {
       protectedValues,
     },
   );
-  const loopGovernorMissionExecutor = createLoopGovernorMissionExecutor(
-    config.loopGovernorRuntime,
-  );
+  const loopGovernorMissionExecutor = createLoopGovernorMissionExecutor({
+    ...config.loopGovernorRuntime,
+    ...(config.approvalAuthority ? { approvalAuthority: config.approvalAuthority } : {}),
+  });
   const genericMissionService = new GenericMissionService(
     database,
     loopGovernorMissionExecutor,

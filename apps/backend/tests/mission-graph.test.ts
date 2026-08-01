@@ -39,6 +39,11 @@ import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissi
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
 import { OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const MISSION_SUBMIT_TOKEN = "test-mission-submit-token";
 const MISSION_CONTROL_TOKEN = "test-operator-control-token";
@@ -142,9 +147,9 @@ function createHarness(
     ) => void;
   } = {},
 ): Harness {
-  const database = createDatabase(
-    options.databasePath ?? path.join(temporaryRoot, "data", "operator.sqlite"),
-  );
+  const databasePath = options.databasePath ?? path.join(temporaryRoot, "data", "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
+  const database = createDatabase(databasePath);
   const operatorService = new OperatorService(
     database,
     new AuditLogger(path.join(temporaryRoot, "data", "audit.jsonl")),
@@ -159,11 +164,12 @@ function createHarness(
       serviceToken: "",
       userId: "",
       timeoutValid: true,
+      approvalAuthority,
     }),
     { agentRunLedgerService, protectedValues: PROTECTED_TOKENS },
   );
   const loopExecutor = createLoopGovernorMissionExecutor(
-    { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+    { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
     { port: loopPort },
   );
   const genericService = new GenericMissionService(database, loopExecutor, {
@@ -405,6 +411,7 @@ describe("Phase 2D mission graph spine", () => {
   });
 
   afterEach(() => {
+    cleanupApprovalAuthorityFixtures();
     database?.close();
     database = undefined;
     rmSync(temporaryRoot, { recursive: true, force: true });

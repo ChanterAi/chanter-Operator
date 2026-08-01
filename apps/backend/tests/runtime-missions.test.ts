@@ -27,6 +27,10 @@ import {
 } from "../src/runtimeMissions/autoPosterRuntime.js";
 import { OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
+import {
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const TOKEN_CANARY = "short-token-9";
 const MISSION_SUBMIT_TOKEN = "test-mission-submit-token";
@@ -177,7 +181,8 @@ function createHarness(
   port: AutoPosterOperationsPort,
   configuration = validConfiguration(),
 ): Harness {
-  const database = createDatabase(path.join(temporaryRoot, "data", "operator.sqlite"));
+  const databasePath = path.join(temporaryRoot, "data", "operator.sqlite");
+  const database = createDatabase(databasePath);
   const auditPath = path.join(temporaryRoot, "data", "audit.jsonl");
   const workspaceRoot = ensureWorkspace(path.join(temporaryRoot, "workspace"));
   const operatorService = new OperatorService(
@@ -186,7 +191,13 @@ function createHarness(
     new MockRunner(),
     workspaceRoot,
   );
-  const executor = createAutoPosterRuntimeMissionExecutor(configuration, { port });
+  const executor = createAutoPosterRuntimeMissionExecutor(
+    {
+      ...configuration,
+      approvalAuthority: configuration.approvalAuthority ?? approvalAuthorityFixtureFor(databasePath),
+    },
+    { port },
+  );
   const protectedValues = [
     configuration.serviceToken,
     MISSION_SUBMIT_TOKEN,
@@ -236,6 +247,7 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
   });
 
   afterEach(() => {
+    cleanupApprovalAuthorityFixtures();
     database?.close();
     database = undefined;
     rmSync(temporaryRoot, { recursive: true, force: true });
@@ -1281,7 +1293,10 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
     const databasePath = path.join(temporaryRoot, "data", "operator.sqlite");
     const { port } = makePort();
     const firstDatabase = createDatabase(databasePath);
-    const executor = createAutoPosterRuntimeMissionExecutor(validConfiguration(), { port });
+    const executor = createAutoPosterRuntimeMissionExecutor(
+      { ...validConfiguration(), approvalAuthority: approvalAuthorityFixtureFor(databasePath) },
+      { port },
+    );
     const firstService = new AutoPosterMissionService(firstDatabase, executor, {
       agentRunLedgerService: new AgentRunLedgerService(firstDatabase),
     });

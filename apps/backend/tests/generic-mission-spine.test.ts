@@ -29,6 +29,11 @@ import {
   type GenericMissionFailureBoundary,
 } from "../src/missions/genericMissionService.js";
 import { createLoopGovernorMissionExecutor } from "../src/missions/loopGovernorRuntime.js";
+import type { OperatorApprovalAuthorityConfiguration } from "../src/runtimeMissions/persistedApprovalAuthority.js";
+import {
+  approvalAuthorityFixture,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 import { MockRunner } from "../src/runners/mockRunner.js";
 import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
@@ -125,6 +130,7 @@ function createHarness(
   options: {
     failureInjector?: (boundary: GenericMissionFailureBoundary, missionId: string) => void;
     databasePath?: string;
+    approvalAuthority?: OperatorApprovalAuthorityConfiguration;
   } = {},
 ): Harness {
   const database = createDatabase(
@@ -153,6 +159,7 @@ function createHarness(
       governorRoot: "",
       dataDir: "",
       timeoutValid: true,
+      approvalAuthority: options.approvalAuthority ?? approvalAuthorityFixture(),
     },
     { port: loopPort },
   );
@@ -202,6 +209,7 @@ describe("Phase 2C generic mission spine", () => {
     database?.close();
     database = undefined;
     rmSync(temporaryRoot, { recursive: true, force: true });
+    cleanupApprovalAuthorityFixtures();
   });
 
   it("rejects unregistered targets deterministically and persists nothing", async () => {

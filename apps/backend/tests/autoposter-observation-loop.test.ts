@@ -47,6 +47,11 @@ import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissi
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
 import { OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const TEST_NOW_MS = Date.now();
 const NOW = new Date(TEST_NOW_MS).toISOString();
@@ -276,6 +281,7 @@ const temporaryRoots: string[] = [];
 const activeHarnesses = new Set<Harness>();
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const harness of [...activeHarnesses]) harness.close();
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
@@ -288,6 +294,7 @@ function createHarness(boundary: Boundary, options: HarnessOptions = {}): Harnes
     : mkdtempSync(path.join(os.tmpdir(), "chanter-phase2ec-observation-"));
   if (!options.databasePath) temporaryRoots.push(root);
   const resolvedPath = options.databasePath ?? path.join(root, "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(resolvedPath);
   const database = createDatabase(resolvedPath);
   let clockMs = TEST_NOW_MS;
   const now = () => new Date(clockMs);
@@ -298,6 +305,7 @@ function createHarness(boundary: Boundary, options: HarnessOptions = {}): Harnes
       serviceToken: RUNTIME_TOKEN,
       userId: OWNER_ID,
       timeoutValid: true,
+      approvalAuthority,
     },
     { port: boundary.port },
   );
@@ -308,7 +316,7 @@ function createHarness(boundary: Boundary, options: HarnessOptions = {}): Harnes
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
       {
         port: {
           async createManualLoop() {
@@ -1314,6 +1322,7 @@ describe("Phase 2E-C policy validation", () => {
         serviceToken: RUNTIME_TOKEN,
         userId: OWNER_ID,
         timeoutValid: true,
+        approvalAuthority: approvalAuthorityFixture(),
       },
       { port: boundary.port },
     );

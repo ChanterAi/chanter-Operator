@@ -73,6 +73,24 @@ const loopGovernorTimeoutValid =
     loopGovernorTimeoutParsed >= 1_000 &&
     loopGovernorTimeoutParsed <= 120_000);
 
+/**
+ * Persisted approval checkpoint authority binding.
+ *
+ * `repositoryRoot` names the exact Git worktree an approval is bound to; the
+ * Runtime resolves its identity, committed HEAD, and clean state at the
+ * authority decision point. Both values must be set, absolute, and real, or
+ * approval-required missions stay fail-closed — Operator never falls back to a
+ * transient approval.
+ */
+const approvalAuthorityStateDir = process.env.OPERATOR_APPROVAL_AUTHORITY_STATE_DIR?.trim() ?? "";
+const approvalAuthorityRepositoryRoot =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "";
+const approvalAuthorityConfigured =
+  Boolean(approvalAuthorityStateDir)
+  && Boolean(approvalAuthorityRepositoryRoot)
+  && path.isAbsolute(approvalAuthorityStateDir)
+  && path.isAbsolute(approvalAuthorityRepositoryRoot);
+
 export const config = {
   host: "127.0.0.1",
   port: Number(process.env.OPERATOR_PORT ?? 3001),
@@ -89,6 +107,17 @@ export const config = {
   /** P1.0: Workspace where the real read-only runner executes commands (e.g. the git repo root). */
   runnerWorkspaceRoot:
     process.env.OPERATOR_RUNNER_WORKSPACE ?? undefined,
+  /** Shared by both mission executors; `undefined` keeps approvals fail-closed. */
+  approvalAuthority: approvalAuthorityConfigured
+    ? {
+      stateDir: approvalAuthorityStateDir,
+      repositoryRoot: approvalAuthorityRepositoryRoot,
+      ownerId: "chanter-operator",
+      ...(process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID?.trim()
+        ? { policyId: process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID.trim() }
+        : {}),
+    }
+    : undefined,
   autoPosterRuntime: {
     baseUrl: process.env.AUTOPOSTER_BASE_URL?.trim() ?? "",
     serviceToken: process.env.AUTOPOSTER_RUNTIME_TOKEN?.trim() ?? "",

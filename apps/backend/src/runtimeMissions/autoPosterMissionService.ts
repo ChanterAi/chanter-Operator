@@ -21,6 +21,10 @@ import {
   type AutoPosterMissionLedgerContext,
 } from "./autoPosterMissionLedger.js";
 import type { AutoPosterRuntimeMissionExecutor } from "./autoPosterRuntime.js";
+import type {
+  OperatorApprovalAuthorityOutcome,
+  OperatorApprovalDecision,
+} from "./persistedApprovalAuthority.js";
 import {
   autoPosterScheduleInputFromEnvelope,
   validateAutoPosterScheduleInput,
@@ -1203,6 +1207,17 @@ export class AutoPosterMissionService {
     };
   }
 
+  /**
+   * The exact Runtime request this mission is durably bound to. Read-only: it
+   * grants no authority and is the same tuple `approveAndExecute` would send,
+   * which is what makes an out-of-band approval decision (such as a rejection)
+   * bindable to this mission's checkpoint.
+   */
+  runtimeRequestFor(missionId: string): RuntimeMissionRequest {
+    const mission = this.getMission(missionId);
+    return this.buildRuntimeRequest(mission, mission.approvedBy ?? "pending-approval");
+  }
+
   private executorFailure(
     mission: AutoPosterRuntimeMission,
     approvedBy: string,
@@ -1505,6 +1520,74 @@ export class AutoPosterMissionService {
     return this.getMission(mission.missionId);
   }
 
+  /**
+   * The durable human decision this mission already carries. Approver identity
+   * and the instant it was persisted are read back from Operator's own journal;
+   * nothing here is synthesized from status, a UI flag, or a database boolean.
+   */
+  private approvalDecisionFor(
+    mission: AutoPosterRuntimeMission,
+  ): OperatorApprovalDecision | null {
+    const approverId = mission.approvedBy?.trim() ?? "";
+    if (!approverId) return null;
+    const approved = mission.executionJournal.find(
+      (transition) => transition.newState === "approved",
+    );
+    if (!approved) return null;
+    return {
+      approverId,
+      note: "Founder approval was durably persisted by Operator before execution.",
+      observedAt: approved.timestamp,
+    };
+  }
+
+  /**
+   * Operator requests and transports approval authority; the Agent Runtime
+   * decides whether it authorizes execution. A refusal here never downgrades to
+   * a transient approval — the mission fails closed with the typed reason.
+   */
+  private persistedApprovalAuthority(
+    mission: AutoPosterRuntimeMission,
+    request: RuntimeMissionRequest,
+    recovered: boolean,
+  ): Promise<OperatorApprovalAuthorityOutcome> {
+    if (recovered) return this.executor.prepareRecoveredApproval(request);
+    const decision = this.approvalDecisionFor(mission);
+    if (!decision) {
+      return Promise.resolve({
+        ok: false,
+        code: "OPERATOR_APPROVAL_DECISION_MISSING",
+        message: "No durable human approval decision is recorded for this mission.",
+      });
+    }
+    return this.executor.prepareApproval(request, decision);
+  }
+
+  private approvalAuthorityFailure(
+    mission: AutoPosterRuntimeMission,
+    outcome: { code: string; message: string },
+  ): RuntimeMissionResult {
+    const completedAt = this.now().toISOString();
+    return {
+      missionId: mission.missionId,
+      traceId: mission.traceId,
+      product: PRODUCT,
+      action: ACTION,
+      status: "failed",
+      output: null,
+      evidence: null,
+      warnings: [],
+      errors: [{ code: outcome.code, message: outcome.message }],
+      policyDecision: null,
+      // No persisted authority means the approval did not authorize execution.
+      approvalDecision: { required: true, approved: false, approvedBy: null },
+      idempotency: { key: mission.idempotencyKey, outcome: "not_applicable" },
+      startedAt: mission.updatedAt,
+      completedAt,
+      durationMs: 0,
+    };
+  }
+
   private async executePreparedMission(
     mission: AutoPosterRuntimeMission,
     request: RuntimeMissionRequest,
@@ -1519,11 +1602,19 @@ export class AutoPosterMissionService {
         "RECOVERY_SCOPE_MISMATCH",
       );
     }
+    const authority = await this.persistedApprovalAuthority(mission, request, Boolean(recovered));
+    if (!authority.ok) {
+      return this.persistRuntimeOutcome(
+        mission,
+        this.approvalAuthorityFailure(mission, authority),
+        recoveryClassification,
+      );
+    }
     let runtimeResult: RuntimeMissionResult;
     try {
       runtimeResult = recovered
-        ? await this.executor.executeRecovered(request, recovered)
-        : await this.executor.execute(request);
+        ? await this.executor.executeRecovered(request, recovered, authority.authority)
+        : await this.executor.execute(request, authority.authority);
     } catch {
       runtimeResult = this.executorFailure(mission, request.approval?.approvedBy ?? "unknown");
     }
@@ -2008,6 +2099,11 @@ export class AutoPosterMissionService {
         }
         const retryStartedAt = this.now().toISOString();
         this.prepareLegacyMissionRowForRecovery(mission.missionId, retryStartedAt);
+        // AutoPoster durable truth proved no queue job exists for this exact
+        // scope, so an unresolved Runtime claim left by an interrupted attempt
+        // is retired on that evidence before the single permitted retry. The
+        // approval authority guard still runs before any adapter entry.
+        this.executor.retireUnresolvedClaim(mission.missionId);
         this.journal.transition(mission.missionId, "recovery_in_progress", {
           actor: ACTOR_ID,
           reason: "Operator claimed the single permitted safe retry after exact not-found reconciliation.",

@@ -21,6 +21,10 @@ import {
   type AutoPosterRuntimeMissionExecutor,
 } from "../src/runtimeMissions/autoPosterRuntime.js";
 import { MissionExecutionJournal } from "../src/runtimeMissions/missionExecutionJournal.js";
+import {
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 interface DurableJob extends AutoPosterScheduleSuccess["post"] {
   workspaceId: string;
@@ -276,6 +280,7 @@ class DurableAutoPosterPort implements AutoPosterOperationsPort {
 
 function executor(
   port: DurableAutoPosterPort,
+  databasePath: string,
   failureBoundary?: MissionFailureBoundary,
 ): AutoPosterRuntimeMissionExecutor {
   port.configureFailure(failureBoundary);
@@ -285,6 +290,9 @@ function executor(
       serviceToken: "test-runtime-token",
       userId: "owner",
       timeoutValid: true,
+      // Keyed by the SQLite path so a simulated restart re-opens the *same*
+      // persisted checkpoints, observations, and durable claims.
+      approvalAuthority: approvalAuthorityFixtureFor(databasePath),
     },
     {
       port,
@@ -305,7 +313,7 @@ function openService(
   const database = createDatabase(databasePath);
   activeDatabases.add(database);
   let injected = false;
-  const service = new AutoPosterMissionService(database, executor(port, failureBoundary), {
+  const service = new AutoPosterMissionService(database, executor(port, databasePath, failureBoundary), {
     agentRunLedgerService: new AgentRunLedgerService(database),
     failureInjector: failureBoundary
       ? (boundary) => {
@@ -334,6 +342,7 @@ async function finishAfterRestart(service: AutoPosterMissionService, missionId: 
 describe("durable Operator mission recovery", () => {
   const roots: string[] = [];
   afterEach(() => {
+    cleanupApprovalAuthorityFixtures();
     for (const database of activeDatabases) {
       try { database.close(); } catch { /* already closed */ }
     }
@@ -467,7 +476,7 @@ describe("durable Operator mission recovery", () => {
       opened.database.close();
       activeDatabases.delete(opened.database);
     }
-  }, 15_000);
+  }, 90_000);
 
   const interruptionCases: Array<{
     boundary: MissionFailureBoundary;

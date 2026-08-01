@@ -27,10 +27,15 @@ import {
 import { MissionGraphService } from "../src/missions/missionGraphService.js";
 import { MissionGraphJournal } from "../src/missions/missionGraphJournal.js";
 import { createLoopGovernorMissionExecutor } from "../src/missions/loopGovernorRuntime.js";
+import {
+  approvalAuthorityFixture,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const roots: string[] = [];
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -397,7 +402,13 @@ describe("Phase 2E-A graph-node SQLite migration", () => {
     const generic = new GenericMissionService(
       database,
       createLoopGovernorMissionExecutor(
-        { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+        {
+          pythonExecutable: "",
+          governorRoot: "",
+          dataDir: "",
+          timeoutValid: true,
+          approvalAuthority: approvalAuthorityFixture(),
+        },
         { port: loopPort() },
       ),
       { agentRunLedgerService: ledger },

@@ -28,6 +28,11 @@ import {
   type MissionFailureBoundary,
 } from "../src/runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const TEST_NOW_MS = Date.now();
 const NOW = new Date(TEST_NOW_MS).toISOString();
@@ -299,6 +304,7 @@ const temporaryRoots: string[] = [];
 const activeHarnesses = new Set<Harness>();
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const harness of [...activeHarnesses]) harness.close();
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
@@ -314,6 +320,7 @@ function createHarness(
     : mkdtempSync(path.join(os.tmpdir(), "chanter-phase2e-graph-"));
   if (!options.databasePath) temporaryRoots.push(root);
   const databasePath = options.databasePath ?? path.join(root, "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
   const database = createDatabase(databasePath);
   const ledger = new AgentRunLedgerService(database, []);
   const executor = createAutoPosterRuntimeMissionExecutor(
@@ -322,6 +329,7 @@ function createHarness(
       serviceToken: "phase2e-service-token",
       userId: OWNER_ID,
       timeoutValid: true,
+      approvalAuthority,
     },
     {
       port: boundary.port,
@@ -336,7 +344,7 @@ function createHarness(
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
       { port: loopPort() },
     ),
     { agentRunLedgerService: ledger, now: () => new Date(NOW) },

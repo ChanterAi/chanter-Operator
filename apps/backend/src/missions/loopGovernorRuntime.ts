@@ -18,9 +18,21 @@ import {
   type LoopGovernorManualLoopLookupSuccess,
   type LoopGovernorMissionPort,
   type LoopGovernorPortFailure,
+  type RuntimeMissionApprovalAuthorityInput,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
+  type TemporalClock,
 } from "chanter-agent-runtime";
+import {
+  createOperatorPersistedApprovalAuthority,
+  downstreamOperationTypeFor,
+  prepareApprovedRuntimeAuthority,
+  retireUnresolvedRuntimeClaim,
+  type OperatorApprovalAuthorityConfiguration,
+  type OperatorClaimRetirementOutcome,
+  type OperatorApprovalAuthorityOutcome,
+  type OperatorApprovalDecision,
+} from "../runtimeMissions/persistedApprovalAuthority.js";
 
 export interface LoopGovernorRuntimeConfiguration {
   pythonExecutable: string;
@@ -28,11 +40,30 @@ export interface LoopGovernorRuntimeConfiguration {
   dataDir: string;
   timeoutMs?: number;
   timeoutValid: boolean;
+  /**
+   * Persisted approval checkpoint authority binding. Without it every
+   * approval-required manual-loop mission fails closed inside the Runtime with
+   * `RUNTIME_APPROVAL_PERSISTED_AUTHORITY_REQUIRED`.
+   */
+  approvalAuthority?: OperatorApprovalAuthorityConfiguration;
 }
 
 export interface LoopGovernorMissionExecutor {
   readonly configured: boolean;
-  execute(request: RuntimeMissionRequest): Promise<RuntimeMissionResult>;
+  readonly approvalAuthorityConfigured: boolean;
+  prepareApproval(
+    request: RuntimeMissionRequest,
+    decision: OperatorApprovalDecision,
+  ): Promise<OperatorApprovalAuthorityOutcome>;
+  /**
+   * Retires an unresolved durable claim after the caller's own reconciliation
+   * proved the downstream produced nothing. Never invoked speculatively.
+   */
+  retireUnresolvedClaim(missionId: string): OperatorClaimRetirementOutcome;
+  execute(
+    request: RuntimeMissionRequest,
+    authority?: RuntimeMissionApprovalAuthorityInput,
+  ): Promise<RuntimeMissionResult>;
   lookup(
     request: RuntimeMissionRequest,
   ): Promise<LoopGovernorManualLoopLookupSuccess | LoopGovernorPortFailure>;
@@ -40,6 +71,8 @@ export interface LoopGovernorMissionExecutor {
 
 interface LoopGovernorRuntimeDependencies {
   port?: LoopGovernorMissionPort;
+  /** Injected only for the Runtime's approval-expiry decision. */
+  clock?: TemporalClock;
 }
 
 function unavailableFailure(): LoopGovernorPortFailure {
@@ -91,11 +124,50 @@ export function createLoopGovernorMissionExecutor(
   const registry = createMissionAdapterRegistry([
     createLoopGovernorMissionAdapter(port),
   ]);
-  const idempotencyStore = createInMemoryIdempotencyStore();
+  const approvalAuthority = configuration.approvalAuthority
+    ? createOperatorPersistedApprovalAuthority(configuration.approvalAuthority)
+    : null;
+  // The Runtime refuses an approval-required mission unless the same durable
+  // store carries the checkpoint, the observation, and the exclusive claim.
+  const idempotencyStore = approvalAuthority?.idempotencyStore ?? createInMemoryIdempotencyStore();
+  const clockOption = dependencies.clock ? { clock: dependencies.clock } : {};
 
   return {
     configured,
-    execute: (request) => executeMission(request, { registry, idempotencyStore }),
+    approvalAuthorityConfigured: approvalAuthority !== null,
+    prepareApproval: (request, decision) => {
+      if (!approvalAuthority) {
+        return Promise.resolve({
+          ok: false as const,
+          code: "OPERATOR_APPROVAL_AUTHORITY_NOT_CONFIGURED",
+          message:
+            "Persisted approval checkpoint authority is not configured, so no approval can authorize execution.",
+        });
+      }
+      return prepareApprovedRuntimeAuthority(
+        approvalAuthority,
+        request,
+        downstreamOperationTypeFor(registry, request),
+        decision,
+        (checkpointAuthority) => executeMission(request, {
+          registry,
+          idempotencyStore: approvalAuthority.idempotencyStore,
+          runLedger: approvalAuthority.runLedger,
+          approvalAuthority: checkpointAuthority,
+          ...clockOption,
+        }),
+      );
+    },
+    retireUnresolvedClaim: (missionId) => (
+      approvalAuthority ? retireUnresolvedRuntimeClaim(approvalAuthority, missionId) : "unsupported"
+    ),
+    execute: (request, authority) => executeMission(request, {
+      registry,
+      idempotencyStore,
+      ...(approvalAuthority ? { runLedger: approvalAuthority.runLedger } : {}),
+      ...(authority ? { approvalAuthority: authority } : {}),
+      ...clockOption,
+    }),
     lookup: (request) =>
       port.lookupManualLoop({
         missionId: request.missionId,
