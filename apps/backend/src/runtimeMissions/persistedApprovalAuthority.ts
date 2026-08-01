@@ -31,6 +31,10 @@ import {
   type RuntimeMissionRunLedger,
 } from "chanter-agent-runtime";
 
+import {
+  resolveApprovalAuthorityCheckout,
+  type ManagedApprovalCheckoutConfiguration,
+} from "./approvalAuthorityCheckout.js";
 import { OperatorError } from "../services/operatorService.js";
 
 /** Mirrors the Runtime's canonical opaque identifier rule for bound fields. */
@@ -49,11 +53,18 @@ export interface OperatorApprovalAuthorityConfiguration {
    */
   stateDir: string;
   /**
-   * Exact Git worktree root the approval is bound to. The Runtime resolves its
-   * identity, committed HEAD, and clean state from this path at the authority
-   * decision point; Operator only transports it.
+   * Direct binding: an exact Git worktree root that is *already* clean under
+   * the Runtime's canonical policy. Deployments must not use this against a
+   * live product checkout — normal ignored and untracked operational files
+   * keep it permanently fail-closed. See `managedCheckout`.
    */
-  repositoryRoot: string;
+  repositoryRoot?: string;
+  /**
+   * Managed binding: derive an isolated per-revision checkout from a live
+   * product repository, so ordinary `node_modules/`, `dist/`, `.env`, and log
+   * files never reach the authority decision. This is the deployable mode.
+   */
+  managedCheckout?: ManagedApprovalCheckoutConfiguration;
   /** Approval policy identity carried into the immutable checkpoint. */
   policyId?: string;
   /** Recorded on claims and run events to identify the writing process. */
@@ -81,7 +92,11 @@ export type OperatorApprovalAuthorityOutcome =
   | { ok: false; code: string; message: string };
 
 export interface OperatorPersistedApprovalAuthority {
-  readonly repositoryRoot: string;
+  /**
+   * How this instance binds a repository. In managed mode the concrete
+   * checkout is per-revision, so there is no single static root to expose.
+   */
+  readonly binding: "direct" | "managed" | "unconfigured";
   readonly stateDir: string;
   readonly idempotencyStore: RuntimeMissionIdempotencyStore & RuntimeApprovalCheckpointStore;
   readonly runLedger: RuntimeMissionRunLedger;
@@ -212,8 +227,19 @@ export function createOperatorPersistedApprovalAuthority(
   configuration: OperatorApprovalAuthorityConfiguration,
 ): OperatorPersistedApprovalAuthority {
   const stateDir = configuration.stateDir.trim();
-  const repositoryRoot = configuration.repositoryRoot.trim();
+  const directRepositoryRoot = configuration.repositoryRoot?.trim() ?? "";
+  const managedCheckout = configuration.managedCheckout ?? null;
   const policyId = (configuration.policyId ?? DEFAULT_OPERATOR_APPROVAL_POLICY_ID).trim();
+  /**
+   * Exactly one binding mode. Two configured sources would be two answers to
+   * "which repository does this approval bind to", and the wrong one silently
+   * winning is precisely the ambiguity this contract must not have.
+   */
+  const bindingConfigurationError = directRepositoryRoot && managedCheckout
+    ? "Configure either a direct approval authority repository root or a managed checkout source, never both."
+    : !directRepositoryRoot && !managedCheckout
+      ? "No approval authority repository binding is configured."
+      : null;
   const idempotencyStore = createDurableIdempotencyStore({
     stateDir,
     ...(configuration.ownerId ? { ownerId: configuration.ownerId } : {}),
@@ -272,11 +298,24 @@ export function createOperatorPersistedApprovalAuthority(
       boundRepositoryRoot = persisted.repositoryRoot;
       expectedHead = persisted.expectedHead;
     } else {
-      // No checkpoint yet: the Runtime needs a candidate identity to publish,
-      // and it re-validates this exact tuple against its own inspection before
-      // anything becomes immutable.
+      // No checkpoint yet, so a repository must be bound now. In managed mode
+      // the isolated per-revision checkout is resolved (and published if this
+      // is its first use) here and nowhere else: a resume never needs it,
+      // because the manifest above already carries the bound identity.
+      if (bindingConfigurationError) {
+        return refusal("OPERATOR_APPROVAL_BINDING_NOT_CONFIGURED", bindingConfigurationError);
+      }
+      let candidateRoot = directRepositoryRoot;
+      if (managedCheckout) {
+        const resolved = resolveApprovalAuthorityCheckout(managedCheckout);
+        if (!resolved.ok) return refusal(resolved.code, resolved.message);
+        candidateRoot = resolved.checkout.repositoryRoot;
+      }
+      // The Runtime needs a candidate identity to publish, and it re-validates
+      // this exact tuple against its own inspection before anything becomes
+      // immutable.
       try {
-        const inspection = inspectRuntimeApprovalRepository(repositoryRoot);
+        const inspection = inspectRuntimeApprovalRepository(candidateRoot);
         repositoryId = inspection.repositoryId;
         boundRepositoryRoot = inspection.repositoryRoot;
         expectedHead = inspection.head;
@@ -342,7 +381,7 @@ export function createOperatorPersistedApprovalAuthority(
   };
 
   return {
-    repositoryRoot,
+    binding: bindingConfigurationError ? "unconfigured" : managedCheckout ? "managed" : "direct",
     stateDir,
     idempotencyStore,
     runLedger,

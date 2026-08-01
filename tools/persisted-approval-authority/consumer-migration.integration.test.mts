@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,12 +94,13 @@ function disposableRoot(prefix: string): string {
   return root;
 }
 
-function git(repositoryRoot: string, args: readonly string[]): void {
-  execFileSync("git", ["-C", repositoryRoot, ...args], {
-    stdio: "ignore",
+function git(repositoryRoot: string, args: readonly string[]): string {
+  return execFileSync("git", ["-C", repositoryRoot, ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
-  });
+  }).trim();
 }
 
 /** One clean committed checkout: the repository identity approvals bind to. */
@@ -113,6 +114,34 @@ function approvalRepository(): string {
   git(repositoryRoot, ["add", "--", "APPROVAL.md"]);
   git(repositoryRoot, ["commit", "--quiet", "-m", "controlled integration proof"]);
   return repositoryRoot;
+}
+
+/**
+ * A production-shaped source repository: committed content plus exactly the
+ * ignored and untracked operational files a live product checkout carries.
+ * Binding approval authority to this path directly is permanently fail-closed;
+ * the managed binding derives an isolated per-revision checkout from it.
+ */
+function productRepository(): { root: string; head: string } {
+  const root = disposableRoot("chanter-migration-product-");
+  git(root, ["init", "--quiet"]);
+  git(root, ["config", "user.name", "CHANTER Migration Proof"]);
+  git(root, ["config", "user.email", "migration-proof@invalid.local"]);
+  git(root, ["config", "commit.gpgsign", "false"]);
+  writeFileSync(path.join(root, ".gitignore"), "node_modules/\ndist/\n.env\n*.log\n", "utf8");
+  writeFileSync(path.join(root, "PRODUCT.md"), "committed product source\n", "utf8");
+  git(root, ["add", "--", ".gitignore", "PRODUCT.md"]);
+  git(root, ["commit", "--quiet", "-m", "product baseline"]);
+  const head = git(root, ["rev-parse", "HEAD"]);
+  mkdirSync(path.join(root, "node_modules", "left-pad"), { recursive: true });
+  writeFileSync(path.join(root, "node_modules", "left-pad", "index.js"), "//\n", "utf8");
+  mkdirSync(path.join(root, "dist"), { recursive: true });
+  writeFileSync(path.join(root, "dist", "bundle.js"), "//\n", "utf8");
+  writeFileSync(path.join(root, ".env"), "AUTOPOSTER_RUNTIME_TOKEN=local\n", "utf8");
+  writeFileSync(path.join(root, "operator.log"), "operational noise\n", "utf8");
+  writeFileSync(path.join(root, "scratch.txt"), "untracked scratch\n", "utf8");
+  writeFileSync(path.join(root, "PRODUCT.md"), "committed product source + uncommitted edit\n", "utf8");
+  return { root, head };
 }
 
 interface Universe {
@@ -481,6 +510,66 @@ describe("CHANTER OS persisted approval authority — controlled cross-repositor
     assert.equal(scheduleCalls.length, 1);
     assert.equal(adapterStarts(universe, created.missionId), 1);
     restarted.database.close();
+  });
+
+  it("runs the production-shaped managed binding against a live product repository", async () => {
+    const product = productRepository();
+    const root = disposableRoot("chanter-migration-managed-");
+    // Exactly the deployable configuration: name the live product repository
+    // and a durable checkout cache. No manually maintained clean checkout.
+    const universe: Universe = {
+      root,
+      databasePath: path.join(root, "operator.sqlite"),
+      approvalAuthority: {
+        stateDir: path.join(root, "authority"),
+        managedCheckout: {
+          sourceRepositoryRoot: product.root,
+          checkoutRoot: path.join(root, "authority-checkouts"),
+        },
+        ownerId: "migration-proof-owner",
+      },
+      loopDataDir: path.join(root, "loop-governor-data"),
+    };
+
+    const missionId = "migration-managed-loop-0001";
+    const loop = openLoopService(universe);
+    const created = await loop.service.createMissionFromEnvelope(loopEnvelope(missionId));
+    assert.equal(created.status, "approval_required");
+    assert.equal(adapterStarts(universe, missionId), 0);
+
+    const completed = await loop.service.approveAndExecute(missionId, APPROVER);
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed.runtimeResult?.errors));
+    assert.equal(adapterStarts(universe, missionId), 1);
+
+    // Authority bound to the isolated checkout at the source's exact committed
+    // HEAD — never to the dirty product worktree.
+    const manifest = createDurableIdempotencyStore({ stateDir: universe.approvalAuthority.stateDir })
+      .getApprovalCheckpointManifest(missionId);
+    assert.ok(manifest, "checkpoint manifest is persisted");
+    assert.equal(manifest.expectedHead, product.head);
+    assert.notEqual(manifest.repositoryRoot, product.root);
+    assert.equal(
+      git(manifest.repositoryRoot, ["status", "--porcelain", "--untracked-files=all", "--ignored=matching"]),
+      "",
+    );
+    // The live product repository stayed dirty and untouched throughout.
+    assert.notEqual(git(product.root, ["status", "--porcelain"]), "");
+    assert.equal(git(product.root, ["rev-parse", "HEAD"]), product.head);
+
+    // The AutoPoster consumer completes the same chain on the same binding.
+    const autoUniverse: Universe = {
+      ...universe,
+      databasePath: path.join(root, "operator-autoposter.sqlite"),
+    };
+    const { port, scheduleCalls } = noSideEffectAutoPosterPort();
+    const auto = openAutoPosterService(autoUniverse, port);
+    const autoCreated = await auto.service.createScheduleMission(scheduleInput());
+    const autoCompleted = await auto.service.approveAndExecute(autoCreated.missionId, APPROVER);
+    assert.equal(autoCompleted.status, "succeeded", JSON.stringify(autoCompleted.runtimeResult?.errors));
+    assert.equal(scheduleCalls.length, 1);
+    assert.equal(adapterStarts(autoUniverse, autoCreated.missionId), 1);
+    loop.database.close();
+    auto.database.close();
   });
 
   it("refuses execution after a restart once the approval has expired", async () => {

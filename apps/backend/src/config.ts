@@ -76,20 +76,50 @@ const loopGovernorTimeoutValid =
 /**
  * Persisted approval checkpoint authority binding.
  *
- * `repositoryRoot` names the exact Git worktree an approval is bound to; the
- * Runtime resolves its identity, committed HEAD, and clean state at the
- * authority decision point. Both values must be set, absolute, and real, or
- * approval-required missions stay fail-closed — Operator never falls back to a
- * transient approval.
+ * Two mutually exclusive repository binding modes:
+ *
+ *  - **Managed (deployable).** `_SOURCE_REPOSITORY` names the live product
+ *    repository and `_CHECKOUT_ROOT` a durable cache. Operator derives an
+ *    isolated per-revision checkout containing only tracked content, so the
+ *    ordinary `node_modules/`, `dist/`, `.env`, and log files in a working
+ *    checkout never reach the Runtime's canonical clean-state decision.
+ *
+ *  - **Direct (explicit).** `_REPOSITORY_ROOT` binds one path that is already
+ *    clean under that policy. It is retained for controlled fixtures; pointing
+ *    it at a live product checkout keeps approvals permanently fail-closed,
+ *    which is exactly the deployment blocker managed mode removes.
+ *
+ * Configuring both is a configuration error, not a precedence rule: two
+ * answers to "which repository does this approval bind to" is the ambiguity
+ * this contract must not have. Configuring neither, or an incomplete managed
+ * pair, leaves approval-required execution fail-closed — Operator never falls
+ * back to a transient approval.
  */
 const approvalAuthorityStateDir = process.env.OPERATOR_APPROVAL_AUTHORITY_STATE_DIR?.trim() ?? "";
 const approvalAuthorityRepositoryRoot =
   process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "";
+const approvalAuthoritySourceRepository =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SOURCE_REPOSITORY?.trim() ?? "";
+const approvalAuthorityCheckoutRoot =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_CHECKOUT_ROOT?.trim() ?? "";
+
+const managedBindingRequested = Boolean(
+  approvalAuthoritySourceRepository || approvalAuthorityCheckoutRoot,
+);
+const managedBindingValid = Boolean(
+  approvalAuthoritySourceRepository
+  && approvalAuthorityCheckoutRoot
+  && path.isAbsolute(approvalAuthoritySourceRepository)
+  && path.isAbsolute(approvalAuthorityCheckoutRoot),
+);
+const directBindingValid = Boolean(
+  approvalAuthorityRepositoryRoot && path.isAbsolute(approvalAuthorityRepositoryRoot),
+);
 const approvalAuthorityConfigured =
   Boolean(approvalAuthorityStateDir)
-  && Boolean(approvalAuthorityRepositoryRoot)
   && path.isAbsolute(approvalAuthorityStateDir)
-  && path.isAbsolute(approvalAuthorityRepositoryRoot);
+  // Exactly one binding mode, fully specified.
+  && (managedBindingValid ? !directBindingValid : directBindingValid && !managedBindingRequested);
 
 export const config = {
   host: "127.0.0.1",
@@ -111,7 +141,14 @@ export const config = {
   approvalAuthority: approvalAuthorityConfigured
     ? {
       stateDir: approvalAuthorityStateDir,
-      repositoryRoot: approvalAuthorityRepositoryRoot,
+      ...(managedBindingValid
+        ? {
+          managedCheckout: {
+            sourceRepositoryRoot: approvalAuthoritySourceRepository,
+            checkoutRoot: approvalAuthorityCheckoutRoot,
+          },
+        }
+        : { repositoryRoot: approvalAuthorityRepositoryRoot }),
       ownerId: "chanter-operator",
       ...(process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID?.trim()
         ? { policyId: process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID.trim() }
