@@ -103,6 +103,29 @@ const approvalAuthoritySourceRepository =
 const approvalAuthorityCheckoutRoot =
   process.env.OPERATOR_APPROVAL_AUTHORITY_CHECKOUT_ROOT?.trim() ?? "";
 
+/**
+ * Approval issuer authenticity. Operator signs; the Runtime verifies against an
+ * explicitly configured trust file. All four values are required together —
+ * a signing identity with nobody trusting it, or a trust file with nothing to
+ * sign, leaves approval-required execution fail-closed.
+ */
+const approvalIssuerAuthorityId =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_ISSUER_ID?.trim() ?? "";
+const approvalIssuerKeyId =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SIGNING_KEY_ID?.trim() ?? "";
+const approvalIssuerKeyFile =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SIGNING_KEY_FILE?.trim() ?? "";
+const approvalTrustedIssuersFile =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_TRUSTED_ISSUERS_FILE?.trim() ?? "";
+const approvalIssuerConfigured = Boolean(
+  approvalIssuerAuthorityId
+  && approvalIssuerKeyId
+  && approvalIssuerKeyFile
+  && approvalTrustedIssuersFile
+  && path.isAbsolute(approvalIssuerKeyFile)
+  && path.isAbsolute(approvalTrustedIssuersFile),
+);
+
 const managedBindingRequested = Boolean(
   approvalAuthoritySourceRepository || approvalAuthorityCheckoutRoot,
 );
@@ -149,6 +172,16 @@ export const config = {
           },
         }
         : { repositoryRoot: approvalAuthorityRepositoryRoot }),
+      ...(approvalIssuerConfigured
+        ? {
+          issuer: {
+            authorityId: approvalIssuerAuthorityId,
+            keyId: approvalIssuerKeyId,
+            privateKeyFile: approvalIssuerKeyFile,
+          },
+          trustedIssuersFile: approvalTrustedIssuersFile,
+        }
+        : {}),
       ownerId: "chanter-operator",
       ...(process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID?.trim()
         ? { policyId: process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID.trim() }

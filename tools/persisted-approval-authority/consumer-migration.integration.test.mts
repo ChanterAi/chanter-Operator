@@ -20,6 +20,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -87,6 +88,59 @@ after(() => {
     }
   }
 });
+
+/**
+ * One disposable Ed25519 signing identity plus the matching explicit trust
+ * file, exactly the shape a deployment supplies. Only the public half is ever
+ * written into the trust file.
+ */
+let sharedIssuer: {
+  authorityId: string;
+  keyId: string;
+  privateKeyFile: string;
+  trustedIssuersFile: string;
+} | null = null;
+
+function disposableIssuer(): NonNullable<typeof sharedIssuer> {
+  if (sharedIssuer) return sharedIssuer;
+  const root = disposableRoot("chanter-migration-issuer-");
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const privateKeyFile = path.join(root, "issuer.key.pem");
+  writeFileSync(privateKeyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  const trustedIssuersFile = path.join(root, "trusted-issuers.json");
+  writeFileSync(trustedIssuersFile, JSON.stringify({
+    issuers: [{
+      authorityId: "chanter.operator.migration-proof",
+      authorizedPolicyIds: ["chanter.operator.human-approval.v1"],
+      keys: [{
+        keyId: "migration-proof-key-1",
+        publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
+      }],
+    }],
+  }), "utf8");
+  sharedIssuer = {
+    authorityId: "chanter.operator.migration-proof",
+    keyId: "migration-proof-key-1",
+    privateKeyFile,
+    trustedIssuersFile,
+  };
+  return sharedIssuer;
+}
+
+function issuerConfiguration() {
+  const issuer = disposableIssuer();
+  return {
+    issuer: {
+      authorityId: issuer.authorityId,
+      keyId: issuer.keyId,
+      privateKeyFile: issuer.privateKeyFile,
+    },
+    trustedIssuersFile: issuer.trustedIssuersFile,
+  };
+}
 
 function disposableRoot(prefix: string): string {
   const root = mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -159,6 +213,7 @@ function createUniverse(label: string, repositoryRoot: string): Universe {
     approvalAuthority: {
       stateDir: path.join(root, "authority"),
       repositoryRoot,
+      ...issuerConfiguration(),
       ownerId: "migration-proof-owner",
     },
     loopDataDir: path.join(root, "loop-governor-data"),
@@ -526,6 +581,7 @@ describe("CHANTER OS persisted approval authority — controlled cross-repositor
           sourceRepositoryRoot: product.root,
           checkoutRoot: path.join(root, "authority-checkouts"),
         },
+        ...issuerConfiguration(),
         ownerId: "migration-proof-owner",
       },
       loopDataDir: path.join(root, "loop-governor-data"),

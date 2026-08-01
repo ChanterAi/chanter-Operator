@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import {
   APPROVAL_CLEAN_STATE_POLICY,
+  attachRuntimeApprovalAuthenticity,
   createDurableIdempotencyStore,
   createDurableMissionRunLedger,
   createRuntimeApprovalObservation,
@@ -28,6 +29,7 @@ import {
   type RuntimeMissionIdempotencyStore,
   type RuntimeMissionRequest,
   type RuntimeMissionResult,
+  type RuntimeApprovalTrustStore,
   type RuntimeMissionRunLedger,
 } from "chanter-agent-runtime";
 
@@ -35,6 +37,11 @@ import {
   resolveApprovalAuthorityCheckout,
   type ManagedApprovalCheckoutConfiguration,
 } from "./approvalAuthorityCheckout.js";
+import {
+  createOperatorApprovalIssuer,
+  loadOperatorApprovalTrustStore,
+  type OperatorApprovalIssuerConfiguration,
+} from "./approvalIssuer.js";
 import { OperatorError } from "../services/operatorService.js";
 
 /** Mirrors the Runtime's canonical opaque identifier rule for bound fields. */
@@ -65,6 +72,17 @@ export interface OperatorApprovalAuthorityConfiguration {
    * files never reach the authority decision. This is the deployable mode.
    */
   managedCheckout?: ManagedApprovalCheckoutConfiguration;
+  /**
+   * Operator's approval signing identity. Without it Operator cannot issue an
+   * authentic approval, so approval-required execution stays fail-closed.
+   */
+  issuer?: OperatorApprovalIssuerConfiguration;
+  /**
+   * Absolute path to the Runtime's explicit trusted-issuer configuration.
+   * Separate from the signing key on purpose: holding a key is not the same
+   * statement as being trusted.
+   */
+  trustedIssuersFile?: string;
   /** Approval policy identity carried into the immutable checkpoint. */
   policyId?: string;
   /** Recorded on claims and run events to identify the writing process. */
@@ -100,6 +118,8 @@ export interface OperatorPersistedApprovalAuthority {
   readonly stateDir: string;
   readonly idempotencyStore: RuntimeMissionIdempotencyStore & RuntimeApprovalCheckpointStore;
   readonly runLedger: RuntimeMissionRunLedger;
+  /** Trusted issuers the Runtime verifies against; absent when unconfigured. */
+  readonly trustStore: RuntimeApprovalTrustStore | undefined;
   /** True once the Runtime has published the immutable checkpoint manifest. */
   hasCheckpoint(missionId: string): boolean;
   /** Identity tuple with no persisted hashes — the checkpoint-creating call. */
@@ -248,6 +268,36 @@ export function createOperatorPersistedApprovalAuthority(
     stateDir,
     ...(configuration.ownerId ? { ownerId: configuration.ownerId } : {}),
   });
+  /**
+   * Issuer and trust store are constructed eagerly so a malformed key or trust
+   * file is a startup-visible configuration error rather than a surprise at the
+   * moment a human approves something. A failure leaves both unset, and every
+   * approval then fails closed with a typed reason.
+   */
+  let issuer: ReturnType<typeof createOperatorApprovalIssuer> | null = null;
+  let issuerConfigurationError: { code: string; message: string } | null = null;
+  if (configuration.issuer) {
+    try {
+      issuer = createOperatorApprovalIssuer(configuration.issuer);
+    } catch (error) {
+      issuerConfigurationError = {
+        code: (error as { code?: string }).code ?? "OPERATOR_APPROVAL_ISSUER_CONFIGURATION_INVALID",
+        message: error instanceof Error ? error.message : "The approval issuer could not be configured.",
+      };
+    }
+  }
+  let trustStore: RuntimeApprovalTrustStore | undefined;
+  let trustStoreConfigurationError: { code: string; message: string } | null = null;
+  if (configuration.trustedIssuersFile) {
+    try {
+      trustStore = loadOperatorApprovalTrustStore(configuration.trustedIssuersFile);
+    } catch (error) {
+      trustStoreConfigurationError = {
+        code: (error as { code?: string }).code ?? "OPERATOR_APPROVAL_TRUST_STORE_CONFIGURATION_INVALID",
+        message: error instanceof Error ? error.message : "The trusted approval issuers could not be loaded.",
+      };
+    }
+  }
 
   const identityFor = (
     request: RuntimeMissionRequest,
@@ -385,6 +435,7 @@ export function createOperatorPersistedApprovalAuthority(
     stateDir,
     idempotencyStore,
     runLedger,
+    trustStore,
     hasCheckpoint: (missionId) => {
       try {
         return idempotencyStore.getApprovalCheckpointManifest(missionId) !== undefined;
@@ -404,6 +455,24 @@ export function createOperatorPersistedApprovalAuthority(
         ? { ok: true, authority: knownIdentity }
         : identityFor(request, operationId);
       if (!identity.ok) return identity;
+      if (issuerConfigurationError) {
+        return refusal(issuerConfigurationError.code, issuerConfigurationError.message);
+      }
+      if (trustStoreConfigurationError) {
+        return refusal(trustStoreConfigurationError.code, trustStoreConfigurationError.message);
+      }
+      if (!issuer) {
+        return refusal(
+          "OPERATOR_APPROVAL_ISSUER_NOT_CONFIGURED",
+          "No approval signing identity is configured, so Operator cannot issue an authentic approval.",
+        );
+      }
+      if (!trustStore) {
+        return refusal(
+          "OPERATOR_APPROVAL_TRUST_STORE_NOT_CONFIGURED",
+          "No trusted approval issuers are configured, so the Runtime could not verify an approval.",
+        );
+      }
       const approverId = decision.approverId.trim();
       const status = decision.status ?? "approved";
       const approvalExpiresAt = canonicalApprovalExpiry(decision.approvalExpiresAt);
@@ -447,7 +516,16 @@ export function createOperatorPersistedApprovalAuthority(
             observedAt: decision.observedAt,
             ...(approvalExpiresAt === undefined ? {} : { approvalExpiresAt }),
           });
-          const published = idempotencyStore.persistApprovalObservation(observation);
+          // Signed here and only here: the human decision becomes authority at
+          // the exact moment it becomes immutable. The signature covers the
+          // finished `observationHash`, which transitively binds every field
+          // above, so no field list has to be maintained in parallel.
+          const published = idempotencyStore.persistApprovalObservation(
+            attachRuntimeApprovalAuthenticity(
+              observation,
+              issuer!.authenticityFor(observation.observationHash),
+            ),
+          );
           if (published.status === "conflict") {
             return refusal(
               "OPERATOR_APPROVAL_OBSERVATION_CONFLICT",

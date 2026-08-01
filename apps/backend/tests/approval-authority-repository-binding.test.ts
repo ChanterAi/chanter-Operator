@@ -31,6 +31,10 @@ import {
   resolveApprovalAuthorityCheckout,
 } from "../src/runtimeMissions/approvalAuthorityCheckout.js";
 import type { OperatorApprovalAuthorityConfiguration } from "../src/runtimeMissions/persistedApprovalAuthority.js";
+import {
+  approvalAuthorityFixture,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const APPROVER = "founder";
 const WORKSPACE_ID = "workspace-a-00000001";
@@ -40,6 +44,7 @@ const disposableRoots: string[] = [];
 const openDatabases: DatabaseSync[] = [];
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const database of openDatabases.splice(0)) {
     try {
       database.close();
@@ -122,8 +127,11 @@ function managedBinding(productRoot: string): {
   return {
     stateDir,
     checkoutRoot,
+    // Built from the shared fixture so the managed binding also carries a real
+    // signing identity and trust store; authenticity is proven separately.
     configuration: {
-      stateDir,
+      ...approvalAuthorityFixture({ stateDir }),
+      repositoryRoot: undefined,
       managedCheckout: { sourceRepositoryRoot: productRoot, checkoutRoot },
       ownerId: "binding-test-owner",
     },
@@ -502,7 +510,9 @@ describe("deployable approval authority repository binding", () => {
     const { service } = openService({
       databasePath: path.join(disposableRoot("chanter-binding-db-"), "operator.sqlite"),
       boundary,
-      approvalAuthority: { stateDir, repositoryRoot: product.root, ownerId: "binding-test-owner" },
+      // A real signing identity, so the refusal below is about repository
+      // dirtiness and nothing else.
+      approvalAuthority: approvalAuthorityFixture({ stateDir, repositoryRoot: product.root }),
     });
 
     const created = await service.createScheduleMission(scheduleInput());
