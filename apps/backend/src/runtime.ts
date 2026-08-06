@@ -131,6 +131,7 @@ export function createRuntime() {
       authorityRevision: resolveAgenticAuthorityRevision(
         config.agenticFabric.authorityRepositoryRoot,
       ),
+      providers: config.agenticFabric.providers,
     },
   });
   // The unified CHANTER OS control plane is composed from the same canonical

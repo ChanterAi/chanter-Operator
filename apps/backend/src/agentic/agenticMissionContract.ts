@@ -155,6 +155,37 @@ export interface AgenticContextRequirement {
 }
 
 // ---------------------------------------------------------------------------
+// Execution policy
+// ---------------------------------------------------------------------------
+
+/**
+ * How much intelligence a mission is willing to spend.
+ *
+ * The default preserves Effective Intelligence Density: take the cheapest worker
+ * kind that is sufficient, which for every capability in this registry means no
+ * inference at all. `model_required_for_judgment` is an explicit, human-declared
+ * escalation for the judgement-bearing capabilities *only* — it can never reach
+ * a capability the registry declares deterministic, because such a capability
+ * authorizes no provider binding for it to select.
+ *
+ * Stated as a policy over capability *classes*, never as a list of node names. A
+ * policy that named nodes would silently change meaning the moment the plan
+ * compiler renamed one.
+ */
+export const AGENTIC_EXECUTION_POLICIES = [
+  "cheapest_sufficient",
+  "model_required_for_judgment",
+] as const;
+
+export type AgenticExecutionPolicy = (typeof AGENTIC_EXECUTION_POLICIES)[number];
+
+/** One capability's chosen provider binding, drawn from the closed registry. */
+export interface AgenticProviderBindingSelection {
+  readonly capabilityId: string;
+  readonly bindingId: string;
+}
+
+// ---------------------------------------------------------------------------
 // Output contract
 // ---------------------------------------------------------------------------
 
@@ -200,6 +231,24 @@ export interface AgenticIntentContract {
   readonly maxParallelism: number;
   readonly allowedCapabilities: readonly string[];
   readonly forbiddenCapabilities: readonly string[];
+  /**
+   * Whether judgement-bearing capabilities must run on a model. Part of the
+   * intent hash, so the same mission id submitted under a different execution
+   * policy is a typed conflict rather than a silently re-planned mission.
+   */
+  readonly executionPolicy: AgenticExecutionPolicy;
+  /** Capability -> reviewed binding, sorted by capability id. */
+  readonly providerBindings: readonly AgenticProviderBindingSelection[];
+  /**
+   * Per-model-node monetary ceiling, distinct from `costBudgetMicros`.
+   *
+   * `costBudgetMicros` is the *plan* ceiling the Governor withholds admission
+   * against; this is the ceiling one provider call is judged by, inside the
+   * Runtime, before it is dispatched. Two ceilings because they answer two
+   * different questions — "can this plan afford to continue" and "may this one
+   * call be made at all" — and one number cannot answer both.
+   */
+  readonly modelNodeCostCeilingMicros: number | null;
   readonly contextRequirements: readonly AgenticContextRequirement[];
   readonly outputContract: AgenticOutputContract;
   readonly requestedAt: string;
@@ -241,6 +290,9 @@ export function createAgenticIntentHash(
     maxParallelism: contract.maxParallelism,
     allowedCapabilities: [...contract.allowedCapabilities],
     forbiddenCapabilities: [...contract.forbiddenCapabilities],
+    executionPolicy: contract.executionPolicy,
+    providerBindings: contract.providerBindings.map((selection) => ({ ...selection })),
+    modelNodeCostCeilingMicros: contract.modelNodeCostCeilingMicros,
     contextRequirements: contract.contextRequirements.map((requirement) => ({ ...requirement })),
     outputContract: {
       format: contract.outputContract.format,
@@ -366,6 +418,13 @@ export interface AgenticPlanNode {
   /** `null` only for an authority checkpoint, which runs no worker at all. */
   readonly capabilityId: string | null;
   readonly workerKind: AgenticWorkerKind | null;
+  /**
+   * The reviewed provider binding this node executes against, or `null` when it
+   * runs no model. It participates in `payloadHash`, so changing which provider
+   * a node uses changes the node, which changes the plan — an approval given for
+   * one provider cannot silently carry onto another.
+   */
+  readonly providerBindingId: string | null;
   readonly dependencyIds: readonly string[];
   /** Node ids whose accepted output becomes this node's input. */
   readonly inputRefs: readonly string[];
@@ -411,6 +470,7 @@ export function createAgenticNodePayloadHash(node: Omit<AgenticPlanNode, "payloa
     nodeType: node.nodeType,
     capabilityId: node.capabilityId,
     workerKind: node.workerKind,
+    providerBindingId: node.providerBindingId,
     dependencyIds: [...node.dependencyIds],
     inputRefs: [...node.inputRefs],
     authorityRequirement: node.authorityRequirement,
@@ -501,4 +561,28 @@ export interface AgenticValueObservation {
   readonly humanApprovals: number;
   readonly recoveryEvents: number;
   readonly duplicateExecutionsPrevented: number;
+  // -- Measured model usage -------------------------------------------------
+  // Every field below is read from durable provider usage rows. A count is zero
+  // only when zero was observed; a cost is `null` whenever it was never
+  // measured, and no branch anywhere turns an unknown into a zero.
+  readonly modelWorkerCount: number;
+  readonly providerCallCount: number;
+  readonly providerFallbackCount: number;
+  readonly inputTokenCount: number | null;
+  readonly outputTokenCount: number | null;
+  readonly totalTokenCount: number | null;
+  /** How the token counts were obtained, or why there are none. */
+  readonly tokenCostSource: "provider_measured" | "not_measured";
+  readonly monetaryCostMicros: number | null;
+  readonly monetaryCostSource:
+    | "provider_reported"
+    | "local_price_snapshot"
+    | "unpriced_local_compute"
+    | "not_measured"
+    | "mixed";
+  readonly duplicateModelCallsPrevented: number;
+  /** `provider/model` identities actually invoked, sorted and de-duplicated. */
+  readonly modelIdentitiesUsed: readonly string[];
+  /** Provider call keys of the durable usage rows this observation summarizes. */
+  readonly providerUsageReferences: readonly string[];
 }

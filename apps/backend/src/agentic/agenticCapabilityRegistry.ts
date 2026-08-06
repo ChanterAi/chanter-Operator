@@ -39,6 +39,7 @@ import type {
   AgenticVerifiabilityClass,
   AgenticWorkerKind,
 } from "chanter-agent-runtime";
+import type { AgenticExecutionPolicy } from "./agenticMissionContract.js";
 
 // ---------------------------------------------------------------------------
 // Closed tool registry
@@ -88,6 +89,18 @@ export interface AgenticCapability {
   readonly riskClass: AgenticRiskClass;
   readonly authorityRequirement: AgenticAuthorityRequirement;
   readonly defaultBudget: AgenticNodeBudget;
+  /**
+   * The budget this capability runs under when a mission routes it to a model,
+   * or `null` when it can never be one.
+   *
+   * Declared separately from `defaultBudget` rather than replacing it, because
+   * the two are genuinely different costs: a structured local worker answers in
+   * milliseconds and spends no tokens, while a provider-backed one needs a
+   * wall-clock window measured in minutes and a token ceiling. Folding them into
+   * one number would either starve the model node or inflate the cheapest
+   * possible plan's declared minimum, and both are wrong.
+   */
+  readonly modelWorkerBudget: AgenticNodeBudget | null;
   readonly verifiability: AgenticVerifiabilityClass;
   readonly allowedTools: readonly AgenticToolName[];
   /**
@@ -212,6 +225,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 16, maxDurationMs: 20_000 }),
+    modelWorkerBudget: null,
     verifiability: "deterministic" as const,
     allowedTools: ["repo.metadata.read", "repo.file.read", "test.result.read", "operator.mission.state.read", "fixture.read"] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -241,6 +255,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 2, maxDurationMs: 10_000 }),
+    modelWorkerBudget: null,
     verifiability: "deterministic" as const,
     allowedTools: ["repo.file.read"] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -257,6 +272,20 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 8, maxModelCalls: 1, maxDurationMs: 45_000 }),
+    modelWorkerBudget: budget({
+      // No tool at all. The provider call is the Runtime's bounded execution
+      // port, not something the model may reach for.
+      maxToolCalls: 0,
+      // One primary dispatch plus one declared fallback. Not a retry budget:
+      // an unknown outcome consumes neither, because it is never re-attempted.
+      maxModelCalls: 2,
+      // A local model answers in tens of seconds, not milliseconds. The window
+      // is wall clock for the whole node, and the Governor's plan deadline still
+      // caps the plan.
+      maxDurationMs: 240_000,
+      maxTokens: 8_192,
+      maxCostMicros: null,
+    }),
     verifiability: "evidence_verifiable" as const,
     allowedTools: ["fixture.read"] as const,
     allowedWorkerKinds: ["structured_local_worker", "model_worker"] as const,
@@ -273,6 +302,20 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 8, maxModelCalls: 1, maxDurationMs: 45_000 }),
+    modelWorkerBudget: budget({
+      // No tool at all. The provider call is the Runtime's bounded execution
+      // port, not something the model may reach for.
+      maxToolCalls: 0,
+      // One primary dispatch plus one declared fallback. Not a retry budget:
+      // an unknown outcome consumes neither, because it is never re-attempted.
+      maxModelCalls: 2,
+      // A local model answers in tens of seconds, not milliseconds. The window
+      // is wall clock for the whole node, and the Governor's plan deadline still
+      // caps the plan.
+      maxDurationMs: 240_000,
+      maxTokens: 8_192,
+      maxCostMicros: null,
+    }),
     verifiability: "evidence_verifiable" as const,
     allowedTools: ["fixture.read"] as const,
     allowedWorkerKinds: ["structured_local_worker", "model_worker"] as const,
@@ -357,6 +400,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 0, maxDurationMs: 20_000 }),
+    modelWorkerBudget: null,
     verifiability: "deterministic" as const,
     allowedTools: [] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -435,6 +479,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 0, maxDurationMs: 20_000 }),
+    modelWorkerBudget: null,
     verifiability: "evidence_verifiable" as const,
     allowedTools: [] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -470,6 +515,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     // from a node's name.
     authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
     defaultBudget: budget({ maxToolCalls: 1, maxDurationMs: 15_000 }),
+    modelWorkerBudget: null,
     verifiability: "deterministic" as const,
     allowedTools: ["artifact.local.write"] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -516,6 +562,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     riskClass: "read_only" as const,
     authorityRequirement: "none" as const,
     defaultBudget: budget({ maxToolCalls: 4, maxDurationMs: 20_000 }),
+    modelWorkerBudget: null,
     verifiability: "deterministic" as const,
     allowedTools: ["artifact.local.read"] as const,
     allowedWorkerKinds: ["deterministic_tool"] as const,
@@ -560,6 +607,28 @@ function assertRegistryIsConsistent(): void {
     if (capability.sideEffectClass === "external") {
       throw new Error(`Capability ${capability.capabilityId} declares an external side effect.`);
     }
+    // A model budget on a capability that can never route to a model would be
+    // dead declaration, and worse, one a later edit could accidentally make
+    // live. Refuse the combination outright.
+    const modelEligible = capability.allowedWorkerKinds.includes("model_worker");
+    if (capability.modelWorkerBudget !== null && !modelEligible) {
+      throw new Error(
+        `Capability ${capability.capabilityId} declares a model worker budget but registers no model worker kind.`,
+      );
+    }
+    if (modelEligible && capability.modelWorkerBudget !== null) {
+      if (capability.modelWorkerBudget.maxTokens === null) {
+        throw new Error(
+          `Capability ${capability.capabilityId} may route to a model but declares no token ceiling for it.`,
+        );
+      }
+      if (capability.modelWorkerBudget.maxToolCalls !== 0) {
+        throw new Error(
+          `Capability ${capability.capabilityId} grants a model worker tool calls; the provider call is the `
+          + "Runtime's execution port, never a tool exposed to the model.",
+        );
+      }
+    }
   }
 }
 
@@ -602,14 +671,38 @@ export const AGENTIC_ARTIFACT_MISSION_CAPABILITIES: readonly string[] = Object.f
 ]);
 
 /**
+ * The budget one capability actually runs under, given how it was routed.
+ *
+ * One function so the plan compiler, the intent compiler's minimum check, and
+ * the worker factory can never disagree about what a model node may spend.
+ */
+export function budgetForWorkerKind(
+  capability: AgenticCapability,
+  workerKind: AgenticWorkerKind | null,
+): AgenticNodeBudget {
+  return workerKind === "model_worker" && capability.modelWorkerBudget !== null
+    ? capability.modelWorkerBudget
+    : capability.defaultBudget;
+}
+
+/**
  * The smallest time budget under which the required capabilities could all run.
  *
- * Derived by summing their declared default budgets rather than written down as
- * a constant, so it cannot drift away from what the plan actually costs.
+ * Derived by summing their declared budgets rather than written down as a
+ * constant, so it cannot drift away from what the plan actually costs — and
+ * derived *per execution policy*, because a mission that requires model-backed
+ * judgement genuinely needs a larger window than the cheapest sufficient plan.
+ * Answering with the cheap plan's minimum for a model mission would accept a
+ * budget the plan then exceeds at node two.
  */
-export function minimumExecutablePlanDurationMs(): number {
-  return AGENTIC_ARTIFACT_MISSION_CAPABILITIES.reduce(
-    (total, capabilityId) => total + requireAgenticCapability(capabilityId).defaultBudget.maxDurationMs,
-    0,
-  );
+export function minimumExecutablePlanDurationMs(
+  executionPolicy: AgenticExecutionPolicy = "cheapest_sufficient",
+): number {
+  return AGENTIC_ARTIFACT_MISSION_CAPABILITIES.reduce((total, capabilityId) => {
+    const capability = requireAgenticCapability(capabilityId);
+    const routesToModel = executionPolicy === "model_required_for_judgment"
+      && capability.verifiability !== "deterministic"
+      && capability.allowedWorkerKinds.includes("model_worker");
+    return total + budgetForWorkerKind(capability, routesToModel ? "model_worker" : null).maxDurationMs;
+  }, 0);
 }

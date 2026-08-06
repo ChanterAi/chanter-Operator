@@ -942,6 +942,9 @@ CREATE TABLE IF NOT EXISTS operator_agentic_plan_nodes (
   )),
   capability_id TEXT,
   worker_kind TEXT,
+  -- The reviewed provider binding this node executes against, or NULL when it
+  -- runs no model. Part of payload_hash, so it cannot change under an approval.
+  provider_binding_id TEXT,
   depends_on_json TEXT NOT NULL,
   input_refs_json TEXT NOT NULL,
   authority_requirement TEXT NOT NULL CHECK (authority_requirement IN (
@@ -1053,6 +1056,57 @@ CREATE TABLE IF NOT EXISTS operator_agentic_worker_records (
   typed_error_json TEXT,
   recorded_at TEXT
 );
+
+-- The Runtime's durable memory of provider invocations, written the instant a
+-- provider's outcome is known and before the worker that requested it returns.
+-- That ordering is what makes a crash between the call and the node commit
+-- recoverable for free: the proof that the provider answered already exists.
+--
+-- One row per (node execution identity, binding), so re-running the same node
+-- against the same binding is recognized as the same call while a declared
+-- fallback to a different binding is correctly a different one. The primary key
+-- is the enforcement — a second charge under one identity is a constraint
+-- violation, not a silently doubled invoice.
+--
+-- No prompt, no completion, and no reasoning is stored. Only hashes, measured
+-- usage, cited references, and bounded diagnostic metadata.
+CREATE TABLE IF NOT EXISTS operator_agentic_provider_usage (
+  provider_call_key TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  binding_id TEXT NOT NULL,
+  provider_name TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  provider_request_id TEXT,
+  request_hash TEXT NOT NULL,
+  raw_response_hash TEXT,
+  response_hash TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  total_tokens INTEGER,
+  monetary_cost_micros INTEGER,
+  monetary_cost_source TEXT NOT NULL,
+  monetary_cost_unavailable_reason TEXT,
+  pricing_revision TEXT,
+  latency_ms INTEGER NOT NULL,
+  finish_reason TEXT,
+  typed_error_json TEXT,
+  fallback_decision TEXT NOT NULL,
+  fallback_from_binding_id TEXT,
+  evidence_references_json TEXT NOT NULL,
+  recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_provider_usage_node
+  ON operator_agentic_provider_usage(idempotency_key, provider_call_key);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_provider_usage_mission
+  ON operator_agentic_provider_usage(mission_id, node_id);
 
 -- Exactly-one-write, enforced by the primary key rather than by a counter a
 -- caller could forget to increment. A second write under the same identity is a

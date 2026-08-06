@@ -13,8 +13,10 @@
   },
   "include": [
     "tools/phase2c",
+    "tools/os-agentic-fabric",
     "tools/os-ambiguous-reconciliation",
     "tools/os-assembly",
+    "tools/os-csi-model-workers",
     "tools/os-platform-recovery",
     "tools/os-recovery",
     "tools/os-unified",

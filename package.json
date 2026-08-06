@@ -48,7 +48,8 @@
     "autoposter:mission:local:seed-account": "node --import tsx tools/local-mission/seed-connected-account.mts",
     "os:assembly": "node --import tsx tools/os-assembly/run-end-to-end-assembly.mts",
     "os:unified": "node --import tsx tools/os-unified/run-unified-mission-control.mts",
-    "os:agentic-fabric": "node --import tsx tools/os-agentic-fabric/run-agentic-fabric.mts"
+    "os:agentic-fabric": "node --import tsx tools/os-agentic-fabric/run-agentic-fabric.mts",
+    "os:csi-model-workers": "node --import tsx tools/os-csi-model-workers/run-csi-model-workers.mts"
   },
   "engines": {
     "node": ">=22.13.0"

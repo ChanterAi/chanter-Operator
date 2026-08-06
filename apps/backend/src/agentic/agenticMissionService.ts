@@ -36,6 +36,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   executeAgenticNode,
   type AgenticNodeRecordStore,
+  type GovernedModelInvocationOptions,
   type AgenticNodeRequest,
   type AgenticNodeResult,
   type AgenticNodeWorkerRegistry,
@@ -72,6 +73,8 @@ import {
 import { createAgenticToolSurface, type AgenticFabricPaths, type AgenticToolSurface } from "./agenticToolSurface.js";
 import { createAgenticContextSourcePort } from "./agenticContextSources.js";
 import { createAgenticWorkerSet } from "./agenticWorkers.js";
+import { createOperatorProviderBindingRegistry, type AgenticProviderConfiguration } from "./agenticProviderRegistry.js";
+import { createAgenticProviderAdapters } from "./agenticProviderAdapters.js";
 import { renderAgenticCandidate } from "./agenticCandidateRenderer.js";
 
 /** Grace added to a node lease beyond its own duration ceiling. */
@@ -87,6 +90,8 @@ export interface AgenticFabricConfiguration {
   readonly approvalTtlMs: number;
   /** Committed revision an approval is bound to. `null` when none is configured. */
   readonly authorityRevision: string | null;
+  /** Which reviewed provider bindings this deployment has actually enabled. */
+  readonly providers: AgenticProviderConfiguration;
 }
 
 export interface AgenticFabricDependencies {
@@ -102,6 +107,12 @@ export interface AgenticFabricDependencies {
     boundary: "after_worker_record_before_node_commit" | "before_node_lease",
     context: { readonly missionId: string; readonly nodeId: string },
   ) => void;
+  /**
+   * Interruption boundary inside a provider call, for the model-worker recovery
+   * proof. Distinct from `failureInjector` because it fires one layer deeper —
+   * between the provider answering and the worker returning.
+   */
+  readonly providerFailureInjector?: GovernedModelInvocationOptions["failureInjector"];
 }
 
 export interface AgenticMissionView {
@@ -191,6 +202,7 @@ export class AgenticMissionService {
   private readonly tools: AgenticToolSurface;
   private readonly contextPort: AgenticContextSourcePort;
   private readonly now: () => string;
+  private readonly providerInvocation: GovernedModelInvocationOptions;
 
   constructor(private readonly dependencies: AgenticFabricDependencies) {
     this.now = dependencies.clock ?? (() => new Date().toISOString());
@@ -198,6 +210,14 @@ export class AgenticMissionService {
     this.governor = dependencies.governor
       ?? createAgenticPlanGovernorPort(dependencies.configuration.governor);
     this.recordStore = this.journal.createWorkerRecordStore(this.now);
+    this.providerInvocation = {
+      registry: createOperatorProviderBindingRegistry(dependencies.configuration.providers),
+      adapters: createAgenticProviderAdapters(dependencies.configuration.providers),
+      usageStore: this.journal.createProviderUsageStore(),
+      ...(dependencies.providerFailureInjector
+        ? { failureInjector: dependencies.providerFailureInjector }
+        : {}),
+    };
     this.tools = createAgenticToolSurface(dependencies.configuration.paths, {
       read: (missionId) => {
         const mission = this.journal.getMission(missionId);
@@ -543,6 +563,21 @@ export class AgenticMissionService {
           : null;
       },
       artifactWriteCount: () => this.journal.countArtifactWrites(mission.missionId),
+      // The routed plan decides which capabilities became model workers, and
+      // against which reviewed binding. Passing the *durable* nodes rather than
+      // re-deriving from the intent means a resumed mission builds exactly the
+      // workers its committed plan named, even if the registry has since moved.
+      modelNodes: this.journal
+        .listNodes(mission.planId)
+        .filter((node) => node.workerKind === "model_worker" && node.capabilityId !== null)
+        .map((node) => ({
+          capabilityId: node.capabilityId as string,
+          bindingId: node.providerBindingId,
+          maxTotalTokens: node.budget.maxTokens,
+          maxCostMicros: node.budget.maxCostMicros,
+          attempts: node.attempts,
+        })),
+      providerInvocation: this.providerInvocation,
     });
   }
 
@@ -1302,6 +1337,26 @@ export class AgenticMissionService {
       .filter((value): value is number => typeof value === "number");
 
     const workerNodes = nodes.filter((node) => node.nodeType !== "authority_checkpoint");
+
+    // Model usage is read from the durable provider usage rows, not from the
+    // node cost fields. Those two agree today, but the usage rows are the
+    // primary record of "a provider was reached", and a summary should be
+    // derived from the fact rather than from a copy of it.
+    const providerUsage = this.journal.listProviderUsage(missionId);
+    const measured = providerUsage.filter((usage) => usage.typedError === null);
+    const inputTokens = measured
+      .map((usage) => usage.inputTokens)
+      .filter((value): value is number => typeof value === "number");
+    const outputTokens = measured
+      .map((usage) => usage.outputTokens)
+      .filter((value): value is number => typeof value === "number");
+    const monetary = measured
+      .map((usage) => usage.monetaryCostMicros)
+      .filter((value): value is number => typeof value === "number");
+    const costSources = new Set(measured.map((usage) => usage.monetaryCostSource));
+    const sum = (values: readonly number[]): number =>
+      values.reduce((total, value) => total + value, 0);
+
     return {
       objectiveSatisfied: verified,
       acceptanceCriteriaPassed: machineCheckable.length > 0
@@ -1329,6 +1384,40 @@ export class AgenticMissionService {
       recoveryEvents: events.filter((event) => event.eventType === "node_reconciled").length,
       duplicateExecutionsPrevented: events.filter((event) =>
         event.reason.includes("no second worker invocation occurred")).length,
+      modelWorkerCount: nodes.filter((node) => node.workerKind === "model_worker").length,
+      providerCallCount: providerUsage.length,
+      providerFallbackCount: providerUsage.filter(
+        (usage) => usage.fallbackDecision === "fallback_used",
+      ).length,
+      inputTokenCount: inputTokens.length > 0 ? sum(inputTokens) : null,
+      outputTokenCount: outputTokens.length > 0 ? sum(outputTokens) : null,
+      totalTokenCount: inputTokens.length > 0 && outputTokens.length > 0
+        ? sum(inputTokens) + sum(outputTokens)
+        : null,
+      tokenCostSource: inputTokens.length > 0 ? "provider_measured" : "not_measured",
+      // `null`, not zero, whenever nothing measured a charge. An unpriced local
+      // provider produces no invoice, and reporting `0` would be a claim about
+      // a bill that was never issued.
+      monetaryCostMicros: monetary.length > 0 ? sum(monetary) : null,
+      monetaryCostSource: costSources.size === 0
+        ? "not_measured"
+        : costSources.size === 1
+          ? ([...costSources][0] as AgenticValueObservation["monetaryCostSource"])
+          : "mixed",
+      // A model node that completed because a reconcile *found* its durable
+      // worker result is a provider call that would otherwise have been made
+      // twice. Keyed on the reconciliation outcome rather than on an attempt
+      // count, because the whole point of recovery is that attempts do **not**
+      // increase — counting attempts would report zero exactly when a duplicate
+      // was most decisively prevented.
+      duplicateModelCallsPrevented: nodes.filter((node) =>
+        node.workerKind === "model_worker"
+        && node.reconciliationOutcome === "worker_result_found"
+        && this.journal.countProviderCallsForNode(node.idempotencyKey) > 0).length,
+      modelIdentitiesUsed: [...new Set(
+        providerUsage.map((usage) => `${usage.providerName}/${usage.modelId}`),
+      )].sort(),
+      providerUsageReferences: providerUsage.map((usage) => usage.providerCallKey).sort(),
     };
   }
 

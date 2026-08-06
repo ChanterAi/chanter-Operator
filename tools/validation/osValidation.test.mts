@@ -128,21 +128,28 @@ describe("CHANTER OS validation orchestration", () => {
         "os:assembly",
         "os:unified",
         "os:agentic-fabric",
+        "os:csi-model-workers",
       ],
     );
   });
 
-  it("keeps the agentic fabric proof terminal and present exactly once", () => {
+  it("keeps both agentic proofs present exactly once, with the model proof terminal", () => {
     const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
-    assert.equal(
-      scripts.filter((script) => script === "os:agentic-fabric").length,
-      1,
-      "the stage must appear exactly once in the canonical gate",
-    );
+    for (const script of ["os:agentic-fabric", "os:csi-model-workers"]) {
+      assert.equal(
+        scripts.filter((entry) => entry === script).length,
+        1,
+        `${script} must appear exactly once in the canonical gate`,
+      );
+    }
     assert.equal(
       scripts[scripts.length - 1],
-      "os:agentic-fabric",
-      "the most expensive proof must be the terminal stage",
+      "os:csi-model-workers",
+      "the most expensive proof — the only one performing real inference — must be terminal",
+    );
+    assert.ok(
+      scripts.indexOf("os:agentic-fabric") < scripts.indexOf("os:csi-model-workers"),
+      "the deterministic fabric proof must stay ahead of the model-worker proof",
     );
   });
 
@@ -161,6 +168,7 @@ describe("CHANTER OS validation orchestration", () => {
       "os:assembly",
       "os:unified",
       "os:agentic-fabric",
+      "os:csi-model-workers",
     ]) {
       assert.ok(recovery < scripts.indexOf(slower), `generic recovery must precede ${slower}`);
       assert.ok(
@@ -215,6 +223,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.deepEqual(outcome.skipped, [
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS collective synthetic intelligence model workers",
     ]);
   });
 
@@ -246,7 +255,14 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       false,
       "the ambiguous reconciliation proof must never start",
     );
-    assert.equal(outcome.skipped.length, 8);
+    assert.equal(
+      started.includes("os:csi-model-workers"),
+      false,
+      "the terminal model-worker proof must never start",
+    );
+    // Every stage after the first in-process recovery proof, which is now nine
+    // rather than eight because the model-worker proof joined the gate.
+    assert.equal(outcome.skipped.length, 9);
   });
 
   it("preserves the Platform recovery proof's exact exit code and skips all later stages", async () => {
@@ -272,6 +288,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS collective synthetic intelligence model workers",
     ]);
   });
 
@@ -304,6 +321,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS collective synthetic intelligence model workers",
     ]);
   });
 
@@ -353,7 +371,10 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       false,
       "a failing stage is never reported as completed",
     );
-    assert.deepEqual(outcome.skipped, ["OS governed agentic execution fabric"]);
+    assert.deepEqual(outcome.skipped, [
+      "OS governed agentic execution fabric",
+      "OS collective synthetic intelligence model workers",
+    ]);
   });
 
   it("fails closed when the unified proof cannot be started at all", async () => {
@@ -372,15 +393,16 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
 });
 
 /*
- * The terminal stage's own contract.
+ * The two agentic proofs' contracts.
  *
- * `os:agentic-fabric` is last, so "a failure skips everything after it" has no
- * observable form beyond an empty skip list. What remains provable — and what
- * matters — is that it runs only after every cheaper stage, that its own exit
- * code survives, and that a spawn failure fails the whole gate closed.
+ * `os:csi-model-workers` is now terminal, so the deterministic fabric proof
+ * gained something it could not previously demonstrate: a failure in it must
+ * *skip* the model-worker proof entirely. That matters for real money and real
+ * time — there is no point spending inference to test a fabric whose
+ * deterministic path is already broken.
  */
-describe("CHANTER OS validation gate — agentic fabric proof fail-fast", () => {
-  it("runs only after every cheaper stage has passed", async () => {
+describe("CHANTER OS validation gate — agentic proof fail-fast", () => {
+  it("runs the model-worker proof only after every cheaper stage has passed", async () => {
     const started: string[] = [];
     await runOsValidation({ run: stubRunner({}, started), log: silent });
 
@@ -389,10 +411,10 @@ describe("CHANTER OS validation gate — agentic fabric proof fail-fast", () => 
       OS_VALIDATION_STAGES.map((stage) => stage.script),
       "every stage ran exactly once, in the declared order",
     );
-    assert.equal(started[started.length - 1], "os:agentic-fabric");
+    assert.equal(started[started.length - 1], "os:csi-model-workers");
   });
 
-  it("preserves the agentic fabric proof's exact exit code and completes nothing after it", async () => {
+  it("skips the model-worker proof when the deterministic fabric proof fails", async () => {
     const started: string[] = [];
     const outcome = await runOsValidation({
       run: stubRunner({ "os:agentic-fabric": 29 }, started),
@@ -402,30 +424,50 @@ describe("CHANTER OS validation gate — agentic fabric proof fail-fast", () => 
     assert.equal(outcome.ok, false);
     assert.equal(outcome.exitCode, 29, "the real child exit code is not collapsed to 1");
     assert.equal(outcome.failedStage?.script, "os:agentic-fabric");
+    assert.equal(
+      started.includes("os:csi-model-workers"),
+      false,
+      "no inference is spent once the deterministic fabric is already broken",
+    );
+    assert.deepEqual(outcome.skipped, ["OS collective synthetic intelligence model workers"]);
+  });
+
+  it("preserves the terminal model-worker proof's exact exit code", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "os:csi-model-workers": 31 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 31, "the real child exit code is not collapsed to 1");
+    assert.equal(outcome.failedStage?.script, "os:csi-model-workers");
     assert.deepEqual(
       started,
       OS_VALIDATION_STAGES.map((stage) => stage.script),
       "every earlier stage ran exactly once, in order",
     );
     assert.equal(
-      outcome.completed.includes("OS governed agentic execution fabric"),
+      outcome.completed.includes("OS collective synthetic intelligence model workers"),
       false,
       "a failing stage is never reported as completed",
     );
     assert.deepEqual(outcome.skipped, [], "nothing follows the terminal stage");
   });
 
-  it("fails closed when the agentic fabric proof cannot be started at all", async () => {
-    const outcome = await runOsValidation({
-      run: async (stage) => {
-        if (stage.script === "os:agentic-fabric") throw new Error("spawn failed");
-        return 0;
-      },
-      log: silent,
-    });
+  it("fails closed when either agentic proof cannot be started at all", async () => {
+    for (const script of ["os:agentic-fabric", "os:csi-model-workers"]) {
+      const outcome = await runOsValidation({
+        run: async (stage) => {
+          if (stage.script === script) throw new Error("spawn failed");
+          return 0;
+        },
+        log: silent,
+      });
 
-    assert.equal(outcome.ok, false);
-    assert.equal(outcome.exitCode, 1);
-    assert.equal(outcome.failedStage?.script, "os:agentic-fabric");
+      assert.equal(outcome.ok, false);
+      assert.equal(outcome.exitCode, 1);
+      assert.equal(outcome.failedStage?.script, script);
+    }
   });
 });

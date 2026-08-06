@@ -28,6 +28,7 @@ import {
   AGENTIC_ACCEPTANCE_CHECKS,
   AGENTIC_CONSTRAINT_KINDS,
   AGENTIC_CONTEXT_SOURCE_TYPES,
+  AGENTIC_EXECUTION_POLICIES,
   AGENTIC_TRUST_CLASSES,
   AGENTIC_WORK_SCHEMA_VERSION,
   createAgenticIntentHash,
@@ -38,9 +39,11 @@ import {
   type AgenticConstraintKind,
   type AgenticContextRequirement,
   type AgenticContextSourceType,
+  type AgenticExecutionPolicy,
   type AgenticFreshnessPolicy,
   type AgenticIntentContract,
   type AgenticOutputContract,
+  type AgenticProviderBindingSelection,
   type AgenticTrustClass,
 } from "./agenticMissionContract.js";
 import {
@@ -48,6 +51,7 @@ import {
   minimumExecutablePlanDurationMs,
   resolveAgenticCapability,
 } from "./agenticCapabilityRegistry.js";
+import { assertBindingSelectable } from "./agenticProviderRegistry.js";
 import type { AgenticRiskClass, AgenticVerifiabilityClass } from "chanter-agent-runtime";
 
 const SUPPORTED_RISK_CLASSES: readonly AgenticRiskClass[] = ["read_only", "local_write"];
@@ -331,6 +335,105 @@ function compileCapabilityList(raw: readonly unknown[], field: string): string[]
 }
 
 // ---------------------------------------------------------------------------
+// Execution policy
+// ---------------------------------------------------------------------------
+
+/**
+ * Compiles how much intelligence this mission is permitted to spend.
+ *
+ * Three refusals happen here, all before a plan exists:
+ *
+ *   - a policy value nobody registered;
+ *   - a provider binding the closed registry does not carry, or that this
+ *     capability is not authorized to reach;
+ *   - a binding attached to a capability the registry declares deterministic.
+ *
+ * The last one is the important one. A deterministic capability authorizes no
+ * binding at all, so "force the verifier onto a model" is refused *naming the
+ * capability* rather than quietly honoured. A fabric that let a mission decide
+ * which of its own checks are probabilistic has no checks.
+ *
+ * A mission that declares `model_required_for_judgment` and selects nothing is
+ * not under-specified: the reviewed registry's preference order supplies the
+ * binding, and the choice is recorded in `defaultsApplied` so a reader can tell
+ * what a human asked for from what this code assumed.
+ */
+function compileExecutionPolicy(
+  rawPolicy: unknown,
+  rawBindings: unknown,
+  allowedCapabilities: readonly string[],
+  defaultsApplied: AgenticAppliedDefault[],
+): {
+  executionPolicy: AgenticExecutionPolicy;
+  providerBindings: readonly AgenticProviderBindingSelection[];
+} {
+  let executionPolicy: AgenticExecutionPolicy = "cheapest_sufficient";
+  if (rawPolicy === undefined || rawPolicy === null) {
+    defaultsApplied.push({
+      field: "executionPolicy",
+      value: "cheapest_sufficient",
+      reason:
+        "No execution policy was declared, so the cheapest sufficient worker is used for every capability "
+        + "and no inference is spent.",
+    });
+  } else if (typeof rawPolicy !== "string" || !AGENTIC_EXECUTION_POLICIES.includes(rawPolicy as AgenticExecutionPolicy)) {
+    refuse(
+      "AGENTIC_INTENT_FIELD_INVALID",
+      `executionPolicy must be one of: ${AGENTIC_EXECUTION_POLICIES.join(", ")}.`,
+    );
+  } else {
+    executionPolicy = rawPolicy as AgenticExecutionPolicy;
+  }
+
+  const selections = new Map<string, string>();
+  for (const [index, entry] of optionalArray(rawBindings, "providerBindings").entries()) {
+    const record = jsonObject(entry);
+    if (!record) {
+      refuse("AGENTIC_INTENT_FIELD_INVALID", `providerBindings[${index}] must be an object.`);
+    }
+    const capabilityId = boundedIdentifier(record.capabilityId, `providerBindings[${index}].capabilityId`);
+    const bindingId = boundedIdentifier(record.bindingId, `providerBindings[${index}].bindingId`);
+    if (!allowedCapabilities.includes(capabilityId)) {
+      refuse(
+        "AGENTIC_INTENT_CAPABILITY_NOT_ALLOWED",
+        `providerBindings names ${capabilityId}, which this mission did not allow.`,
+        409,
+      );
+    }
+    if (selections.has(capabilityId) && selections.get(capabilityId) !== bindingId) {
+      refuse(
+        "AGENTIC_INTENT_CONSTRAINTS_CONTRADICTORY",
+        `providerBindings names two different bindings for ${capabilityId}.`,
+        409,
+      );
+    }
+    // Throws a typed 409 naming the capability and every binding it may reach.
+    assertBindingSelectable(capabilityId, bindingId);
+    selections.set(capabilityId, bindingId);
+  }
+
+  // A selection under `cheapest_sufficient` would be inert — the router would
+  // never reach a model to apply it — so it is refused rather than accepted and
+  // ignored. Silently accepting a field that changes nothing is how a caller
+  // comes to believe something is configured when it is not.
+  if (executionPolicy === "cheapest_sufficient" && selections.size > 0) {
+    refuse(
+      "AGENTIC_INTENT_CONSTRAINTS_CONTRADICTORY",
+      "providerBindings were declared under executionPolicy cheapest_sufficient, which routes no capability "
+      + "to a model worker. Declare executionPolicy model_required_for_judgment to use them.",
+      409,
+    );
+  }
+
+  return {
+    executionPolicy,
+    providerBindings: [...selections.entries()]
+      .map(([capabilityId, bindingId]) => ({ capabilityId, bindingId }))
+      .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId)),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The compiler
 // ---------------------------------------------------------------------------
 
@@ -474,12 +577,22 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
     }
   }
 
+  // Compiled before the budget check, because how much a plan costs depends on
+  // whether its judgement nodes run on a model.
+  const { executionPolicy, providerBindings } = compileExecutionPolicy(
+    body.executionPolicy,
+    body.providerBindings,
+    allowedCapabilities,
+    defaultsApplied,
+  );
+
   const timeBudgetMs = positiveInteger(body.timeBudgetMs, "timeBudgetMs");
-  const minimumDuration = minimumExecutablePlanDurationMs();
+  const minimumDuration = minimumExecutablePlanDurationMs(executionPolicy);
   if (timeBudgetMs < minimumDuration) {
     refuse(
       "AGENTIC_INTENT_BUDGET_BELOW_MINIMUM",
-      `timeBudgetMs ${timeBudgetMs} is below the ${minimumDuration}ms the smallest executable plan requires.`,
+      `timeBudgetMs ${timeBudgetMs} is below the ${minimumDuration}ms this mission's plan requires under `
+      + `executionPolicy ${executionPolicy}.`,
       409,
     );
   }
@@ -526,6 +639,12 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
     maxParallelism,
     allowedCapabilities,
     forbiddenCapabilities,
+    executionPolicy,
+    providerBindings,
+    modelNodeCostCeilingMicros: optionalPositiveInteger(
+      body.modelNodeCostCeilingMicros,
+      "modelNodeCostCeilingMicros",
+    ),
     contextRequirements,
     outputContract,
     requestedAt,

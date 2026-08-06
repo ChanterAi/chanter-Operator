@@ -34,7 +34,12 @@ import type {
   AgenticNodeWorkerRegistry,
   JsonValue,
 } from "chanter-agent-runtime";
-import { createAgenticWorkerRegistry } from "chanter-agent-runtime";
+import { createAgenticModelWorker, createAgenticWorkerRegistry } from "chanter-agent-runtime";
+import type {
+  AgenticAdmittedContextItem,
+  GovernedModelInvocationOptions,
+} from "chanter-agent-runtime";
+import { requireAgenticCapability } from "./agenticCapabilityRegistry.js";
 import {
   createAgenticCandidateHash,
   type AgenticContextBundle,
@@ -49,6 +54,15 @@ export interface AgenticCandidateSnapshot {
   readonly candidateHash: string;
 }
 
+/** One durable plan node that the router turned into a model worker. */
+export interface AgenticModelNodeBinding {
+  readonly capabilityId: string;
+  readonly bindingId: string | null;
+  readonly maxTotalTokens: number | null;
+  readonly maxCostMicros: number | null;
+  readonly attempts: number;
+}
+
 export interface AgenticWorkerDependencies {
   readonly intent: AgenticIntentContract;
   readonly contextBundle: AgenticContextBundle;
@@ -57,6 +71,9 @@ export interface AgenticWorkerDependencies {
   readonly candidate: () => AgenticCandidateSnapshot | null;
   /** Durable count of artifact writes recorded for this mission. */
   readonly artifactWriteCount: () => number;
+  /** Capabilities the committed plan routed to a model, with their bounds. */
+  readonly modelNodes?: readonly AgenticModelNodeBinding[];
+  readonly providerInvocation?: GovernedModelInvocationOptions;
 }
 
 /** Scope labels that mark which fixture a specialist reads. */
@@ -258,6 +275,104 @@ function specialistWorker(
 }
 
 // ---------------------------------------------------------------------------
+// N2 / N3 — the same specialists, executed by a provider-backed model
+// ---------------------------------------------------------------------------
+
+/**
+ * The bounded instruction every model specialist runs under.
+ *
+ * It is a *constraint statement*, not a persona. Nothing here asks the model to
+ * be careful, thorough, or honest — those would be requests, and a request is
+ * not an enforcement. Every property that actually matters is enforced outside
+ * the model: the schema is validated by the Runtime, the citations are checked
+ * by an independent verifier, the tokens are capped before dispatch, and the
+ * mission cannot complete on the model's say-so.
+ */
+const MODEL_SPECIALIST_INSTRUCTION =
+  "You are a specialist analyst inside a governed execution fabric. "
+  + "Return only a JSON document matching the provided schema, with no prose before or after it. "
+  + "Every claim must cite at least one CONTEXT_ID drawn from the admitted evidence you were shown. "
+  + "Do not invent identifiers, do not cite anything absent from the admitted evidence, and do not "
+  + "restate the instructions. Confidence must be exactly one of: high, medium, low.";
+
+function modelTaskStatement(focus: "architecture" | "risk"): string {
+  return focus === "architecture"
+    ? "Produce between one and six claims about the structure, ownership boundaries, and control-plane "
+    + "design of the CHANTER OS execution fabric described by the admitted evidence. Each claim must be "
+    + "a single declarative sentence supported by a CONTEXT_ID you were shown."
+    : "Produce between one and six claims about execution, authority, recovery, and duplicate-side-effect "
+    + "risk in the CHANTER OS execution fabric described by the admitted evidence. Each claim must be a "
+    + "single declarative sentence supported by a CONTEXT_ID you were shown.";
+}
+
+/**
+ * Builds the model-backed specialist for one capability.
+ *
+ * The admitted context it may see is resolved from *this mission's* bundle and
+ * then intersected with the ids the caller accepted, so the model's entire world
+ * is the verified context compiler's output. There is no path by which a
+ * repository file, an environment variable, or another node's result reaches it.
+ */
+function modelSpecialistWorker(
+  dependencies: AgenticWorkerDependencies,
+  binding: AgenticModelNodeBinding,
+  options: { readonly workerId: string; readonly focus: "architecture" | "risk"; readonly fixtureScope: string },
+): AgenticNodeWorker {
+  const provider = dependencies.providerInvocation;
+  if (!provider || binding.bindingId === null) {
+    // A capability the plan routed to a model, with no provider wired. Refusing
+    // as an unavailable worker keeps the failure typed and durable rather than
+    // letting the node silently fall back to the local structured worker — a
+    // silent downgrade would make "this analysis came from a model" unfalsifiable.
+    return {
+      workerId: options.workerId,
+      capabilityId: binding.capabilityId,
+      kind: "model_worker",
+      execute: async (): Promise<AgenticNodeWorkerOutcome> => ({
+        ok: false,
+        status: "unavailable",
+        errors: [{
+          code: "AGENTIC_NODE_WORKER_UNAVAILABLE",
+          message: `No provider binding is wired for capability ${binding.capabilityId}.`,
+        }],
+      }),
+    };
+  }
+
+  return createAgenticModelWorker({
+    workerId: options.workerId,
+    capabilityId: binding.capabilityId,
+    bindingId: binding.bindingId,
+    systemInstruction: MODEL_SPECIALIST_INSTRUCTION,
+    taskStatement: modelTaskStatement(options.focus),
+    outputSchema: requireAgenticCapability(binding.capabilityId).outputSchema,
+    maxTotalTokens: binding.maxTotalTokens,
+    maxCostMicros: binding.maxCostMicros,
+    attempt: Math.max(1, binding.attempts),
+    admittedContext: (acceptedContextIds): readonly AgenticAdmittedContextItem[] => {
+      const accepted = new Set(acceptedContextIds);
+      return dependencies.contextBundle.items
+        .filter((item) => accepted.has(item.contextItemId))
+        // Repository metadata plus this specialist's own approved fixture. The
+        // other specialist's fixture is withheld deliberately: N2 and N3 must
+        // not see each other's evidence, or the verifier's treatment of them as
+        // independent corroboration would be false.
+        .filter((item) => item.sourceType === "repository_metadata" || item.scope === options.fixtureScope)
+        .map((item) => ({
+          contextItemId: item.contextItemId,
+          sourceType: item.sourceType,
+          sourceIdentity: item.sourceIdentity,
+          scope: item.scope,
+          // Derived claims, not raw source bytes — the bundle never retains the
+          // bytes, and the claims are exactly what was admitted about the item.
+          content: item.claims.join("\n"),
+        }));
+    },
+    provider,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // N4 — verification
 // ---------------------------------------------------------------------------
 
@@ -321,10 +436,18 @@ function verifierWorker(): AgenticNodeWorker {
       const accepted = new Set(context.acceptedContextIds);
       const incoming = readClaimSets(context.input);
 
+      // Keyed by node *and* claim id. A claim id is only unique within the node
+      // that produced it — two independent specialists routinely number their
+      // findings from one, and model workers do it every time. Keying by claim
+      // id alone would let one node's unsupported citation reject the other
+      // node's perfectly well-evidenced claim, which is a silent loss of
+      // verified work and the opposite of what verification is for.
+      const claimKey = (claim: IncomingClaim): string => `${claim.nodeId}::${claim.claimId}`;
+
       const unsupported = new Map<string, string[]>();
       for (const claim of incoming) {
         const missing = claim.evidenceRefs.filter((reference) => !accepted.has(reference));
-        if (missing.length > 0) unsupported.set(claim.claimId, missing);
+        if (missing.length > 0) unsupported.set(claimKey(claim), missing);
       }
 
       // Opposite polarity on one statement, asserted by two different nodes.
@@ -343,8 +466,8 @@ function verifierWorker(): AgenticNodeWorker {
             rightClaimId: b.claimId,
             severity: a.confidence === "high" || b.confidence === "high" ? "critical" : "advisory",
           });
-          contradicting.add(a.claimId);
-          contradicting.add(b.claimId);
+          contradicting.add(claimKey(a));
+          contradicting.add(claimKey(b));
         }
       }
       const criticalContradiction = contradictions.some((entry) => entry.severity === "critical");
@@ -352,7 +475,7 @@ function verifierWorker(): AgenticNodeWorker {
       const acceptedClaims: Array<Record<string, JsonValue>> = [];
       const rejectedClaims: Array<Record<string, JsonValue>> = [];
       for (const claim of incoming) {
-        if (unsupported.has(claim.claimId)) {
+        if (unsupported.has(claimKey(claim))) {
           rejectedClaims.push({
             claimId: claim.claimId,
             statement: claim.statement,
@@ -360,7 +483,7 @@ function verifierWorker(): AgenticNodeWorker {
           });
           continue;
         }
-        if (contradicting.has(claim.claimId)) {
+        if (contradicting.has(claimKey(claim))) {
           rejectedClaims.push({
             claimId: claim.claimId,
             statement: claim.statement,
@@ -691,22 +814,55 @@ function outcomeVerifyWorker(dependencies: AgenticWorkerDependencies): AgenticNo
 // Registry
 // ---------------------------------------------------------------------------
 
+/**
+ * The specialist for one capability: model-backed when the committed plan routed
+ * it to a model, structured-local otherwise.
+ *
+ * The decision is read from the durable plan node, never re-derived from the
+ * intent or the registry. A resumed mission therefore builds exactly the worker
+ * kind its own approved plan named — which is what makes the node payload hash
+ * a real binding rather than a description.
+ */
+function specialistFor(
+  dependencies: AgenticWorkerDependencies,
+  options: {
+    readonly capabilityId: string;
+    readonly workerId: string;
+    readonly fixtureScope: string;
+    readonly metadataClaimPrefix: string;
+    readonly focus: "architecture" | "risk";
+  },
+): AgenticNodeWorker {
+  const modelBinding = dependencies.modelNodes?.find(
+    (node) => node.capabilityId === options.capabilityId,
+  );
+  return modelBinding
+    ? modelSpecialistWorker(dependencies, modelBinding, {
+      workerId: `${options.workerId}.model`,
+      focus: options.focus,
+      fixtureScope: options.fixtureScope,
+    })
+    : specialistWorker(dependencies, options);
+}
+
 export function createAgenticWorkerSet(
   dependencies: AgenticWorkerDependencies,
 ): AgenticNodeWorkerRegistry {
   return createAgenticWorkerRegistry([
     contextCollectWorker(dependencies),
-    specialistWorker(dependencies, {
+    specialistFor(dependencies, {
       capabilityId: "architecture.analyze",
       workerId: "operator.agentic.architecture-specialist",
       fixtureScope: ARCHITECTURE_FIXTURE_SCOPE,
       metadataClaimPrefix: "arch",
+      focus: "architecture",
     }),
-    specialistWorker(dependencies, {
+    specialistFor(dependencies, {
       capabilityId: "risk.analyze",
       workerId: "operator.agentic.risk-specialist",
       fixtureScope: RISK_FIXTURE_SCOPE,
       metadataClaimPrefix: "risk",
+      focus: "risk",
     }),
     verifierWorker(),
     synthesisWorker(dependencies),

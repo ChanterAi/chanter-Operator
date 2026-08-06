@@ -36,6 +36,11 @@ import {
   type AgenticCapability,
 } from "./agenticCapabilityRegistry.js";
 import type { AgenticIntentContract } from "./agenticMissionContract.js";
+import {
+  assertBindingSelectable,
+  authorizedBindingIdsFor,
+  capabilitySupportsModelWorker,
+} from "./agenticProviderRegistry.js";
 
 /** Global preference order. Index is cost rank: lower is preferred. */
 const WORKER_KIND_PREFERENCE: readonly AgenticWorkerKind[] = [
@@ -56,11 +61,13 @@ export interface AgenticRoutingDecision {
   readonly selectedCapability: string;
   readonly selectedWorkerKind: AgenticWorkerKind;
   /**
-   * The concrete executor this fabric will run. Named as an executor identity
-   * rather than a model name, because no capability in this P0 routes to a
-   * provider — reporting one would be fabricated.
+   * The concrete executor this fabric will run: a reviewed provider binding id
+   * when the node routes to a model, and a local executor identity otherwise.
+   * Never a model name this fabric did not actually select.
    */
   readonly selectedModelOrExecutor: string;
+  /** The reviewed binding, or `null` when this node runs no model. */
+  readonly providerBindingId: string | null;
   readonly reason: string;
   /** Relative cost units, not currency. Currency is only ever measured. */
   readonly estimatedCostUnits: number;
@@ -79,7 +86,10 @@ export interface AgenticRoutingDecision {
  * the router's opinion: deterministic work may only use a deterministic worker,
  * and judgement work takes the cheapest kind the capability actually registered.
  */
-function selectWorkerKind(capability: AgenticCapability): { kind: AgenticWorkerKind; reason: string } {
+function selectWorkerKind(
+  capability: AgenticCapability,
+  intent: AgenticIntentContract,
+): { kind: AgenticWorkerKind; reason: string } {
   const eligible = WORKER_KIND_PREFERENCE.filter((kind) => capability.allowedWorkerKinds.includes(kind));
   const cheapest = eligible[0];
   if (!cheapest) {
@@ -89,6 +99,9 @@ function selectWorkerKind(capability: AgenticCapability): { kind: AgenticWorkerK
       "AGENTIC_ROUTER_NO_ELIGIBLE_WORKER",
     );
   }
+  // Deterministic work is decided *before* the mission's policy is consulted.
+  // The order matters: a policy that could reach this branch would be a policy
+  // able to make an exact check probabilistic, which no mission may do.
   if (capability.verifiability === "deterministic") {
     if (cheapest !== "deterministic_tool") {
       throw new OperatorError(
@@ -104,6 +117,24 @@ function selectWorkerKind(capability: AgenticCapability): { kind: AgenticWorkerK
         + "and no inference is spent.",
     };
   }
+
+  // Judgement-bearing work. A mission may escalate to a model, but only within
+  // what the capability already registered — the policy selects among declared
+  // worker kinds, it never adds one.
+  if (
+    intent.executionPolicy === "model_required_for_judgment"
+    && capability.allowedWorkerKinds.includes("model_worker")
+    && capabilitySupportsModelWorker(capability.capabilityId)
+  ) {
+    return {
+      kind: "model_worker",
+      reason:
+        "The mission declares model_required_for_judgment and this capability's declared verifiability is "
+        + `${capability.verifiability}, so a bounded provider-backed worker is required rather than the `
+        + "cheapest sufficient one.",
+    };
+  }
+
   return {
     kind: cheapest,
     reason: cheapest === "model_worker"
@@ -140,7 +171,32 @@ export function routeAgenticNode(
     );
   }
   const capability = requireAgenticCapability(capabilityId);
-  const selected = selectWorkerKind(capability);
+  const selected = selectWorkerKind(capability, intent);
+
+  // The binding is chosen from the mission's declared selection when it made
+  // one, and otherwise from the reviewed preference order. Either way it is a
+  // registry entry: there is no path by which routing produces a binding the
+  // registry does not carry.
+  let providerBindingId: string | null = null;
+  if (selected.kind === "model_worker") {
+    const declared = intent.providerBindings.find(
+      (selection) => selection.capabilityId === capabilityId,
+    );
+    if (declared) {
+      assertBindingSelectable(capabilityId, declared.bindingId);
+      providerBindingId = declared.bindingId;
+    } else {
+      const authorized = authorizedBindingIdsFor(capabilityId)[0] ?? null;
+      if (authorized === null) {
+        throw new OperatorError(
+          `Capability ${capabilityId} routed to a model worker but authorizes no provider binding.`,
+          500,
+          "AGENTIC_ROUTER_NO_ELIGIBLE_WORKER",
+        );
+      }
+      providerBindingId = authorized;
+    }
+  }
 
   // Authority comes from the capability contract and the mission's declared
   // policy — never from the node's name or type.
@@ -156,7 +212,8 @@ export function routeAgenticNode(
     nodeId,
     selectedCapability: capabilityId,
     selectedWorkerKind: selected.kind,
-    selectedModelOrExecutor: `operator.agentic.${selected.kind}`,
+    selectedModelOrExecutor: providerBindingId ?? `operator.agentic.${selected.kind}`,
+    providerBindingId,
     reason: selected.reason,
     estimatedCostUnits: WORKER_KIND_COST_UNITS[selected.kind],
     estimatedLatencyMs: capability.defaultBudget.maxDurationMs,

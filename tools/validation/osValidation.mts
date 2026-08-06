@@ -74,6 +74,19 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
     name: "OS governed agentic execution fabric",
     script: "os:agentic-fabric",
   }),
+  // Terminal, and the most expensive stage in the gate by a wide margin: it is
+  // the only one that performs real model inference. Two live provider calls per
+  // mission across two missions, plus six additional Operator processes for the
+  // provider-failure scenarios.
+  //
+  // It runs last for the usual reason — every cheaper stage is a more useful
+  // first signal — and it is *in* the gate despite needing a live local model
+  // because a canonical gate that skipped the only real inference in the system
+  // would certify the fabric's governance without ever exercising it.
+  Object.freeze({
+    name: "OS collective synthetic intelligence model workers",
+    script: "os:csi-model-workers",
+  }),
 ]);
 
 /** Resolves to the stage's real process exit code. */

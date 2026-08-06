@@ -32,8 +32,11 @@ import type {
   AgenticNodeRecordStore,
   AgenticNodeToolCallRecord,
   AgenticNodeWorkerRecord,
+  AgenticProviderUsageRecord,
+  AgenticProviderUsageStore,
   JsonValue,
 } from "chanter-agent-runtime";
+import { AGENTIC_MODEL_PROVIDER_CONTRACT_VERSION } from "chanter-agent-runtime";
 import { OperatorError } from "../services/operatorService.js";
 import type {
   AgenticCompiledPlan,
@@ -97,6 +100,7 @@ export interface AgenticNodeRecord {
   readonly nodeType: AgenticNodeType;
   readonly capabilityId: string | null;
   readonly workerKind: string | null;
+  readonly providerBindingId: string | null;
   readonly dependsOn: readonly string[];
   readonly inputRefs: readonly string[];
   readonly authorityRequirement: "none" | "human_approval_bound_to_candidate_hash";
@@ -275,6 +279,7 @@ interface NodeRow {
   node_type: AgenticNodeType;
   capability_id: string | null;
   worker_kind: string | null;
+  provider_binding_id: string | null;
   depends_on_json: string;
   input_refs_json: string;
   authority_requirement: "none" | "human_approval_bound_to_candidate_hash";
@@ -349,6 +354,38 @@ interface WorkerRecordRow {
   recorded_at: string | null;
 }
 
+interface ProviderUsageRow {
+  provider_call_key: string;
+  mission_id: string;
+  plan_id: string;
+  node_id: string;
+  idempotency_key: string;
+  capability_id: string;
+  binding_id: string;
+  provider_name: string;
+  model_id: string;
+  mode: string;
+  attempt: number;
+  provider_request_id: string | null;
+  request_hash: string;
+  raw_response_hash: string | null;
+  response_hash: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  monetary_cost_micros: number | null;
+  monetary_cost_source: string;
+  monetary_cost_unavailable_reason: string | null;
+  pricing_revision: string | null;
+  latency_ms: number;
+  finish_reason: string | null;
+  typed_error_json: string | null;
+  fallback_decision: string;
+  fallback_from_binding_id: string | null;
+  evidence_references_json: string;
+  recorded_at: string;
+}
+
 interface ArtifactWriteRow {
   mission_id: string;
   artifact_name: string;
@@ -407,6 +444,7 @@ function mapNode(row: NodeRow): AgenticNodeRecord {
     nodeType: row.node_type,
     capabilityId: row.capability_id,
     workerKind: row.worker_kind,
+    providerBindingId: row.provider_binding_id,
     dependsOn: JSON.parse(row.depends_on_json) as string[],
     inputRefs: JSON.parse(row.input_refs_json) as string[],
     authorityRequirement: row.authority_requirement,
@@ -663,10 +701,10 @@ export class AgenticPlanJournal {
       const insertNode = this.database.prepare(
         `INSERT INTO operator_agentic_plan_nodes (
           plan_id, node_id, mission_id, node_type, capability_id, worker_kind,
-          depends_on_json, input_refs_json, authority_requirement, budget_json,
+          provider_binding_id, depends_on_json, input_refs_json, authority_requirement, budget_json,
           deadline_offset_ms, attempt_limit, reconciliation_mode, evidence_policy_json,
           payload_hash, state, attempts, idempotency_key, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       );
       const insertEdge = this.database.prepare(
         `INSERT INTO operator_agentic_plan_edges (plan_id, from_node_id, to_node_id)
@@ -680,6 +718,7 @@ export class AgenticPlanJournal {
           node.nodeType,
           node.capabilityId,
           node.workerKind,
+          node.providerBindingId,
           JSON.stringify(node.dependencyIds),
           JSON.stringify(node.inputRefs),
           node.authorityRequirement,
@@ -1048,6 +1087,137 @@ export class AgenticPlanJournal {
       record.artifactPath,
       record.writtenAt,
     );
+  }
+
+  // -- Runtime provider usage store -----------------------------------------
+
+  /**
+   * The durable backing for the Runtime's `AgenticProviderUsageStore`.
+   *
+   * Deliberately the same SQLite file, and deliberately a different table from
+   * the worker records: the two answer different questions at different moments.
+   * A worker record says "this node finished and produced exactly this"; a
+   * provider usage row says "this provider was reached, and here is what it
+   * cost". The second is written first, which is why an interruption between
+   * them cannot produce an untracked charge.
+   */
+  createProviderUsageStore(): AgenticProviderUsageStore {
+    const database = this.database;
+    const toRecord = (row: ProviderUsageRow): AgenticProviderUsageRecord => ({
+      schemaVersion: AGENTIC_MODEL_PROVIDER_CONTRACT_VERSION,
+      providerCallKey: row.provider_call_key,
+      missionId: row.mission_id,
+      planId: row.plan_id,
+      nodeId: row.node_id,
+      idempotencyKey: row.idempotency_key,
+      capabilityId: row.capability_id,
+      bindingId: row.binding_id,
+      providerName: row.provider_name,
+      modelId: row.model_id,
+      mode: row.mode as AgenticProviderUsageRecord["mode"],
+      attempt: Number(row.attempt),
+      providerRequestId: row.provider_request_id,
+      requestHash: row.request_hash,
+      rawResponseHash: row.raw_response_hash,
+      responseHash: row.response_hash,
+      inputTokens: row.input_tokens === null ? null : Number(row.input_tokens),
+      outputTokens: row.output_tokens === null ? null : Number(row.output_tokens),
+      totalTokens: row.total_tokens === null ? null : Number(row.total_tokens),
+      monetaryCostMicros: row.monetary_cost_micros === null ? null : Number(row.monetary_cost_micros),
+      monetaryCostSource: row.monetary_cost_source as AgenticProviderUsageRecord["monetaryCostSource"],
+      monetaryCostUnavailableReason: row.monetary_cost_unavailable_reason,
+      pricingRevision: row.pricing_revision,
+      latencyMs: Number(row.latency_ms),
+      finishReason: row.finish_reason,
+      typedError: parseJson<AgenticProviderUsageRecord["typedError"]>(row.typed_error_json) ?? null,
+      fallbackDecision: row.fallback_decision as AgenticProviderUsageRecord["fallbackDecision"],
+      fallbackFromBindingId: row.fallback_from_binding_id,
+      evidenceReferencesCited: parseJson<string[]>(row.evidence_references_json) ?? [],
+      recordedAt: row.recorded_at,
+    });
+
+    return {
+      read(providerCallKey: string): AgenticProviderUsageRecord | null {
+        const row = database
+          .prepare("SELECT * FROM operator_agentic_provider_usage WHERE provider_call_key = ?")
+          .get(providerCallKey) as unknown as ProviderUsageRow | undefined;
+        return row ? toRecord(row) : null;
+      },
+      record(usage: AgenticProviderUsageRecord): void {
+        // `OR IGNORE`, never `OR REPLACE`. A second write under one call key is
+        // a replay of a charge that already happened; overwriting it would erase
+        // the very evidence that proves the first call occurred.
+        database.prepare(
+          `INSERT OR IGNORE INTO operator_agentic_provider_usage (
+            provider_call_key, mission_id, plan_id, node_id, idempotency_key, capability_id,
+            binding_id, provider_name, model_id, mode, attempt, provider_request_id,
+            request_hash, raw_response_hash, response_hash, input_tokens, output_tokens, total_tokens,
+            monetary_cost_micros, monetary_cost_source, monetary_cost_unavailable_reason, pricing_revision,
+            latency_ms, finish_reason, typed_error_json, fallback_decision, fallback_from_binding_id,
+            evidence_references_json, recorded_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          usage.providerCallKey,
+          usage.missionId,
+          usage.planId,
+          usage.nodeId,
+          usage.idempotencyKey,
+          usage.capabilityId,
+          usage.bindingId,
+          usage.providerName,
+          usage.modelId,
+          usage.mode,
+          usage.attempt,
+          usage.providerRequestId,
+          usage.requestHash,
+          usage.rawResponseHash,
+          usage.responseHash,
+          usage.inputTokens,
+          usage.outputTokens,
+          usage.totalTokens,
+          usage.monetaryCostMicros,
+          usage.monetaryCostSource,
+          usage.monetaryCostUnavailableReason,
+          usage.pricingRevision,
+          usage.latencyMs,
+          usage.finishReason,
+          usage.typedError === null ? null : JSON.stringify(usage.typedError),
+          usage.fallbackDecision,
+          usage.fallbackFromBindingId,
+          JSON.stringify(usage.evidenceReferencesCited),
+          usage.recordedAt,
+        );
+      },
+      listForNode(idempotencyKey: string): readonly AgenticProviderUsageRecord[] {
+        return (database
+          .prepare(
+            `SELECT * FROM operator_agentic_provider_usage
+              WHERE idempotency_key = ? ORDER BY provider_call_key ASC`,
+          )
+          .all(idempotencyKey) as unknown as ProviderUsageRow[]).map(toRecord);
+      },
+    };
+  }
+
+  /** Every provider usage row recorded for one mission, oldest call key first. */
+  listProviderUsage(missionId: string): readonly AgenticProviderUsageRecord[] {
+    const store = this.createProviderUsageStore();
+    return (this.database
+      .prepare(
+        `SELECT provider_call_key FROM operator_agentic_provider_usage
+          WHERE mission_id = ? ORDER BY recorded_at ASC, provider_call_key ASC`,
+      )
+      .all(missionId) as Array<{ provider_call_key: string }>)
+      .map((row) => store.read(row.provider_call_key))
+      .filter((record): record is AgenticProviderUsageRecord => record !== null);
+  }
+
+  /** Durable count of provider invocations for one node execution identity. */
+  countProviderCallsForNode(idempotencyKey: string): number {
+    const row = this.database
+      .prepare("SELECT COUNT(*) AS total FROM operator_agentic_provider_usage WHERE idempotency_key = ?")
+      .get(idempotencyKey) as { total: number } | undefined;
+    return Number(row?.total ?? 0);
   }
 
   // -- Runtime worker record store ------------------------------------------

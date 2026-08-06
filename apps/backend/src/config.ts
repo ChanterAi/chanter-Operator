@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeSimulatorScenario } from "./agentic/agenticProviderAdapters.js";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const projectRoot = path.resolve(sourceDirectory, "../../..");
@@ -90,6 +91,9 @@ function parseAgenticRepositories(raw: string): Record<string, string> {
 const agenticRepositories = parseAgenticRepositories(
   process.env.AGENTIC_FABRIC_REPOSITORIES?.trim() ?? "",
 );
+
+const agenticSimulatorEnabledRaw = (process.env.AGENTIC_FABRIC_SIMULATOR_ENABLED ?? "").trim().toLowerCase();
+const agenticSimulatorEnabled = agenticSimulatorEnabledRaw === "true" || agenticSimulatorEnabledRaw === "1";
 
 const agenticApprovalTtlRaw = Number(process.env.AGENTIC_FABRIC_APPROVAL_TTL_MS?.trim() ?? "");
 const agenticApprovalTtlMs = Number.isFinite(agenticApprovalTtlRaw) && agenticApprovalTtlRaw > 0
@@ -279,6 +283,24 @@ export const config = {
      */
     authorityRepositoryRoot:
       process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "",
+    providers: {
+      /**
+       * Origin of the local inference server. Empty leaves every live provider
+       * binding disabled, so an unconfigured deployment reaches no model at all
+       * rather than guessing at an endpoint — and no provider URL is ever
+       * derived from mission input.
+       */
+      localModelBaseUrl: process.env.AGENTIC_FABRIC_LOCAL_MODEL_BASE_URL?.trim() ?? "",
+      /**
+       * Test-mode provider simulation. Both flags must be set deliberately: the
+       * scenario alone does nothing, and an unrecognized scenario normalizes to
+       * `disabled` rather than to something plausible.
+       */
+      simulatorEnabled: agenticSimulatorEnabled,
+      simulatorScenario: normalizeSimulatorScenario(
+        process.env.AGENTIC_FABRIC_SIMULATOR_SCENARIO ?? "",
+      ),
+    },
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",

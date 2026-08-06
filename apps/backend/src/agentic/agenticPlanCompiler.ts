@@ -48,7 +48,7 @@ import {
   type AgenticPlanEdge,
   type AgenticPlanNode,
 } from "./agenticMissionContract.js";
-import { requireAgenticCapability } from "./agenticCapabilityRegistry.js";
+import { budgetForWorkerKind, requireAgenticCapability } from "./agenticCapabilityRegistry.js";
 import { routeAgenticNode, type AgenticRoutingDecision } from "./agenticCapabilityRouter.js";
 
 /** Attempts permitted for a node with no side effect outside its own record. */
@@ -174,6 +174,7 @@ export function compileAgenticPlan(
         nodeType: blueprint.nodeType,
         capabilityId: null,
         workerKind: null,
+        providerBindingId: null,
         dependencyIds: [...blueprint.dependencyIds],
         inputRefs: [...blueprint.inputRefs],
         authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
@@ -200,7 +201,16 @@ export function compileAgenticPlan(
     const decision = routeAgenticNode(intent, blueprint.nodeId, blueprint.capabilityId);
     routing.push(decision);
     const capability = requireAgenticCapability(blueprint.capabilityId);
-    const offset = dependencyOffset + capability.defaultBudget.maxDurationMs;
+    // The budget follows the routing decision, not the capability's default: a
+    // node that became a model worker runs under the model budget, and the
+    // deadline offsets accumulated along the critical path have to reflect that
+    // or the Governor will withhold admission from a node it just admitted.
+    const routedBudget = budgetForWorkerKind(capability, decision.selectedWorkerKind);
+    const nodeBudget = decision.selectedWorkerKind === "model_worker"
+      && intent.modelNodeCostCeilingMicros !== null
+      ? { ...routedBudget, maxCostMicros: intent.modelNodeCostCeilingMicros }
+      : { ...routedBudget };
+    const offset = dependencyOffset + nodeBudget.maxDurationMs;
     offsetByNode.set(blueprint.nodeId, offset);
 
     const withoutHash = {
@@ -208,10 +218,11 @@ export function compileAgenticPlan(
       nodeType: blueprint.nodeType,
       capabilityId: blueprint.capabilityId,
       workerKind: decision.selectedWorkerKind,
+      providerBindingId: decision.providerBindingId,
       dependencyIds: [...blueprint.dependencyIds],
       inputRefs: [...blueprint.inputRefs],
       authorityRequirement: decision.authorityRequirement,
-      budget: { ...capability.defaultBudget },
+      budget: nodeBudget,
       deadlineOffsetMs: offset,
       attemptLimit: capability.sideEffectClass === "local_artifact"
         ? WRITE_NODE_ATTEMPT_LIMIT

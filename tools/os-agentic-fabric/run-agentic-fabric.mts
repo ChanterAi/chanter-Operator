@@ -1194,6 +1194,15 @@ try {
           },
           approvalTtlMs: 900_000,
           authorityRevision: resolveAgenticAuthorityRevision(operatorRoot),
+          // No provider at all. This proof's whole point is that nothing in the
+          // plan needs inference, so every model binding stays disabled and the
+          // fabric reaches no provider — which is what keeps `modelCallCount` at
+          // zero here rather than merely unobserved.
+          providers: {
+            localModelBaseUrl: "",
+            simulatorEnabled: false,
+            simulatorScenario: "disabled",
+          },
         },
         failureInjector: (boundary, context) => {
           if (boundary === "after_worker_record_before_node_commit" && context.nodeId === "N3") {
