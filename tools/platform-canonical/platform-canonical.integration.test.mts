@@ -9,6 +9,9 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import express from "express";
+// Type-only: erased at runtime, so the deliberate dynamic import order below
+// is unaffected.
+import type { LoopGovernorMissionPort } from "chanter-agent-runtime";
 
 /*
  * Canonical Platform cross-repository proof:
@@ -364,7 +367,7 @@ async function startAutoPoster(
   };
 }
 
-function loopPort() {
+function loopPort(): LoopGovernorMissionPort {
   return {
     async createManualLoop() {
       return {

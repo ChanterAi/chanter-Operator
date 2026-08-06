@@ -38,6 +38,7 @@ import {
   executeMission,
   type AutoPosterOperationsPort,
   type AutoPosterScheduleParams,
+  type ChanterMissionEnvelopeV1,
   type RuntimeMissionRequest,
 } from "chanter-agent-runtime";
 
@@ -262,7 +263,7 @@ function openLoopService(universe: Universe, clock?: FakeTemporalClock) {
   return { database, service, executor };
 }
 
-function loopEnvelope(missionId: string): Record<string, unknown> {
+function loopEnvelope(missionId: string): ChanterMissionEnvelopeV1 {
   return {
     schemaVersion: "chanter.mission.v1",
     missionId,
@@ -307,7 +308,12 @@ function noSideEffectAutoPosterPort(): {
   };
   const port: AutoPosterOperationsPort = {
     async listConnectedAccounts(params) {
-      return { ok: true, workspaceId: params.workspaceId, accounts: [account], count: 1 };
+      return {
+        ok: true,
+        workspaceId: params.workspaceId ?? "workspace-proof-0001",
+        accounts: [account],
+        count: 1,
+      };
     },
     async validateConnectedAccount(params) {
       return { ok: true, workspaceId: params.workspaceId ?? "workspace-proof-0001", account };
@@ -320,20 +326,36 @@ function noSideEffectAutoPosterPort(): {
         ok: true,
         post: {
           id: params.postId,
+          provider: "tiktok",
+          connectedAccountId: account.connectedAccountId,
           accountId: "account-a",
           username: "creator",
+          workspaceId: "workspace-proof-0001",
           status: "scheduled",
           scheduledAt: new Date(Date.now() + 7_200_000).toISOString(),
           approved: false,
+          approvalState: "unapproved",
+          approvedAt: null,
+          approvedBy: "",
           mediaType: "video",
           captionSummary: "",
           createdAt: null,
-          updatedAt: null,
-          approvedAt: null,
-          approvedBy: "",
+          updatedAt: APPROVAL_INSTANT,
           postedAt: null,
           publishId: "",
+          providerStatus: "",
+          providerVerification: null,
+          providerOperation: null,
+          lockedAt: null,
           claimAttempts: 0,
+          publishAttemptBudget: 0,
+          attemptBudgetExhausted: false,
+          runtimeMissionId: "",
+          runtimeIdempotencyKey: "",
+          runtimeAction: "",
+          runtimePayloadHash: "",
+          lastResult: null,
+          history: [],
           lastErrorMessage: "",
         },
       };

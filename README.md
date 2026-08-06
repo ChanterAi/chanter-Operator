@@ -167,8 +167,10 @@ It runs six stages in order, stopping at the first failure and exiting with that
 stage's real exit code:
 
 1. `typecheck` — repository typecheck (backend + frontend);
-2. `typecheck:tools` — static typecheck of `tools/phase2c`, `tools/os-assembly`,
-   and `tools/validation` via `tsconfig.tools.json`;
+2. `typecheck:tools` — static typecheck of the CHANTER OS tool surfaces via
+   `tsconfig.tools.json`: `tools/phase2c`, `tools/os-assembly`,
+   `tools/validation`, `tools/persisted-approval-authority`,
+   `tools/platform-canonical`, and `tools/resilience-evidence`;
 3. `build` — production build;
 4. `test:phase2c:mission` — Phase 2C generic mission proof;
 5. `test:approval-migration:e2e` — signed approval migration proof;
@@ -176,7 +178,20 @@ stage's real exit code:
 
 Stage 2 exists because these tool surfaces sit outside the backend program,
 which compiles only `src/`. Without it a proof harness can rot silently, which
-is exactly how the Phase 2C harness drifted previously.
+is exactly how the Phase 2C harness drifted previously. Run it alone for a fast
+static check:
+
+```powershell
+npm run typecheck:tools
+```
+
+Two surfaces are deliberately **not** covered, both for reasons that cannot be
+fixed inside this repository: `tools/safecommit-closeout` imports untyped
+`.mjs` modules from the SafeCommit product outside this repository, and
+`apps/backend/tests` needs a `@types/supertest` resolution that would require a
+dependency change. Both are recorded with evidence in
+`CHANTER_OPERATOR_CRITICAL_TEST_AND_AUTHORITY_TOOL_STATIC_COVERAGE_P0_RESULT_V1.md`.
+Production runtime behavior is unchanged by any of this coverage.
 
 Local process execution only: it does not push, merge, deploy, publish, or
 execute a real coding agent, and it leaves no tracked repository modifications.
