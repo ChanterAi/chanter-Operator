@@ -127,7 +127,22 @@ describe("CHANTER OS validation orchestration", () => {
         "test:approval-migration:e2e",
         "os:assembly",
         "os:unified",
+        "os:agentic-fabric",
       ],
+    );
+  });
+
+  it("keeps the agentic fabric proof terminal and present exactly once", () => {
+    const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
+    assert.equal(
+      scripts.filter((script) => script === "os:agentic-fabric").length,
+      1,
+      "the stage must appear exactly once in the canonical gate",
+    );
+    assert.equal(
+      scripts[scripts.length - 1],
+      "os:agentic-fabric",
+      "the most expensive proof must be the terminal stage",
     );
   });
 
@@ -145,6 +160,7 @@ describe("CHANTER OS validation orchestration", () => {
       "test:approval-migration:e2e",
       "os:assembly",
       "os:unified",
+      "os:agentic-fabric",
     ]) {
       assert.ok(recovery < scripts.indexOf(slower), `generic recovery must precede ${slower}`);
       assert.ok(
@@ -191,7 +207,15 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.equal(outcome.ok, false);
     assert.equal(outcome.exitCode, 11, "the failing stage's real exit code is preserved");
     assert.equal(started.includes("os:unified"), false, "the unified proof must never start");
-    assert.deepEqual(outcome.skipped, ["OS unified mission control plane"]);
+    assert.equal(
+      started.includes("os:agentic-fabric"),
+      false,
+      "the agentic fabric proof must never start",
+    );
+    assert.deepEqual(outcome.skipped, [
+      "OS unified mission control plane",
+      "OS governed agentic execution fabric",
+    ]);
   });
 
   it("skips every proof after a failing in-process recovery proof", async () => {
@@ -208,6 +232,11 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "no later proof may start after the cheap recovery proof fails",
     );
     assert.equal(
+      started.includes("os:agentic-fabric"),
+      false,
+      "the terminal agentic fabric proof must never start",
+    );
+    assert.equal(
       started.includes("test:os-platform-recovery"),
       false,
       "the Platform recovery proof must never start",
@@ -217,7 +246,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       false,
       "the ambiguous reconciliation proof must never start",
     );
-    assert.equal(outcome.skipped.length, 7);
+    assert.equal(outcome.skipped.length, 8);
   });
 
   it("preserves the Platform recovery proof's exact exit code and skips all later stages", async () => {
@@ -242,6 +271,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "Signed approval migration E2E",
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
+      "OS governed agentic execution fabric",
     ]);
   });
 
@@ -273,6 +303,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "Signed approval migration E2E",
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
+      "OS governed agentic execution fabric",
     ]);
   });
 
@@ -307,7 +338,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     );
   });
 
-  it("preserves the unified proof's exact exit code and completes nothing after it", async () => {
+  it("preserves the unified proof's exact exit code and skips only the terminal stage", async () => {
     const started: string[] = [];
     const outcome = await runOsValidation({
       run: stubRunner({ "os:unified": 23 }, started),
@@ -317,17 +348,12 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.equal(outcome.ok, false);
     assert.equal(outcome.exitCode, 23, "the unified proof's real exit code is not collapsed to 1");
     assert.equal(outcome.failedStage?.script, "os:unified");
-    assert.deepEqual(
-      started,
-      OS_VALIDATION_STAGES.map((stage) => stage.script),
-      "every earlier stage ran exactly once, in order",
-    );
     assert.equal(
       outcome.completed.includes("OS unified mission control plane"),
       false,
       "a failing stage is never reported as completed",
     );
-    assert.deepEqual(outcome.skipped, [], "nothing follows the terminal stage");
+    assert.deepEqual(outcome.skipped, ["OS governed agentic execution fabric"]);
   });
 
   it("fails closed when the unified proof cannot be started at all", async () => {
@@ -342,5 +368,64 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.equal(outcome.ok, false);
     assert.equal(outcome.exitCode, 1);
     assert.equal(outcome.failedStage?.script, "os:unified");
+  });
+});
+
+/*
+ * The terminal stage's own contract.
+ *
+ * `os:agentic-fabric` is last, so "a failure skips everything after it" has no
+ * observable form beyond an empty skip list. What remains provable — and what
+ * matters — is that it runs only after every cheaper stage, that its own exit
+ * code survives, and that a spawn failure fails the whole gate closed.
+ */
+describe("CHANTER OS validation gate — agentic fabric proof fail-fast", () => {
+  it("runs only after every cheaper stage has passed", async () => {
+    const started: string[] = [];
+    await runOsValidation({ run: stubRunner({}, started), log: silent });
+
+    assert.deepEqual(
+      started,
+      OS_VALIDATION_STAGES.map((stage) => stage.script),
+      "every stage ran exactly once, in the declared order",
+    );
+    assert.equal(started[started.length - 1], "os:agentic-fabric");
+  });
+
+  it("preserves the agentic fabric proof's exact exit code and completes nothing after it", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "os:agentic-fabric": 29 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 29, "the real child exit code is not collapsed to 1");
+    assert.equal(outcome.failedStage?.script, "os:agentic-fabric");
+    assert.deepEqual(
+      started,
+      OS_VALIDATION_STAGES.map((stage) => stage.script),
+      "every earlier stage ran exactly once, in order",
+    );
+    assert.equal(
+      outcome.completed.includes("OS governed agentic execution fabric"),
+      false,
+      "a failing stage is never reported as completed",
+    );
+    assert.deepEqual(outcome.skipped, [], "nothing follows the terminal stage");
+  });
+
+  it("fails closed when the agentic fabric proof cannot be started at all", async () => {
+    const outcome = await runOsValidation({
+      run: async (stage) => {
+        if (stage.script === "os:agentic-fabric") throw new Error("spawn failed");
+        return 0;
+      },
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.failedStage?.script, "os:agentic-fabric");
   });
 });

@@ -255,6 +255,9 @@ export function createApiRouter(
           "/api/os/missions/:osMissionId/reconcile",
           "/api/os/missions/:osMissionId/resume",
           "/api/os/missions/:osMissionId/stop",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/reconcile",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/resume",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/stop",
           "/api/runtime-missions/:missionId/approve",
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",
@@ -832,6 +835,100 @@ export function createApiRouter(
       } catch (error) {
         next(error);
       }
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // Plan-governed surfaces.
+  //
+  // These extend the one canonical `/api/os/missions` identity rather than
+  // opening a second mission namespace: a mission whose execution is a
+  // compiled plan is still one CHANTER OS mission, addressed by the same
+  // `os:<lane>:<id>`. A lane that dispatches one downstream product action
+  // answers these with a typed 409 rather than a fabricated single-node plan.
+  // ---------------------------------------------------------------------
+  router.get("/os/missions/:osMissionId/plan", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().planOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/nodes", (request, response, next) => {
+    try {
+      response.json({
+        nodes: requireOsMissionControlService().nodesOf(String(request.params.osMissionId)),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/nodes/:nodeId", (request, response, next) => {
+    try {
+      response.json(
+        requireOsMissionControlService().nodeOf(
+          String(request.params.osMissionId),
+          String(request.params.nodeId),
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/evidence", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().evidenceOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Node-level control shares the mission-control capability: reconciling,
+  // resuming, or stopping one node is the same authority as doing it to the
+  // whole mission, only narrower in scope.
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/reconcile",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireOsMissionControlService().reconcileNode(
+            String(request.params.osMissionId),
+            String(request.params.nodeId),
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/resume",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .resumeNode(String(request.params.osMissionId), String(request.params.nodeId))
+        .then((node) => response.json(node))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/stop",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .stopNode(
+          String(request.params.osMissionId),
+          String(request.params.nodeId),
+          request.body ?? {},
+        )
+        .then((node) => response.json(node))
+        .catch(next);
     },
   );
 

@@ -66,6 +66,35 @@ const observationWorkerPollIntervalMs =
 const observationWorkerBatchSize = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_WORKER_BATCH_SIZE, 1, 16);
 
 const loopGovernorTimeoutRaw = process.env.LOOP_GOVERNOR_TIMEOUT_MS?.trim() ?? "";
+
+/**
+ * Parses `name=absolutePath` pairs into the agentic fabric's readable roots.
+ *
+ * A malformed or relative entry is dropped rather than guessed at: a readable
+ * root the operator did not clearly state is exactly the kind of ambient
+ * authority this fabric exists to remove.
+ */
+function parseAgenticRepositories(raw: string): Record<string, string> {
+  const repositories: Record<string, string> = {};
+  for (const entry of raw.split(",")) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) continue;
+    const name = entry.slice(0, separator).trim();
+    const root = entry.slice(separator + 1).trim();
+    if (!name || !root) continue;
+    repositories[name] = root;
+  }
+  return repositories;
+}
+
+const agenticRepositories = parseAgenticRepositories(
+  process.env.AGENTIC_FABRIC_REPOSITORIES?.trim() ?? "",
+);
+
+const agenticApprovalTtlRaw = Number(process.env.AGENTIC_FABRIC_APPROVAL_TTL_MS?.trim() ?? "");
+const agenticApprovalTtlMs = Number.isFinite(agenticApprovalTtlRaw) && agenticApprovalTtlRaw > 0
+  ? Math.trunc(agenticApprovalTtlRaw)
+  : 15 * 60 * 1000;
 const loopGovernorTimeoutParsed = Number(loopGovernorTimeoutRaw);
 const loopGovernorTimeoutValid =
   !loopGovernorTimeoutRaw ||
@@ -231,6 +260,25 @@ export const config = {
     enabled: observationWorkerEnabled,
     pollIntervalMs: observationWorkerPollIntervalMs,
     ...(observationWorkerBatchSize !== undefined ? { batchSize: observationWorkerBatchSize } : {}),
+  },
+  agenticFabric: {
+    /**
+     * Logical repository name -> absolute root, as `name=path` pairs. Only
+     * these roots are readable by any context read or worker tool, so an
+     * unconfigured deployment can compile no repository-backed context at all
+     * rather than falling back to the process working directory.
+     */
+    repositories: agenticRepositories,
+    fixtureRoot: process.env.AGENTIC_FABRIC_FIXTURE_DIR?.trim() ?? "",
+    artifactRoot: process.env.AGENTIC_FABRIC_ARTIFACT_DIR?.trim() ?? "",
+    approvalTtlMs: agenticApprovalTtlMs,
+    /**
+     * The committed revision a candidate approval binds to. Read once at
+     * startup from the same repository the persisted approval authority uses,
+     * so an approval records what the deployment looked like when it was given.
+     */
+    authorityRepositoryRoot:
+      process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "",
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",

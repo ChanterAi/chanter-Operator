@@ -168,6 +168,53 @@ export function osStateFromGraphState(state: OsGraphState): OsMissionState {
   }
 }
 
+/**
+ * The governed agentic plan lifecycle, mapped onto the same OS taxonomy.
+ *
+ * `awaiting_authority` maps to `approval_required` because that is exactly what
+ * it is from an operator's point of view: the plan cannot advance until a human
+ * decides. Which decision is owed — authorize the plan, or authorize the exact
+ * candidate bytes — stays visible in `laneState`, which is preserved verbatim.
+ *
+ * `compiled` maps to `submitted` rather than to anything execution-shaped: a
+ * compiled plan has produced no side effect and no worker has run.
+ */
+export type OsAgenticPlanState =
+  | "compiled"
+  | "approval_required"
+  | "approved"
+  | "running"
+  | "awaiting_authority"
+  | "completed"
+  | "failed_recoverable"
+  | "reconciliation_required"
+  | "failed_terminal"
+  | "cancelled";
+
+export function osStateFromAgenticPlanState(state: OsAgenticPlanState): OsMissionState {
+  switch (state) {
+    case "compiled":
+      return "submitted";
+    case "approval_required":
+    case "awaiting_authority":
+      return "approval_required";
+    case "approved":
+      return "approved";
+    case "running":
+      return "execution_started";
+    case "completed":
+      return "completed";
+    case "failed_recoverable":
+      return "failed_recoverable";
+    case "reconciliation_required":
+      return "reconciliation_required";
+    case "failed_terminal":
+      return "failed_terminal";
+    case "cancelled":
+      return "stopped";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical lane registry
 // ---------------------------------------------------------------------------
@@ -176,6 +223,7 @@ export const OS_MISSION_LANES = [
   "generic_governed_task",
   "platform_autoposter_command",
   "autoposter_direct_mission",
+  "governed_agentic_mission",
 ] as const;
 
 export type OsMissionLane = (typeof OS_MISSION_LANES)[number];
@@ -185,12 +233,36 @@ export type OsApprovalRequirement =
   /** One control-capability approval names the approver and authorizes execution. */
   | "operator_control_approval"
   /** Control-capability approval that must additionally carry the exact graph hash. */
-  | "operator_control_approval_bound_to_graph_hash";
+  | "operator_control_approval_bound_to_graph_hash"
+  /**
+   * Two distinct control-capability approvals: one authorizing the exact
+   * compiled plan before any worker runs, and one binding the exact candidate
+   * output bytes before the single consequential write.
+   */
+  | "operator_control_approval_bound_to_plan_and_candidate_hash";
 
 /** How a lane resolves an ambiguous downstream outcome before any retry. */
 export type OsReconciliationMode =
   /** Read exact downstream truth first; retry only on a proven absent binding. */
-  | "downstream_lookup_before_retry";
+  | "downstream_lookup_before_retry"
+  /**
+   * Per node: read the durable worker record first, and resume only once that
+   * lookup has established whether the worker already ran. One ambiguous node
+   * never invalidates its completed siblings.
+   */
+  | "node_worker_record_lookup_before_retry";
+
+/**
+ * How a lane's bounded execution is realized.
+ *
+ * The distinction is load-bearing for the registry check below: a lane that
+ * dispatches one registered product action must name a (product, action) the
+ * reviewed action registry knows, whereas a plan-governed lane's execution is a
+ * compiled graph of capabilities and has no single downstream action to name.
+ */
+export type OsExecutionModel =
+  | "downstream_product_action"
+  | "governed_agentic_plan";
 
 export interface OsMissionLaneSpec {
   readonly lane: OsMissionLane;
@@ -205,6 +277,13 @@ export interface OsMissionLaneSpec {
   readonly product: string;
   readonly action: string;
   readonly approvalRequirement: OsApprovalRequirement;
+  readonly executionModel: OsExecutionModel;
+  /**
+   * Downstream operation identity for a plan-governed lane, which has no entry
+   * in the reviewed action registry to read one from. Absent for every lane
+   * that dispatches one registered product action.
+   */
+  readonly declaredDownstreamOperationType?: string;
   /** The exact bounded effect a lane's execution is permitted to have. */
   readonly executionScope: string;
   /** True only for a lane permitted to reach a real external system. */
@@ -231,6 +310,7 @@ export const OS_MISSION_LANE_SPECS: readonly OsMissionLaneSpec[] = Object.freeze
     product: "loop_governor",
     action: "loop_governor.manual_loop.create",
     approvalRequirement: "operator_control_approval" as const,
+    executionModel: "downstream_product_action" as const,
     executionScope: "loop_governor_manual_loop_create_only",
     realExternalExecutionAllowed: false,
     reconciliationMode: "downstream_lookup_before_retry" as const,
@@ -242,6 +322,7 @@ export const OS_MISSION_LANE_SPECS: readonly OsMissionLaneSpec[] = Object.freeze
     product: "auto_poster",
     action: "autoposter.post.schedule",
     approvalRequirement: "operator_control_approval_bound_to_graph_hash" as const,
+    executionModel: "downstream_product_action" as const,
     executionScope: "autoposter_unapproved_draft_only",
     realExternalExecutionAllowed: true,
     reconciliationMode: "downstream_lookup_before_retry" as const,
@@ -253,10 +334,28 @@ export const OS_MISSION_LANE_SPECS: readonly OsMissionLaneSpec[] = Object.freeze
     product: "auto_poster",
     action: "autoposter.post.schedule",
     approvalRequirement: "operator_control_approval" as const,
+    executionModel: "downstream_product_action" as const,
     executionScope: "autoposter_unapproved_draft_only",
     realExternalExecutionAllowed: true,
     reconciliationMode: "downstream_lookup_before_retry" as const,
     sourceOfTruth: "autoposter_runtime_missions",
+  }),
+  Object.freeze({
+    lane: "governed_agentic_mission" as const,
+    intakeSchemaVersion: "chanter.agentic-work.v1",
+    // `operator` is the product because Operator owns the plan, the authority,
+    // and the one artifact. There is no single registered downstream action:
+    // this lane's execution is a compiled graph spanning seven capabilities, so
+    // it declares its downstream operation identity directly.
+    product: "operator",
+    action: "operator.agentic.execute_plan",
+    approvalRequirement: "operator_control_approval_bound_to_plan_and_candidate_hash" as const,
+    executionModel: "governed_agentic_plan" as const,
+    declaredDownstreamOperationType: "operator.artifact.write_local_evidence_document",
+    executionScope: "read_only_workers_then_one_approved_local_artifact_write",
+    realExternalExecutionAllowed: false,
+    reconciliationMode: "node_worker_record_lookup_before_retry" as const,
+    sourceOfTruth: "operator_agentic_missions",
   }),
 ]);
 
@@ -298,7 +397,18 @@ export function registeredActionForLane(spec: OsMissionLaneSpec): RegisteredMiss
 function assertLaneRegistryIsConsistent(): void {
   const seenIntakeSchemas = new Set<string>();
   for (const spec of OS_MISSION_LANE_SPECS) {
-    registeredActionForLane(spec);
+    if (spec.executionModel === "governed_agentic_plan") {
+      // A plan-governed lane has no single reviewed action to cross-check, so
+      // the equivalent obligation is that it states its own downstream identity
+      // rather than leaving it to be inferred later.
+      if (!spec.declaredDownstreamOperationType) {
+        throw new Error(
+          `OS lane ${spec.lane} is plan-governed but declares no downstream operation type.`,
+        );
+      }
+    } else {
+      registeredActionForLane(spec);
+    }
     if (spec.intakeSchemaVersion === null) continue;
     if (seenIntakeSchemas.has(spec.intakeSchemaVersion)) {
       throw new Error(
@@ -314,6 +424,19 @@ assertLaneRegistryIsConsistent();
 // ---------------------------------------------------------------------------
 // Canonical identity
 // ---------------------------------------------------------------------------
+
+/**
+ * The downstream operation identity a lane's execution ultimately performs.
+ *
+ * Read from the reviewed action registry for a product-action lane and from the
+ * lane's own declaration for a plan-governed one, so the projection never has to
+ * branch on execution model.
+ */
+export function osDownstreamOperationType(spec: OsMissionLaneSpec): string {
+  return spec.executionModel === "governed_agentic_plan"
+    ? spec.declaredDownstreamOperationType ?? ""
+    : registeredActionForLane(spec).downstreamOperationType;
+}
 
 const OS_MISSION_ID_PREFIX = "os";
 
@@ -400,6 +523,18 @@ export interface OsMissionAuthority {
   readonly authorityRevision: string | null;
   readonly repositoryBinding: string | null;
   readonly expiresAt: string | null;
+  /**
+   * Digest of the exact output bytes awaiting a human decision, for a lane
+   * whose approval binds output rather than a request. `null` for a lane that
+   * authorizes a request, where there is no candidate output to bind.
+   */
+  readonly candidateOutputHash: string | null;
+  /**
+   * The digest a human actually bound. Distinct from `candidateOutputHash`
+   * because the two differing is exactly the condition that must invalidate
+   * authority: bytes that changed after approval were never approved.
+   */
+  readonly approvedOutputHash: string | null;
   /** The typed reason authority is absent or refused; `null` when it holds. */
   readonly refusalCode: string | null;
 }
@@ -429,6 +564,15 @@ export type OsDownstreamIdentity =
     readonly evidenceBundleId: string | null;
     /** Publication stays human-gated; the OS view states it, never infers it. */
     readonly publicationApprovalState: "human_required";
+  }
+  | {
+    readonly kind: "operator_local_artifact";
+    readonly artifactName: string | null;
+    /** Digest of the exact bytes on disk; `null` until one write has landed. */
+    readonly artifactHash: string | null;
+    /** Durable count of writes recorded under this mission identity. */
+    readonly writeCount: number;
+    readonly approvedCandidateHash: string | null;
   };
 
 export type OsEvidenceStatus =

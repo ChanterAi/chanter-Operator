@@ -50,7 +50,12 @@ import type {
   PlatformAutoPosterCommandService,
   PlatformAutoPosterCommandView,
 } from "../platform/platformAutoPosterCommandService.js";
-import type { OperatorApprovalAuthorityProjection } from "../runtimeMissions/persistedApprovalAuthority.js";
+import {
+  UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION,
+  type OperatorApprovalAuthorityProjection,
+} from "../runtimeMissions/persistedApprovalAuthority.js";
+import type { AgenticMissionService } from "../agentic/agenticMissionService.js";
+import type { AgenticMissionRecord, AgenticNodeRecord } from "../agentic/agenticPlanJournal.js";
 import { OperatorError } from "../services/operatorService.js";
 import {
   OS_MISSION_LANE_SPECS,
@@ -60,6 +65,8 @@ import {
   osMissionIdFor,
   osMissionLaneSpec,
   osReplayOutcome,
+  osDownstreamOperationType,
+  osStateFromAgenticPlanState,
   osStateFromExecutionState,
   osStateFromGraphState,
   parseOsMissionId,
@@ -112,6 +119,12 @@ interface OsMissionControlServiceDependencies {
   readonly missionGraphs: MissionGraphService;
   readonly loopGovernorExecutor: LoopGovernorMissionExecutor;
   readonly autoPosterExecutor: AutoPosterRuntimeMissionExecutor;
+  /**
+   * The governed agentic execution fabric. Optional because a deployment may
+   * run the two dispatch lanes without it; every plan-governed surface then
+   * fails closed with a typed 503 rather than pretending the lane exists.
+   */
+  readonly agenticMissions?: AgenticMissionService;
 }
 
 function jsonObject(value: unknown): Record<string, unknown> | null {
@@ -169,8 +182,9 @@ export class OsMissionControlService {
       product: spec.product,
       action: spec.action,
       approvalRequirement: spec.approvalRequirement,
+      executionModel: spec.executionModel,
       executionScope: spec.executionScope,
-      downstreamOperationType: registeredActionForLane(spec).downstreamOperationType,
+      downstreamOperationType: osDownstreamOperationType(spec),
       realExternalExecutionAllowed: spec.realExternalExecutionAllowed,
       reconciliationMode: spec.reconciliationMode,
       sourceOfTruth: spec.sourceOfTruth,
@@ -200,6 +214,14 @@ export class OsMissionControlService {
         "schemaVersion does not name a registered CHANTER OS mission intake.",
         400,
         "OS_MISSION_INTAKE_UNREGISTERED",
+      );
+    }
+
+    if (spec.lane === "governed_agentic_mission") {
+      const submitted = await this.requireAgentic().submit(body);
+      return this.projectAgenticMission(
+        this.requireAgentic().record(submitted.view.missionId),
+        submitted.replayed,
       );
     }
 
@@ -249,7 +271,59 @@ export class OsMissionControlService {
         return this.projectDirectAutoPosterMission(
           this.requireDirectAutoPosterMission(parsed.laneNativeId),
         );
+      case "governed_agentic_mission":
+        return this.projectAgenticMission(this.requireAgentic().record(parsed.laneNativeId));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Plan-governed surfaces
+  //
+  // These answer only for a lane whose execution *is* a compiled plan. A lane
+  // that dispatches one downstream product action has no node-level plan to
+  // expose, and saying so with a typed refusal is more useful than inventing a
+  // one-node plan that would misdescribe how it actually executes.
+  // -------------------------------------------------------------------------
+
+  planOf(osMissionIdValue: unknown): Record<string, unknown> {
+    return this.requireAgentic().plan(this.requirePlanGovernedId(osMissionIdValue));
+  }
+
+  nodesOf(osMissionIdValue: unknown): readonly AgenticNodeRecord[] {
+    return this.requireAgentic().nodes(this.requirePlanGovernedId(osMissionIdValue));
+  }
+
+  nodeOf(osMissionIdValue: unknown, nodeId: unknown): AgenticNodeRecord {
+    return this.requireAgentic().node(
+      this.requirePlanGovernedId(osMissionIdValue),
+      this.requireNodeId(nodeId),
+    );
+  }
+
+  evidenceOf(osMissionIdValue: unknown): Record<string, unknown> {
+    return this.requireAgentic().evidence(this.requirePlanGovernedId(osMissionIdValue));
+  }
+
+  reconcileNode(osMissionIdValue: unknown, nodeId: unknown): AgenticNodeRecord {
+    return this.requireAgentic().reconcileNode(
+      this.requirePlanGovernedId(osMissionIdValue),
+      this.requireNodeId(nodeId),
+    );
+  }
+
+  resumeNode(osMissionIdValue: unknown, nodeId: unknown): Promise<AgenticNodeRecord> {
+    return this.requireAgentic().resumeNode(
+      this.requirePlanGovernedId(osMissionIdValue),
+      this.requireNodeId(nodeId),
+    );
+  }
+
+  stopNode(osMissionIdValue: unknown, nodeId: unknown, rawBody: unknown): Promise<AgenticNodeRecord> {
+    return this.requireAgentic().stopNode(
+      this.requirePlanGovernedId(osMissionIdValue),
+      this.requireNodeId(nodeId),
+      jsonObject(rawBody) ?? {},
+    );
   }
 
   /**
@@ -279,6 +353,13 @@ export class OsMissionControlService {
     if (!laneFilter || laneFilter === "platform_autoposter_command") {
       for (const command of this.dependencies.platformCommands.list(MAX_LANE_READ)) {
         views.push(this.projectPlatformCommand(command));
+      }
+    }
+    if ((!laneFilter || laneFilter === "governed_agentic_mission") && this.dependencies.agenticMissions) {
+      for (const mission of this.dependencies.agenticMissions.list(MAX_LANE_READ)) {
+        views.push(this.projectAgenticMission(
+          this.requireAgentic().record(mission.missionId),
+        ));
       }
     }
     if (!laneFilter || laneFilter === "autoposter_direct_mission") {
@@ -342,6 +423,18 @@ export class OsMissionControlService {
             body.approvedBy,
           ),
         );
+      case "governed_agentic_mission": {
+        // One OS verb, two authorities. `approve` means "grant whichever
+        // authority this mission is currently waiting for", and which one that
+        // is comes from durable state rather than from the caller — a caller
+        // able to choose could approve a candidate that was never composed.
+        const fabric = this.requireAgentic();
+        const current = fabric.record(parsed.laneNativeId);
+        const view = current.status === "awaiting_authority"
+          ? await fabric.approveCandidate(parsed.laneNativeId, body)
+          : await fabric.approveExecution(parsed.laneNativeId, body);
+        return this.projectAgenticMission(fabric.record(view.missionId));
+      }
     }
   }
 
@@ -370,6 +463,11 @@ export class OsMissionControlService {
         return this.projectDirectAutoPosterMission(
           await this.dependencies.autoPosterMissions.reconcileMission(parsed.laneNativeId),
         );
+      case "governed_agentic_mission": {
+        const fabric = this.requireAgentic();
+        await fabric.reconcile(parsed.laneNativeId);
+        return this.projectAgenticMission(fabric.record(parsed.laneNativeId));
+      }
     }
   }
 
@@ -437,6 +535,11 @@ export class OsMissionControlService {
         return this.projectDirectAutoPosterMission(
           await this.dependencies.autoPosterMissions.resumeSafely(parsed.laneNativeId),
         );
+      case "governed_agentic_mission": {
+        const fabric = this.requireAgentic();
+        await fabric.resume(parsed.laneNativeId);
+        return this.projectAgenticMission(fabric.record(parsed.laneNativeId));
+      }
     }
   }
 
@@ -467,6 +570,135 @@ export class OsMissionControlService {
         return this.projectDirectAutoPosterMission(
           this.dependencies.autoPosterMissions.stopAndEscalate(parsed.laneNativeId),
         );
+      case "governed_agentic_mission": {
+        const fabric = this.requireAgentic();
+        fabric.stop(parsed.laneNativeId, { stoppedBy: body.stoppedBy ?? body.approvedBy ?? "operator" });
+        return this.projectAgenticMission(fabric.record(parsed.laneNativeId));
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Projection: governed agentic mission
+  // -------------------------------------------------------------------------
+
+  private projectAgenticMission(
+    mission: AgenticMissionRecord,
+    replayed = false,
+  ): OsMissionView {
+    const spec = osMissionLaneSpec("governed_agentic_mission");
+    const fabric = this.requireAgentic();
+    const events = fabric.events(mission.missionId);
+    const nodes = fabric.nodes(mission.missionId);
+    const status = osStateFromAgenticPlanState(mission.status);
+    const writeCount = mission.artifactHash ? 1 : 0;
+
+    // Replay is a per-node fact on this lane, so it is derived from what the
+    // nodes durably record rather than from a single mission-level flag.
+    const committedDuplicate = events.some((event) =>
+      event.reason.includes("no second worker invocation occurred"));
+    const anyCompleted = nodes.some((node) => node.state === "completed");
+
+    return this.assemble({
+      spec,
+      replayed,
+      laneNativeId: mission.missionId,
+      missionRevision: events.length,
+      payloadHash: mission.intentHash,
+      traceId: mission.traceId,
+      product: spec.product,
+      action: spec.action,
+      workspaceId: mission.workspaceId,
+      actorId: mission.actorId,
+      runtimeExecutionId: mission.planId,
+      downstream: {
+        kind: "operator_local_artifact",
+        artifactName: mission.artifactName,
+        artifactHash: mission.artifactHash,
+        writeCount,
+        approvedCandidateHash: mission.approvedCandidateHash,
+      },
+      status,
+      laneState: mission.status,
+      authorityOverride: {
+        required: true,
+        configured: true,
+        // Trusted only when the approval is bound to a committed revision. An
+        // unbound approval is still an approval, but it is not one anything
+        // outside this process could later verify.
+        trusted: mission.candidateAuthorityRevision !== null,
+        approved: mission.approvedCandidateHash !== null,
+        approvedBy: mission.candidateApprovedBy ?? mission.executionApprovedBy,
+        approvalId: mission.approvedCandidateHash ? `${mission.missionId}:N6` : null,
+        authorityRevision: mission.candidateAuthorityRevision,
+        repositoryBinding: mission.candidateAuthorityRevision
+          ? "operator_approval_authority_repository"
+          : null,
+        expiresAt: mission.candidateApprovalExpiresAt,
+        candidateOutputHash: mission.candidateHash,
+        approvedOutputHash: mission.approvedCandidateHash,
+        refusalCode: null,
+      },
+      approvedBy: mission.candidateApprovedBy ?? mission.executionApprovedBy,
+      evidenceStatus: status === "completed"
+        ? "authoritative"
+        : status === "failed_terminal" || status === "stopped"
+          ? "failed"
+          : status === "failed_recoverable" || status === "reconciliation_required"
+            ? "reconciliation_required"
+            : "pending",
+      evidenceReference: mission.artifactHash
+        ? `artifact-sha256:${mission.artifactHash}`
+        : mission.candidateHash
+          ? `candidate-sha256:${mission.candidateHash}`
+          : `context-bundle:${mission.contextBundleId}`,
+      valueObservation: mission.valueObservation,
+      replayOutcome: committedDuplicate
+        ? "duplicate"
+        : anyCompleted
+          ? "first_execution"
+          : "not_observed",
+      recoveryClassification: mission.typedError?.code ?? null,
+      lastConfirmedBoundary: null,
+      nextPermittedActions: this.agenticActions(mission),
+      typedError: typedErrorOf(mission.typedError),
+      laneReference: {
+        laneNativeId: mission.missionId,
+        missionId: mission.missionId,
+        commandId: null,
+        graphId: mission.planId,
+        graphHash: mission.planHash,
+      },
+      requestedAt: mission.requestedAt,
+      createdAt: mission.createdAt,
+      updatedAt: mission.updatedAt,
+    });
+  }
+
+  /**
+   * Advisory next actions for a plan-governed mission, in the OS vocabulary.
+   *
+   * Both authority boundaries surface as `approve`; which one is owed is visible
+   * in `laneState`. Introducing a fourth OS verb for the second approval would
+   * make every other lane's vocabulary incomplete for no gain.
+   */
+  private agenticActions(mission: AgenticMissionRecord): OsMissionAction[] {
+    switch (mission.status) {
+      case "compiled":
+      case "approval_required":
+      case "awaiting_authority":
+        return ["approve", "stop"];
+      case "approved":
+      case "running":
+        return ["stop"];
+      case "reconciliation_required":
+        return ["reconcile", "stop"];
+      case "failed_recoverable":
+        return ["reconcile", "resume", "stop"];
+      case "completed":
+      case "failed_terminal":
+      case "cancelled":
+        return [];
     }
   }
 
@@ -776,7 +1008,13 @@ export class OsMissionControlService {
     downstream: OsDownstreamIdentity | null;
     status: OsMissionState;
     laneState: string;
-    authorityProjection: OperatorApprovalAuthorityProjection;
+    authorityProjection?: OperatorApprovalAuthorityProjection;
+    /**
+     * A fully derived authority view, for a lane whose approval is not a
+     * persisted Runtime checkpoint. Supplying it keeps this assembly total
+     * without teaching it a second way to interpret a checkpoint projection.
+     */
+    authorityOverride?: OsMissionAuthority;
     approvedBy: string | null;
     evidenceStatus: OsEvidenceStatus;
     evidenceReference: string | null;
@@ -791,7 +1029,12 @@ export class OsMissionControlService {
     createdAt: string;
     updatedAt: string;
   }): OsMissionView {
-    const authority = this.projectAuthority(input.authorityProjection, input.approvedBy);
+    const authority = input.authorityOverride
+      ?? this.projectAuthority(
+        /* c8 ignore next -- one of the two is always supplied by every caller. */
+        input.authorityProjection ?? UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION,
+        input.approvedBy,
+      );
     return {
       schemaVersion: OS_MISSION_VIEW_SCHEMA_VERSION,
       replayed: input.replayed,
@@ -813,7 +1056,7 @@ export class OsMissionControlService {
       laneCapability: {
         approvalRequirement: input.spec.approvalRequirement,
         executionScope: input.spec.executionScope,
-        downstreamOperationType: registeredActionForLane(input.spec).downstreamOperationType,
+        downstreamOperationType: osDownstreamOperationType(input.spec),
         realExternalExecutionAllowed: input.spec.realExternalExecutionAllowed,
         reconciliationMode: input.spec.reconciliationMode,
         sourceOfTruth: input.spec.sourceOfTruth,
@@ -862,6 +1105,10 @@ export class OsMissionControlService {
       authorityRevision: projection.checkpoint?.expectedHead ?? null,
       repositoryBinding: projection.checkpoint?.repositoryId ?? null,
       expiresAt: observation?.approvalExpiresAt ?? null,
+      // A request-authorizing lane binds no candidate output, and saying so is
+      // more useful than omitting the field for some lanes and not others.
+      candidateOutputHash: null,
+      approvedOutputHash: null,
       refusalCode: projection.refusalCode,
     };
   }
@@ -923,6 +1170,42 @@ export class OsMissionControlService {
    * probed lane by lane — that probing is precisely how an unknown id silently
    * falls through into another lane's store.
    */
+  private requireAgentic(): AgenticMissionService {
+    if (!this.dependencies.agenticMissions) {
+      throw new OperatorError(
+        "The governed agentic execution fabric is unavailable.",
+        503,
+        "AGENTIC_FABRIC_UNAVAILABLE",
+      );
+    }
+    return this.dependencies.agenticMissions;
+  }
+
+  /** Resolves an OS identity that must belong to a plan-governed lane. */
+  private requirePlanGovernedId(value: unknown): string {
+    const parsed = this.requireParsedId(value);
+    if (osMissionLaneSpec(parsed.lane).executionModel !== "governed_agentic_plan") {
+      throw new OperatorError(
+        `Lane ${parsed.lane} dispatches one downstream product action and exposes no node-level plan.`,
+        409,
+        "OS_MISSION_LANE_NOT_PLAN_GOVERNED",
+        { osMissionId: osMissionIdFor(parsed.lane, parsed.laneNativeId), lane: parsed.lane },
+      );
+    }
+    return parsed.laneNativeId;
+  }
+
+  private requireNodeId(value: unknown): string {
+    if (typeof value !== "string" || !value.trim() || value.length > 64) {
+      throw new OperatorError(
+        "nodeId must be an exact bounded plan node identifier.",
+        400,
+        "AGENTIC_NODE_IDENTITY_INVALID",
+      );
+    }
+    return value.trim();
+  }
+
   private requireParsedId(value: unknown) {
     const parsed = parseOsMissionId(value);
     if (!parsed) {

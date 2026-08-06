@@ -47,7 +47,8 @@
     "mission:services:stop": "node --import tsx tools/local-mission/stop-services.mts",
     "autoposter:mission:local:seed-account": "node --import tsx tools/local-mission/seed-connected-account.mts",
     "os:assembly": "node --import tsx tools/os-assembly/run-end-to-end-assembly.mts",
-    "os:unified": "node --import tsx tools/os-unified/run-unified-mission-control.mts"
+    "os:unified": "node --import tsx tools/os-unified/run-unified-mission-control.mts",
+    "os:agentic-fabric": "node --import tsx tools/os-agentic-fabric/run-agentic-fabric.mts"
   },
   "engines": {
     "node": ">=22.13.0"

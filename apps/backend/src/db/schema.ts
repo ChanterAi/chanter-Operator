@@ -873,6 +873,200 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_run_sequence
 CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_pending
   ON agent_run_ledger_ingest_events(run_id, applied, sequence)
   WHERE ingest_outcome = 'accepted';
+
+-- ---------------------------------------------------------------------------
+-- Governed agentic execution fabric (additive; every table above is untouched).
+--
+-- One human mission compiles into one immutable intent contract, one admitted
+-- context bundle, and one deterministic plan whose id is a digest of both. The
+-- plan's nodes are the executable unit, and every consequential fact about a
+-- node -- its bounds, its lease, its one worker record, its evidence -- is a
+-- row here rather than process memory, so a restart re-reads reality instead of
+-- reconstructing it.
+--
+-- The Phase 2D mission-graph tables are deliberately not reused: their node is
+-- a child-mission dispatch bound to one (product, action), whereas an agentic
+-- node is a capability-bounded worker with a budget, a deadline, an output
+-- schema, and an evidence requirement. Overloading one table with both would
+-- have made every column optional for half its rows.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS operator_agentic_missions (
+  mission_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  schema_version TEXT NOT NULL CHECK (schema_version = 'chanter.agentic-work.v1'),
+  workspace_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  intent_json TEXT NOT NULL,
+  context_bundle_id TEXT NOT NULL,
+  context_bundle_json TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  plan_hash TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  routing_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'compiled', 'approval_required', 'approved', 'running', 'awaiting_authority',
+    'completed', 'failed_recoverable', 'reconciliation_required', 'failed_terminal', 'cancelled'
+  )),
+  approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required = 1),
+  execution_approved_by TEXT,
+  execution_approved_at TEXT,
+  execution_approved_plan_hash TEXT,
+  candidate_hash TEXT,
+  candidate_markdown TEXT,
+  candidate_approved_by TEXT,
+  candidate_approved_at TEXT,
+  approved_candidate_hash TEXT,
+  candidate_approval_expires_at TEXT,
+  candidate_authority_revision TEXT,
+  artifact_hash TEXT,
+  artifact_name TEXT,
+  value_observation_json TEXT,
+  typed_error_json TEXT,
+  requested_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_missions_created_at
+  ON operator_agentic_missions(created_at DESC, mission_id DESC);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_nodes (
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  node_type TEXT NOT NULL CHECK (node_type IN (
+    'context_collect', 'specialist', 'verifier', 'synthesis',
+    'authority_checkpoint', 'artifact_write', 'outcome_verify'
+  )),
+  capability_id TEXT,
+  worker_kind TEXT,
+  depends_on_json TEXT NOT NULL,
+  input_refs_json TEXT NOT NULL,
+  authority_requirement TEXT NOT NULL CHECK (authority_requirement IN (
+    'none', 'human_approval_bound_to_candidate_hash'
+  )),
+  budget_json TEXT NOT NULL,
+  deadline_offset_ms INTEGER NOT NULL CHECK (deadline_offset_ms >= 0),
+  attempt_limit INTEGER NOT NULL CHECK (attempt_limit >= 1),
+  reconciliation_mode TEXT NOT NULL,
+  evidence_policy_json TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'blocked', 'ready', 'running', 'completed', 'failed_recoverable',
+    'reconciliation_required', 'failed_terminal', 'cancelled'
+  )),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  deadline_at TEXT,
+  idempotency_key TEXT NOT NULL,
+  output_json TEXT,
+  output_hash TEXT,
+  cost_json TEXT,
+  latency_ms INTEGER,
+  reconciliation_outcome TEXT CHECK (reconciliation_outcome IN (
+    'worker_result_found', 'no_worker_result', 'conflict'
+  )),
+  reconciled_at TEXT,
+  typed_error_json TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_plan_nodes_mission
+  ON operator_agentic_plan_nodes(mission_id, node_id);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_edges (
+  plan_id TEXT NOT NULL,
+  from_node_id TEXT NOT NULL,
+  to_node_id TEXT NOT NULL,
+  PRIMARY KEY (plan_id, from_node_id, to_node_id),
+  FOREIGN KEY (plan_id, from_node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT,
+  FOREIGN KEY (plan_id, to_node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_events (
+  event_id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  plan_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('mission', 'plan', 'node')),
+  node_id TEXT,
+  event_type TEXT NOT NULL,
+  previous_state TEXT,
+  new_state TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  typed_error_json TEXT,
+  UNIQUE (mission_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_plan_events_mission
+  ON operator_agentic_plan_events(mission_id, sequence);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_node_evidence (
+  evidence_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'context_reference', 'tool_output', 'derived_claim', 'artifact'
+  )),
+  label TEXT NOT NULL,
+  source_reference TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, node_id, evidence_id),
+  FOREIGN KEY (plan_id, node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_node_evidence_mission
+  ON operator_agentic_node_evidence(mission_id, node_id);
+
+-- The Runtime's durable memory of worker invocations. One row per node
+-- execution identity: the claim is taken before the worker runs and the outcome
+-- is written after it returns, so the gap between them is exactly the window a
+-- node-level reconcile has to resolve.
+CREATE TABLE IF NOT EXISTS operator_agentic_worker_records (
+  idempotency_key TEXT PRIMARY KEY,
+  execution_hash TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  claim_owner TEXT,
+  claimed_at TEXT,
+  status TEXT,
+  structured_output_json TEXT,
+  output_hash TEXT,
+  evidence_json TEXT,
+  tool_calls_json TEXT,
+  cost_json TEXT,
+  latency_ms INTEGER,
+  typed_error_json TEXT,
+  recorded_at TEXT
+);
+
+-- Exactly-one-write, enforced by the primary key rather than by a counter a
+-- caller could forget to increment. A second write under the same identity is a
+-- constraint violation, not a silently doubled artifact.
+CREATE TABLE IF NOT EXISTS operator_agentic_artifact_writes (
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  artifact_name TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  approved_candidate_hash TEXT NOT NULL,
+  byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+  artifact_path TEXT NOT NULL,
+  written_at TEXT NOT NULL,
+  PRIMARY KEY (mission_id, artifact_name)
+);
 `;
 
 const validLanes = new Set<string>([

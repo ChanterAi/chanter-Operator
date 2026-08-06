@@ -732,6 +732,12 @@ const OS_OUTCOME_KEYS = [
 const OS_AUTHORITY_KEYS = [
   "required", "configured", "trusted", "approved", "approvedBy", "approvalId",
   "authorityRevision", "repositoryBinding", "expiresAt", "refusalCode",
+  // Every lane reports what an approval binds, even the lanes that bind a
+  // request rather than an output — those report `null`. A field that appeared
+  // on some lanes and not others would break the one property this shape check
+  // exists to hold: that an OS mission looks the same whichever lane it came
+  // from.
+  "candidateOutputHash", "approvedOutputHash",
 ].sort();
 
 /** Every OS mission must expose one identical top-level contract shape. */
@@ -1440,18 +1446,46 @@ try {
     const lanes = await getJson(operator!.baseUrl, "/api/os/lanes");
     assert.equal(lanes.status, 200);
     const registry = lanes.body.lanes as Array<Record<string, unknown>>;
-    assert.equal(registry.length, 3);
+    assert.deepEqual(registry.map((entry) => entry.lane), [
+      "generic_governed_task",
+      "platform_autoposter_command",
+      "autoposter_direct_mission",
+      "governed_agentic_mission",
+    ]);
     const generic = registry.find((entry) => entry.lane === "generic_governed_task");
     const platform = registry.find((entry) => entry.lane === "platform_autoposter_command");
+    const agentic = registry.find((entry) => entry.lane === "governed_agentic_mission");
     assert.equal(record(generic).downstreamOperationType, "loop_governor.task.create_manual_loop");
     assert.equal(record(generic).realExternalExecutionAllowed, false);
     assert.equal(record(platform).downstreamOperationType, "autoposter.queue.create_unapproved_draft");
     assert.equal(record(platform).approvalRequirement, "operator_control_approval_bound_to_graph_hash");
+    // Every lane reports how its execution is realized. A dispatch lane reads
+    // its downstream identity from the reviewed action registry; a plan-governed
+    // lane has no single action to read one from and must declare its own.
+    for (const entry of registry) {
+      assert.ok(
+        entry.executionModel === "downstream_product_action"
+        || entry.executionModel === "governed_agentic_plan",
+        `${String(entry.lane)} must declare a known execution model`,
+      );
+      assert.ok(
+        String(entry.downstreamOperationType).length > 0,
+        `${String(entry.lane)} must name a downstream operation type`,
+      );
+    }
+    assert.equal(record(agentic).executionModel, "governed_agentic_plan");
+    assert.equal(record(agentic).realExternalExecutionAllowed, false);
+    assert.equal(
+      record(agentic).approvalRequirement,
+      "operator_control_approval_bound_to_plan_and_candidate_hash",
+    );
     return {
       httpStatus: lanes.status,
       lanes: registry.map((entry) => entry.lane),
+      executionModels: registry.map((entry) => entry.executionModel),
       genericDownstreamOperationType: record(generic).downstreamOperationType,
       platformDownstreamOperationType: record(platform).downstreamOperationType,
+      agenticDownstreamOperationType: record(agentic).downstreamOperationType,
     };
   });
 

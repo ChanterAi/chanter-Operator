@@ -1435,6 +1435,11 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
           "/api/os/missions/:osMissionId/reconcile",
           "/api/os/missions/:osMissionId/resume",
           "/api/os/missions/:osMissionId/stop",
+          // Node-level control shares the same capability: reconciling one node
+          // is the same authority as reconciling the mission, only narrower.
+          "/api/os/missions/:osMissionId/nodes/:nodeId/reconcile",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/resume",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/stop",
           "/api/runtime-missions/:missionId/approve",
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",

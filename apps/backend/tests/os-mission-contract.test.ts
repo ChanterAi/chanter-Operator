@@ -13,12 +13,16 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { listRegisteredMissionActions } from "../src/missions/missionActionRegistry.js";
+import {
+  listRegisteredMissionActions,
+  resolveRegisteredMissionAction,
+} from "../src/missions/missionActionRegistry.js";
 import {
   OS_MISSION_LANES,
   OS_MISSION_LANE_SPECS,
   OS_MISSION_STATES,
   isTerminalOsMissionState,
+  osDownstreamOperationType,
   osLaneForIntakeSchema,
   osMissionIdFor,
   osMissionLaneSpec,
@@ -174,13 +178,17 @@ describe("CHANTER OS lane registry", () => {
       "generic_governed_task",
       "platform_autoposter_command",
       "autoposter_direct_mission",
+      "governed_agentic_mission",
     ]);
   });
 
-  it("binds every lane to a reviewed action in the closed-world registry", () => {
+  it("binds every product-action lane to a reviewed action in the closed-world registry", () => {
     const registered = listRegisteredMissionActions();
+    const dispatchLanes = OS_MISSION_LANE_SPECS
+      .filter((spec) => spec.executionModel === "downstream_product_action");
 
-    for (const spec of OS_MISSION_LANE_SPECS) {
+    expect(dispatchLanes.length).toBeGreaterThan(0);
+    for (const spec of dispatchLanes) {
       const action = registeredActionForLane(spec);
       expect(registered).toContain(action);
       expect(action.product).toBe(spec.product);
@@ -188,6 +196,21 @@ describe("CHANTER OS lane registry", () => {
       // The downstream operation type is read from the action registry, never
       // duplicated into the OS registry, so the two cannot drift apart.
       expect(action.downstreamOperationType.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("requires a plan-governed lane to declare its own downstream identity", () => {
+    // A plan-governed lane has no single reviewed action to read one from,
+    // because its execution spans many capabilities. The equivalent obligation
+    // is that it states the identity itself rather than leaving it inferred.
+    const planGoverned = OS_MISSION_LANE_SPECS
+      .filter((spec) => spec.executionModel === "governed_agentic_plan");
+
+    expect(planGoverned.map((spec) => spec.lane)).toEqual(["governed_agentic_mission"]);
+    for (const spec of planGoverned) {
+      expect(spec.declaredDownstreamOperationType?.length ?? 0).toBeGreaterThan(0);
+      expect(osDownstreamOperationType(spec)).toBe(spec.declaredDownstreamOperationType);
+      expect(resolveRegisteredMissionAction(spec.product, spec.action)).toBeNull();
     }
   });
 
@@ -205,8 +228,19 @@ describe("CHANTER OS lane registry", () => {
 
     expect(direct.intakeSchemaVersion).toBeNull();
     expect(
-      OS_MISSION_LANE_SPECS.filter((spec) => spec.intakeSchemaVersion !== null),
-    ).toHaveLength(2);
+      OS_MISSION_LANE_SPECS
+        .filter((spec) => spec.intakeSchemaVersion !== null)
+        .map((spec) => spec.lane),
+    ).toEqual([
+      "generic_governed_task",
+      "platform_autoposter_command",
+      "governed_agentic_mission",
+    ]);
+  });
+
+  it("routes the agentic work schema to the plan-governed lane", () => {
+    expect(osLaneForIntakeSchema("chanter.agentic-work.v1")?.lane)
+      .toBe("governed_agentic_mission");
   });
 
   it("marks only AutoPoster lanes as permitted to reach a real external system", () => {

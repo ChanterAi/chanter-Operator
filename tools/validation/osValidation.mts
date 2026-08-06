@@ -65,6 +65,15 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
   // the unified control plane, so the narrower single-lane assembly proof
   // above is the more useful first signal when something breaks.
   Object.freeze({ name: "OS unified mission control plane", script: "os:unified" }),
+  // Terminal and most expensive: it drives a real Operator process through a
+  // full compile -> parallel execution -> verification -> two human approvals ->
+  // one artifact write -> node recovery -> restart replay path, plus a second
+  // Operator process for the contradiction case. Every cheaper stage above is a
+  // more useful first signal, so this one runs only once they are all green.
+  Object.freeze({
+    name: "OS governed agentic execution fabric",
+    script: "os:agentic-fabric",
+  }),
 ]);
 
 /** Resolves to the stage's real process exit code. */

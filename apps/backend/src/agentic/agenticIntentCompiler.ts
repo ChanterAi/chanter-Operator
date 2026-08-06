@@ -1,0 +1,567 @@
+/**
+ * CHANTER OS — deterministic intent contract compiler.
+ *
+ *     submission -> normalized intent contract -> canonical hash
+ *
+ * Every refusal below happens *before* a plan exists, which is the point: the
+ * cheapest moment to discover that a mission cannot be executed safely is before
+ * any worker, any context read, and any budget has been spent. A compiler that
+ * accepted an under-budgeted or self-contradictory mission would push that
+ * discovery to node six, after four workers had already been paid for.
+ *
+ * Two rules shape the whole module:
+ *
+ *   - **Never silently add a capability.** If a mission's output contract needs
+ *     a capability the submission did not allow, that is a refusal naming the
+ *     capability — not an implicit grant. An agentic fabric that quietly widens
+ *     its own permissions has no bound at all.
+ *   - **Record every default explicitly.** Anything the compiler supplied is
+ *     listed in `defaultsApplied` with its reason, so a reader can tell the
+ *     difference between what a human asked for and what this code assumed.
+ *
+ * Normalization is order-insensitive where order carries no meaning (capability
+ * lists, constraints, criteria are sorted by their own ids), so two submissions
+ * that differ only in ordering compile to identical bytes and identical hashes.
+ */
+import { OperatorError } from "../services/operatorService.js";
+import {
+  AGENTIC_ACCEPTANCE_CHECKS,
+  AGENTIC_CONSTRAINT_KINDS,
+  AGENTIC_CONTEXT_SOURCE_TYPES,
+  AGENTIC_TRUST_CLASSES,
+  AGENTIC_WORK_SCHEMA_VERSION,
+  createAgenticIntentHash,
+  type AgenticAcceptanceCheck,
+  type AgenticAcceptanceCriterion,
+  type AgenticAppliedDefault,
+  type AgenticConstraint,
+  type AgenticConstraintKind,
+  type AgenticContextRequirement,
+  type AgenticContextSourceType,
+  type AgenticFreshnessPolicy,
+  type AgenticIntentContract,
+  type AgenticOutputContract,
+  type AgenticTrustClass,
+} from "./agenticMissionContract.js";
+import {
+  AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
+  minimumExecutablePlanDurationMs,
+  resolveAgenticCapability,
+} from "./agenticCapabilityRegistry.js";
+import type { AgenticRiskClass, AgenticVerifiabilityClass } from "chanter-agent-runtime";
+
+const SUPPORTED_RISK_CLASSES: readonly AgenticRiskClass[] = ["read_only", "local_write"];
+
+const SUPPORTED_VERIFIABILITY_CLASSES: readonly AgenticVerifiabilityClass[] = [
+  "deterministic",
+  "evidence_verifiable",
+  "human_judgment_required",
+];
+
+const FRESHNESS_POLICIES: readonly AgenticFreshnessPolicy[] = [
+  "any",
+  "compiled_at_submission",
+  "max_age_seconds",
+];
+
+/** Concurrency below this cannot produce the independent specialist work the plan needs. */
+export const AGENTIC_MINIMUM_PARALLELISM = 2;
+
+const MAX_TEXT = 4000;
+const MAX_LIST = 32;
+
+function refuse(code: string, message: string, status = 400): never {
+  throw new OperatorError(message, status, code);
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function requiredText(value: unknown, field: string, max = MAX_TEXT): string {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > max) {
+    refuse("AGENTIC_INTENT_FIELD_INVALID", `${field} must be a non-empty string of at most ${max} characters.`);
+  }
+  return value.trim();
+}
+
+function boundedIdentifier(value: unknown, field: string): string {
+  const text = requiredText(value, field, 200);
+  if (text !== text.trim() || /\s/.test(text)) {
+    refuse("AGENTIC_INTENT_FIELD_INVALID", `${field} must be a whitespace-free identifier.`);
+  }
+  return text;
+}
+
+function requiredArray(value: unknown, field: string): readonly unknown[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_LIST) {
+    refuse(
+      "AGENTIC_INTENT_FIELD_INVALID",
+      `${field} must be a non-empty array of at most ${MAX_LIST} entries.`,
+    );
+  }
+  return value;
+}
+
+function optionalArray(value: unknown, field: string): readonly unknown[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_LIST) {
+    refuse("AGENTIC_INTENT_FIELD_INVALID", `${field} must be an array of at most ${MAX_LIST} entries.`);
+  }
+  return value;
+}
+
+function positiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    refuse("AGENTIC_INTENT_FIELD_INVALID", `${field} must be a positive integer.`);
+  }
+  return value;
+}
+
+function optionalPositiveInteger(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  return positiveInteger(value, field);
+}
+
+// ---------------------------------------------------------------------------
+// Field compilers
+// ---------------------------------------------------------------------------
+
+function compileConstraints(raw: readonly unknown[]): AgenticConstraint[] {
+  const constraints: AgenticConstraint[] = [];
+  const seenIds = new Set<string>();
+  for (const entry of raw) {
+    const record = jsonObject(entry);
+    if (!record) refuse("AGENTIC_INTENT_FIELD_INVALID", "Each constraint must be an object.");
+    const constraintId = boundedIdentifier(record.constraintId, "constraints[].constraintId");
+    if (seenIds.has(constraintId)) {
+      refuse("AGENTIC_INTENT_FIELD_INVALID", `Constraint ${constraintId} is declared twice.`);
+    }
+    seenIds.add(constraintId);
+    const kind = record.kind;
+    if (typeof kind !== "string" || !AGENTIC_CONSTRAINT_KINDS.includes(kind as AgenticConstraintKind)) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Constraint ${constraintId} must declare kind ${AGENTIC_CONSTRAINT_KINDS.join(" or ")}.`,
+      );
+    }
+    constraints.push({
+      constraintId,
+      kind: kind as AgenticConstraintKind,
+      subject: requiredText(record.subject, `constraints[${constraintId}].subject`, 200).toLowerCase(),
+      statement: requiredText(record.statement, `constraints[${constraintId}].statement`),
+    });
+  }
+
+  // One subject asserted both ways is a contradiction the mission cannot
+  // satisfy, and no downstream node could resolve it — so it is refused here
+  // rather than left to be discovered as a mysterious verification failure.
+  const bySubject = new Map<string, Set<AgenticConstraintKind>>();
+  for (const constraint of constraints) {
+    const kinds = bySubject.get(constraint.subject) ?? new Set<AgenticConstraintKind>();
+    kinds.add(constraint.kind);
+    bySubject.set(constraint.subject, kinds);
+  }
+  for (const [subject, kinds] of bySubject) {
+    if (kinds.size > 1) {
+      refuse(
+        "AGENTIC_INTENT_CONSTRAINTS_CONTRADICTORY",
+        `Constraints both require and forbid "${subject}"; the mission cannot satisfy both.`,
+        409,
+      );
+    }
+  }
+  return constraints.sort((left, right) => left.constraintId.localeCompare(right.constraintId));
+}
+
+function compileAcceptanceCriteria(raw: readonly unknown[]): AgenticAcceptanceCriterion[] {
+  const criteria: AgenticAcceptanceCriterion[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const record = jsonObject(entry);
+    if (!record) refuse("AGENTIC_INTENT_FIELD_INVALID", "Each acceptance criterion must be an object.");
+    const criterionId = boundedIdentifier(record.criterionId, "acceptanceCriteria[].criterionId");
+    if (seen.has(criterionId)) {
+      refuse("AGENTIC_INTENT_FIELD_INVALID", `Acceptance criterion ${criterionId} is declared twice.`);
+    }
+    seen.add(criterionId);
+    const check = record.check;
+    if (typeof check !== "string" || !AGENTIC_ACCEPTANCE_CHECKS.includes(check as AgenticAcceptanceCheck)) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Acceptance criterion ${criterionId} must declare one of: ${AGENTIC_ACCEPTANCE_CHECKS.join(", ")}.`,
+      );
+    }
+    // An absent parameter and an explicitly empty one mean the same thing: this
+    // check takes no argument. Treating `""` as a malformed value would refuse
+    // a submission that is saying exactly what the contract permits.
+    const parameter = record.parameter === undefined || record.parameter === null
+      || record.parameter === ""
+      ? ""
+      : requiredText(record.parameter, `acceptanceCriteria[${criterionId}].parameter`, 200);
+    if ((check === "artifact_section_present" || check === "evidence_coverage_minimum") && !parameter) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Acceptance criterion ${criterionId} uses check ${check}, which requires a parameter.`,
+      );
+    }
+    criteria.push({
+      criterionId,
+      statement: requiredText(record.statement, `acceptanceCriteria[${criterionId}].statement`),
+      check: check as AgenticAcceptanceCheck,
+      parameter,
+    });
+  }
+  return criteria.sort((left, right) => left.criterionId.localeCompare(right.criterionId));
+}
+
+function compileContextRequirements(raw: readonly unknown[]): AgenticContextRequirement[] {
+  const requirements: AgenticContextRequirement[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const record = jsonObject(entry);
+    if (!record) refuse("AGENTIC_INTENT_FIELD_INVALID", "Each context requirement must be an object.");
+    const requirementId = boundedIdentifier(record.requirementId, "contextRequirements[].requirementId");
+    if (seen.has(requirementId)) {
+      refuse("AGENTIC_INTENT_FIELD_INVALID", `Context requirement ${requirementId} is declared twice.`);
+    }
+    seen.add(requirementId);
+
+    const sourceType = record.sourceType;
+    if (
+      typeof sourceType !== "string"
+      || !AGENTIC_CONTEXT_SOURCE_TYPES.includes(sourceType as AgenticContextSourceType)
+    ) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Context requirement ${requirementId} must declare one of: ${AGENTIC_CONTEXT_SOURCE_TYPES.join(", ")}.`,
+      );
+    }
+    const freshnessPolicy = record.freshnessPolicy ?? "any";
+    if (
+      typeof freshnessPolicy !== "string"
+      || !FRESHNESS_POLICIES.includes(freshnessPolicy as AgenticFreshnessPolicy)
+    ) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Context requirement ${requirementId} must declare one of: ${FRESHNESS_POLICIES.join(", ")}.`,
+      );
+    }
+    const maxAgeSeconds = freshnessPolicy === "max_age_seconds"
+      ? positiveInteger(record.maxAgeSeconds, `contextRequirements[${requirementId}].maxAgeSeconds`)
+      : null;
+    const trustClass = record.trustClass ?? "authoritative";
+    if (typeof trustClass !== "string" || !AGENTIC_TRUST_CLASSES.includes(trustClass as AgenticTrustClass)) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `Context requirement ${requirementId} must declare one of: ${AGENTIC_TRUST_CLASSES.join(", ")}.`,
+      );
+    }
+    requirements.push({
+      requirementId,
+      sourceType: sourceType as AgenticContextSourceType,
+      sourceIdentity: requiredText(record.sourceIdentity, `contextRequirements[${requirementId}].sourceIdentity`, 400),
+      freshnessPolicy: freshnessPolicy as AgenticFreshnessPolicy,
+      maxAgeSeconds,
+      trustClass: trustClass as AgenticTrustClass,
+      scope: requiredText(record.scope ?? "mission", `contextRequirements[${requirementId}].scope`, 200),
+      required: record.required !== false,
+    });
+  }
+  return requirements.sort((left, right) => left.requirementId.localeCompare(right.requirementId));
+}
+
+/**
+ * Compiles the output contract.
+ *
+ * "Ambiguous" is not a judgement call here: an artifact with no name, no
+ * required sections, or duplicate sections cannot be verified by N8, because
+ * there is no unambiguous statement of what the artifact must contain.
+ */
+function compileOutputContract(raw: unknown): AgenticOutputContract {
+  const record = jsonObject(raw);
+  if (!record) {
+    refuse("AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS", "outputContract must be an object.");
+  }
+  if (record.format !== "markdown") {
+    refuse(
+      "AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS",
+      "outputContract.format must be markdown; no other output format is supported.",
+    );
+  }
+  const artifactName = requiredText(record.artifactName, "outputContract.artifactName", 200);
+  if (!/^[A-Za-z0-9._-]+$/.test(artifactName)) {
+    refuse(
+      "AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS",
+      "outputContract.artifactName must be a plain file name with no path segments.",
+    );
+  }
+  const rawSections = record.requiredSections;
+  if (!Array.isArray(rawSections) || rawSections.length === 0 || rawSections.length > 16) {
+    refuse(
+      "AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS",
+      "outputContract.requiredSections must name between 1 and 16 sections.",
+    );
+  }
+  const sections = rawSections.map((entry, index) =>
+    requiredText(entry, `outputContract.requiredSections[${index}]`, 120));
+  if (new Set(sections).size !== sections.length) {
+    refuse(
+      "AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS",
+      "outputContract.requiredSections contains a duplicate section name.",
+    );
+  }
+  return { format: "markdown", artifactName, requiredSections: sections };
+}
+
+function compileCapabilityList(raw: readonly unknown[], field: string): string[] {
+  const capabilities = raw.map((entry, index) => boundedIdentifier(entry, `${field}[${index}]`));
+  for (const capabilityId of capabilities) {
+    if (!resolveAgenticCapability(capabilityId)) {
+      refuse(
+        "AGENTIC_INTENT_CAPABILITY_UNREGISTERED",
+        `${field} names ${capabilityId}, which is not a registered capability.`,
+        409,
+      );
+    }
+  }
+  return [...new Set(capabilities)].sort();
+}
+
+// ---------------------------------------------------------------------------
+// The compiler
+// ---------------------------------------------------------------------------
+
+export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
+  const body = jsonObject(rawBody);
+  if (!body) refuse("AGENTIC_INTENT_FIELD_INVALID", "Request body must be an object.");
+  if (body.schemaVersion !== AGENTIC_WORK_SCHEMA_VERSION) {
+    refuse(
+      "AGENTIC_INTENT_FIELD_INVALID",
+      `schemaVersion must be ${AGENTIC_WORK_SCHEMA_VERSION}.`,
+    );
+  }
+
+  const defaultsApplied: AgenticAppliedDefault[] = [];
+  const missionId = boundedIdentifier(body.missionId, "missionId");
+  const traceId = body.traceId === undefined || body.traceId === null
+    ? (defaultsApplied.push({
+      field: "traceId",
+      value: missionId,
+      reason: "No trace id was supplied, so the mission id is used as its own correlation identity.",
+    }), missionId)
+    : boundedIdentifier(body.traceId, "traceId");
+
+  const objective = requiredText(body.objective, "objective", 2000);
+  const rawConstraints = optionalArray(body.constraints, "constraints");
+  const constraints = compileConstraints(rawConstraints);
+  const acceptanceCriteria = compileAcceptanceCriteria(
+    requiredArray(body.acceptanceCriteria, "acceptanceCriteria"),
+  );
+
+  const riskClass = body.riskClass;
+  if (typeof riskClass !== "string" || !SUPPORTED_RISK_CLASSES.includes(riskClass as AgenticRiskClass)) {
+    refuse(
+      "AGENTIC_INTENT_RISK_ACTION_UNSUPPORTED",
+      `riskClass must be one of: ${SUPPORTED_RISK_CLASSES.join(", ")}. `
+      + "External and irreversible missions are not executable by this fabric.",
+      409,
+    );
+  }
+  const verifiabilityClass = body.verifiabilityClass;
+  if (
+    typeof verifiabilityClass !== "string"
+    || !SUPPORTED_VERIFIABILITY_CLASSES.includes(verifiabilityClass as AgenticVerifiabilityClass)
+  ) {
+    refuse(
+      "AGENTIC_INTENT_FIELD_INVALID",
+      `verifiabilityClass must be one of: ${SUPPORTED_VERIFIABILITY_CLASSES.join(", ")}.`,
+    );
+  }
+
+  const outputContract = compileOutputContract(body.outputContract);
+  const allowedCapabilities = compileCapabilityList(
+    requiredArray(body.allowedCapabilities, "allowedCapabilities"),
+    "allowedCapabilities",
+  );
+  const forbiddenCapabilities = compileCapabilityList(
+    optionalArray(body.forbiddenCapabilities, "forbiddenCapabilities"),
+    "forbiddenCapabilities",
+  );
+  const overlapping = allowedCapabilities.filter((capability) => forbiddenCapabilities.includes(capability));
+  if (overlapping.length > 0) {
+    refuse(
+      "AGENTIC_INTENT_CONSTRAINTS_CONTRADICTORY",
+      `Capability ${overlapping[0]} is both allowed and forbidden.`,
+      409,
+    );
+  }
+
+  // The mission's declared risk class must cover the risk its own output
+  // contract implies. A mission that asks for an artifact while declaring itself
+  // read-only is refused rather than quietly promoted.
+  const writesArtifact = allowedCapabilities.includes("artifact.local.write");
+  if (writesArtifact && riskClass !== "local_write") {
+    refuse(
+      "AGENTIC_INTENT_RISK_ACTION_UNSUPPORTED",
+      "A mission permitted to write a local artifact must declare riskClass local_write.",
+      409,
+    );
+  }
+
+  const authorityPolicy = jsonObject(body.authorityPolicy);
+  if (!authorityPolicy) {
+    refuse("AGENTIC_INTENT_AUTHORITY_POLICY_REQUIRED", "authorityPolicy must be an object.", 409);
+  }
+  const approvalRequiredCapabilities = compileCapabilityList(
+    optionalArray(authorityPolicy.approvalRequiredCapabilities, "authorityPolicy.approvalRequiredCapabilities"),
+    "authorityPolicy.approvalRequiredCapabilities",
+  );
+  const rawRiskClasses = optionalArray(
+    authorityPolicy.approvalRequiredRiskClasses,
+    "authorityPolicy.approvalRequiredRiskClasses",
+  );
+  const approvalRequiredRiskClasses = [...new Set(rawRiskClasses.map((entry, index) => {
+    const value = boundedIdentifier(entry, `authorityPolicy.approvalRequiredRiskClasses[${index}]`);
+    if (!SUPPORTED_RISK_CLASSES.includes(value as AgenticRiskClass)) {
+      refuse(
+        "AGENTIC_INTENT_FIELD_INVALID",
+        `authorityPolicy.approvalRequiredRiskClasses names unsupported risk class ${value}.`,
+      );
+    }
+    return value as AgenticRiskClass;
+  }))].sort();
+  const approverRole = requiredText(
+    authorityPolicy.approverRole ?? "founder",
+    "authorityPolicy.approverRole",
+    120,
+  );
+
+  // A consequential mission with no approval policy would have no human
+  // boundary at all, so it is refused at compile time — the one place where
+  // refusing costs nothing.
+  if (
+    riskClass === "local_write"
+    && approvalRequiredCapabilities.length === 0
+    && !approvalRequiredRiskClasses.includes("local_write")
+  ) {
+    refuse(
+      "AGENTIC_INTENT_AUTHORITY_POLICY_REQUIRED",
+      "A local_write mission must name the capability or risk class that requires human approval.",
+      409,
+    );
+  }
+
+  // Capability sufficiency. Never widened silently: a required capability that
+  // was forbidden or simply not allowed is named in the refusal.
+  for (const required of AGENTIC_ARTIFACT_MISSION_CAPABILITIES) {
+    if (forbiddenCapabilities.includes(required)) {
+      refuse(
+        "AGENTIC_INTENT_FORBIDDEN_CAPABILITY_REQUIRED",
+        `This mission's output contract requires ${required}, which it forbids.`,
+        409,
+      );
+    }
+    if (!allowedCapabilities.includes(required)) {
+      refuse(
+        "AGENTIC_INTENT_CAPABILITY_NOT_ALLOWED",
+        `This mission's output contract requires ${required}, which it does not allow. `
+        + "The compiler never grants a capability a mission did not request.",
+        409,
+      );
+    }
+  }
+
+  const timeBudgetMs = positiveInteger(body.timeBudgetMs, "timeBudgetMs");
+  const minimumDuration = minimumExecutablePlanDurationMs();
+  if (timeBudgetMs < minimumDuration) {
+    refuse(
+      "AGENTIC_INTENT_BUDGET_BELOW_MINIMUM",
+      `timeBudgetMs ${timeBudgetMs} is below the ${minimumDuration}ms the smallest executable plan requires.`,
+      409,
+    );
+  }
+  const maxParallelism = positiveInteger(body.maxParallelism, "maxParallelism");
+  if (maxParallelism < AGENTIC_MINIMUM_PARALLELISM) {
+    refuse(
+      "AGENTIC_INTENT_BUDGET_BELOW_MINIMUM",
+      `maxParallelism must be at least ${AGENTIC_MINIMUM_PARALLELISM} for independent specialist work.`,
+      409,
+    );
+  }
+
+  const contextRequirements = compileContextRequirements(
+    requiredArray(body.contextRequirements, "contextRequirements"),
+  );
+
+  const requestedAt = requiredText(body.requestedAt ?? new Date().toISOString(), "requestedAt", 40);
+  if (Number.isNaN(Date.parse(requestedAt))) {
+    refuse("AGENTIC_INTENT_FIELD_INVALID", "requestedAt must be a valid ISO-8601 instant.");
+  }
+  if (body.requestedAt === undefined || body.requestedAt === null) {
+    defaultsApplied.push({
+      field: "requestedAt",
+      value: requestedAt,
+      reason: "No request instant was supplied, so compilation time was recorded.",
+    });
+  }
+
+  const withoutHash: Omit<AgenticIntentContract, "intentHash"> = {
+    schemaVersion: AGENTIC_WORK_SCHEMA_VERSION,
+    missionId,
+    traceId,
+    workspaceId: boundedIdentifier(body.workspaceId, "workspaceId"),
+    actorId: boundedIdentifier(body.actorId, "actorId"),
+    objective,
+    constraints,
+    acceptanceCriteria,
+    riskClass: riskClass as AgenticRiskClass,
+    verifiabilityClass: verifiabilityClass as AgenticVerifiabilityClass,
+    authorityPolicy: { approvalRequiredCapabilities, approvalRequiredRiskClasses, approverRole },
+    costBudgetMicros: optionalPositiveInteger(body.costBudgetMicros, "costBudgetMicros"),
+    tokenBudget: optionalPositiveInteger(body.tokenBudget, "tokenBudget"),
+    timeBudgetMs,
+    maxParallelism,
+    allowedCapabilities,
+    forbiddenCapabilities,
+    contextRequirements,
+    outputContract,
+    requestedAt,
+    humanText: {
+      objective,
+      constraints: constraints.map((constraint) => constraint.statement),
+      acceptanceCriteria: acceptanceCriteria.map((criterion) => criterion.statement),
+    },
+    defaultsApplied: defaultsApplied.sort((left, right) => left.field.localeCompare(right.field)),
+  };
+
+  return { ...withoutHash, intentHash: createAgenticIntentHash(withoutHash) };
+}
+
+/**
+ * Refuses a resubmission whose compiled intent differs from the durable one.
+ *
+ * A mission identity is a promise that later approvals, plans, and artifacts all
+ * refer to one thing. Letting a resubmission redefine it would silently move
+ * every one of those bindings, so a changed intent under a known id is a typed
+ * conflict rather than an update.
+ */
+export function assertAgenticIntentUnchanged(
+  storedIntentHash: string,
+  submitted: AgenticIntentContract,
+): void {
+  if (storedIntentHash !== submitted.intentHash) {
+    throw new OperatorError(
+      "This mission id already exists with a different compiled intent.",
+      409,
+      "AGENTIC_INTENT_CONFLICT",
+      {
+        missionId: submitted.missionId,
+        storedIntentHash,
+        submittedIntentHash: submitted.intentHash,
+      },
+    );
+  }
+}

@@ -19,6 +19,8 @@ import { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js
 import { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
 import { PlatformAutoPosterCommandService } from "./platform/platformAutoPosterCommandService.js";
 import { OsMissionControlService } from "./os/osMissionControlService.js";
+import { AgenticMissionService } from "./agentic/agenticMissionService.js";
+import { resolveAgenticAuthorityRevision } from "./agentic/agenticAuthorityRevision.js";
 
 export function createRuntime() {
   const database = createDatabase(config.databasePath);
@@ -109,6 +111,28 @@ export function createRuntime() {
   const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
     protectedValues,
   });
+  // The governed agentic execution fabric. It shares the same SQLite file as
+  // every other authority above, which is what makes "the worker ran" and "the
+  // node completed" two rows in one durable store.
+  const agenticMissionService = new AgenticMissionService({
+    database,
+    configuration: {
+      paths: {
+        repositories: config.agenticFabric.repositories,
+        fixtureRoot: config.agenticFabric.fixtureRoot,
+        artifactRoot: config.agenticFabric.artifactRoot,
+      },
+      governor: {
+        pythonExecutable: config.loopGovernorRuntime.pythonExecutable,
+        governorRoot: config.loopGovernorRuntime.governorRoot,
+        timeoutMs: config.loopGovernorRuntime.timeoutMs ?? 30_000,
+      },
+      approvalTtlMs: config.agenticFabric.approvalTtlMs,
+      authorityRevision: resolveAgenticAuthorityRevision(
+        config.agenticFabric.authorityRepositoryRoot,
+      ),
+    },
+  });
   // The unified CHANTER OS control plane is composed from the same canonical
   // authorities constructed above — it owns no store of its own, so it is
   // wired last and holds only references.
@@ -119,6 +143,7 @@ export function createRuntime() {
     missionGraphs: missionGraphService,
     loopGovernorExecutor: loopGovernorMissionExecutor,
     autoPosterExecutor: runtimeMissionExecutor,
+    agenticMissions: agenticMissionService,
   });
   return {
     database,
@@ -133,6 +158,7 @@ export function createRuntime() {
     autoPosterObservationWorker,
     autoPosterMissionEvidenceService,
     platformAutoPosterCommandService,
+    agenticMissionService,
     osMissionControlService,
     safeCommitCloseoutService,
   };
