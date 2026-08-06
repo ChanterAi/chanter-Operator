@@ -672,11 +672,39 @@ describe("Phase 2E-A AutoPoster graph authority", () => {
     const completedNode = first.nodes.find((node) => node.status === "completed");
     expect(completedNode?.resultSummary).toMatchObject({ approved: false });
 
+    // The YouTube dispatch left and returned nothing authoritative, so its
+    // child is durably reconciliation_required. Resuming the graph is refused
+    // while that is true — including for the healthy sibling node, because
+    // advancing a graph whose real state is partly unknown is the speculative
+    // act this contract exists to prevent.
+    const youtubeChildId = missionGraphChildMissionId(submitted.graphId, "youtube_node");
+    expect(harness.autoPoster.getMission(youtubeChildId).execution).toMatchObject({
+      state: "reconciliation_required",
+      recoveryClassification: "RECOVERY_DOWNSTREAM_UNAVAILABLE",
+    });
+    await expect(harness.graphs.resumeGraph(submitted.graphId))
+      .rejects.toMatchObject({ statusCode: 409, code: "RECOVERY_RECONCILIATION_REQUIRED" });
+    expect(boundary.jobs.size).toBe(1);
+    expect(boundary.reconciliationCalls).toHaveLength(0);
+
+    // One explicit reconciliation proves no YouTube draft exists and unlocks
+    // exactly one safe retry.
+    const reconciled = await harness.autoPoster.reconcileMission(youtubeChildId);
+    expect(reconciled.execution).toMatchObject({
+      reconciliationOutcome: "not_found",
+      recoveryClassification: "SAFE_RETRY_AVAILABLE",
+    });
+    expect(boundary.reconciliationCalls).toHaveLength(1);
+    expect(boundary.jobs.size).toBe(1);
+
     const resumed = await harness.graphs.resumeGraph(submitted.graphId);
     expect(resumed.status).toBe("completed");
     expect(boundary.jobs.size).toBe(2);
     expect(boundary.scheduleCalls.filter((call) => call.accountId === TIKTOK_ACCOUNT)).toHaveLength(1);
     expect(boundary.scheduleCalls.filter((call) => call.accountId === YOUTUBE_ACCOUNT)).toHaveLength(2);
+    // The resume executed the decision reconciliation already made; it never
+    // re-performed the investigation itself.
+    expect(boundary.reconciliationCalls).toHaveLength(1);
     harness.close();
   });
 

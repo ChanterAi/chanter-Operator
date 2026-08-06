@@ -122,13 +122,20 @@ const allowedTransitions = new Map<MissionExecutionState, ReadonlySet<MissionExe
   ["approval_required", new Set(["approved", "failed_terminal"])],
   ["approved", new Set(["execution_started", "failed_terminal"])],
   ["execution_started", new Set(["downstream_request_prepared", "failed_recoverable", "failed_terminal"])],
-  ["downstream_request_prepared", new Set(["downstream_result_observed", "failed_recoverable", "failed_terminal", "recovery_in_progress"])],
+  // reconciliation_required is reachable from here because this is the exact
+  // boundary at which a dispatch can leave Operator and never return an
+  // authoritative answer: the request was durably prepared, so the side effect
+  // may or may not have happened, and only a downstream lookup can say which.
+  ["downstream_request_prepared", new Set(["downstream_result_observed", "failed_recoverable", "failed_terminal", "reconciliation_required", "recovery_in_progress"])],
   ["downstream_result_observed", new Set(["result_persisted", "failed_recoverable", "failed_terminal", "reconciliation_required", "recovery_in_progress"])],
   ["result_persisted", new Set(["completed"])],
   ["completed", new Set(["completed"])],
   ["failed_recoverable", new Set(["recovery_in_progress", "failed_terminal"])],
   ["recovery_in_progress", new Set(["downstream_request_prepared", "downstream_result_observed", "failed_recoverable", "failed_terminal", "reconciliation_required"])],
-  ["reconciliation_required", new Set(["failed_terminal"])],
+  // An explicit reconciliation claims a bounded recovery attempt from here.
+  // That is the only way out other than terminating: nothing may transition
+  // straight back into execution without a lookup establishing truth first.
+  ["reconciliation_required", new Set(["failed_terminal", "recovery_in_progress"])],
   ["failed_terminal", new Set()],
 ]);
 

@@ -59,10 +59,20 @@ class DurableAutoPosterPort implements AutoPosterOperationsPort {
   reconciliationCalls = 0;
   private failureBoundary: MissionFailureBoundary | undefined;
   private failureInjected = false;
+  private scheduleUnavailable = false;
 
   configureFailure(boundary?: MissionFailureBoundary): void {
     this.failureBoundary = boundary;
     this.failureInjected = false;
+  }
+
+  /**
+   * The next dispatch reaches the boundary and returns no authoritative answer,
+   * exactly as an unreachable AutoPoster does. It creates nothing, so the
+   * mission is left genuinely unable to know whether a draft exists.
+   */
+  failNextScheduleAsUnavailable(): void {
+    this.scheduleUnavailable = true;
   }
 
   private inject(boundary: MissionFailureBoundary): void {
@@ -138,6 +148,14 @@ class DurableAutoPosterPort implements AutoPosterOperationsPort {
 
   async schedulePost(params: AutoPosterScheduleParams) {
     this.scheduleCalls += 1;
+    if (this.scheduleUnavailable) {
+      this.scheduleUnavailable = false;
+      return {
+        ok: false as const,
+        code: "unavailable" as const,
+        message: "AutoPoster is unreachable (POST /api/runtime/schedule).",
+      };
+    }
     const matches = this.jobs.filter((job) => job.idempotencyKey === params.idempotencyKey);
     if (matches.length > 1) {
       return {
@@ -654,7 +672,66 @@ describe("durable Operator mission recovery", () => {
     expect(conflict.execution?.typedError?.code).toBe("RECONCILIATION_REQUIRED");
     expect(port.jobs).toHaveLength(2);
     expect(port.scheduleCalls).toBe(1);
+
+    // A conflict is the one reconciliation_required a lookup cannot resolve, so
+    // it offers neither resume nor another reconcile — only escalation. Resume
+    // is still refused with the reconciliation code, and touches nothing.
+    await expect(restarted.service.resumeSafely(created.missionId))
+      .rejects.toMatchObject({ statusCode: 409, code: "RECOVERY_RECONCILIATION_REQUIRED" });
+    await expect(restarted.service.reconcileMission(created.missionId))
+      .rejects.toMatchObject({ statusCode: 409, code: "RECOVERY_ACTION_NOT_PERMITTED" });
+    expect(port.jobs).toHaveLength(2);
+    expect(port.scheduleCalls).toBe(1);
     restarted.database.close();
+  });
+
+  it("keeps an unobserved dispatch durably reconciliation_required and refuses resume", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chanter-unobserved-"));
+    roots.push(root);
+    const databasePath = path.join(root, "operator.sqlite");
+    const port = new DurableAutoPosterPort();
+    port.failNextScheduleAsUnavailable();
+
+    const service = openService(databasePath, port);
+    const created = await service.service.createScheduleMission(missionInput());
+    const dispatched = await service.service.approveAndExecute(created.missionId, "founder");
+
+    // The request left and nothing authoritative came back: that is a durable
+    // state of its own, not an ordinary recoverable failure.
+    expect(dispatched.execution).toMatchObject({
+      state: "reconciliation_required",
+      lastConfirmedBoundary: "downstream_request_prepared",
+      recoveryClassification: "RECOVERY_DOWNSTREAM_UNAVAILABLE",
+      reconciliationOutcome: "not_started",
+      retryCount: 0,
+      evidenceStatus: "reconciliation_required",
+    });
+    expect(dispatched.execution?.nextPermittedActions).toEqual(["Reconcile", "Stop / escalate"]);
+
+    // Resume is refused by the owning authority, with the specific code and
+    // without reaching the downstream boundary at all.
+    const lookupsBefore = port.reconciliationCalls;
+    await expect(service.service.resumeSafely(created.missionId))
+      .rejects.toMatchObject({ statusCode: 409, code: "RECOVERY_RECONCILIATION_REQUIRED" });
+    expect(port.reconciliationCalls).toBe(lookupsBefore);
+    expect(port.scheduleCalls).toBe(1);
+    expect(port.jobs).toHaveLength(0);
+
+    // An explicit reconciliation proves absence and unlocks exactly one retry.
+    const reconciled = await service.service.reconcileMission(created.missionId);
+    expect(reconciled.execution).toMatchObject({
+      state: "failed_recoverable",
+      reconciliationOutcome: "not_found",
+      recoveryClassification: "SAFE_RETRY_AVAILABLE",
+      retryCount: 0,
+    });
+    expect(reconciled.execution?.nextPermittedActions).toContain("Resume safely");
+
+    const completed = await service.service.resumeSafely(created.missionId);
+    expect(completed.execution).toMatchObject({ state: "completed", retryCount: 1 });
+    expect(port.jobs).toHaveLength(1);
+    expect(port.scheduleCalls).toBe(2);
+    service.database.close();
   });
 
   it("emits deterministic scenario A-E/G evidence summaries", async () => {

@@ -10,9 +10,20 @@
  *     no authoritative response came back,
  *     and Operator cannot infer whether the side effect happened.
  *
- * The claim: in that state CHANTER OS refuses speculative retry, performs an
- * authoritative downstream lookup, and converges on exactly one draft in both
- * possible downstream realities.
+ * The claim: in that state the mission is durably `reconciliation_required`,
+ * every execution-advancing action is refused until an explicit reconciliation
+ * establishes downstream truth, and the mission then converges on exactly one
+ * draft in both possible downstream realities.
+ *
+ * Investigation and execution are separate authorities here:
+ *
+ *   reconcile  investigates; never dispatches, creates, or spends a retry
+ *   resume     executes only what a durable reconciliation already permitted
+ *   stop       escalates to a human, and stays available throughout
+ *
+ * A resume issued before reconciliation returns 409
+ * RECOVERY_RECONCILIATION_REQUIRED having performed zero downstream lookups —
+ * it does not quietly investigate on the operator's behalf.
  *
  *   Reality A  draft exists, response lost   -> bind the existing jobId, no retry
  *   Reality B  draft absent, response lost   -> prove absence, one safe retry
@@ -760,6 +771,7 @@ async function readChild(
   authoritativeQueueId: string | null;
   nextPermittedActions: string[];
   typedErrorCode: string | null;
+  lastConfirmedBoundary: string;
 }> {
   const read = await call(baseUrl, "GET", `/api/runtime-missions/${missionId}`, CONTROL_TOKEN);
   assert.equal(read.status, 200, JSON.stringify(read.body));
@@ -774,7 +786,39 @@ async function readChild(
     authoritativeQueueId: execution.authoritativeQueueId as string | null,
     nextPermittedActions: execution.nextPermittedActions as string[],
     typedErrorCode: typedError === null ? null : text(typedError.code),
+    lastConfirmedBoundary: text(execution.lastConfirmedBoundary),
   };
+}
+
+/**
+ * The full typed refusal a resume must produce while downstream truth is
+ * unknown, asserted on its exact code and its whole identifying payload.
+ */
+function assertReconciliationRefusal(
+  result: HttpResult,
+  childMissionId: string,
+  label: string,
+): void {
+  assert.equal(
+    result.status, 409,
+    `${label}: resume must be refused while truth is unknown: ${JSON.stringify(result.body)}`);
+  assert.equal(result.body.code, "RECOVERY_RECONCILIATION_REQUIRED", `${label}: exact typed code`);
+  const details = record(result.body.details);
+  assert.deepEqual(details, {
+    osMissionId: OS_MISSION_ID,
+    lane: "platform_autoposter_command",
+    currentState: "reconciliation_required",
+    requiredAction: "reconcile",
+  }, `${label}: the refusal must say what is refused and what would permit it`);
+  // Nothing path-like or secret-shaped may ride along on a refusal.
+  const serialized = JSON.stringify(result.body);
+  for (const forbidden of [SUBMIT_TOKEN, CONTROL_TOKEN, LEDGER_TOKEN, RUNTIME_TOKEN, os.tmpdir()]) {
+    assert.ok(!serialized.includes(forbidden), `${label}: the refusal leaked protected material`);
+  }
+  assert.ok(
+    !serialized.includes(childMissionId) || serialized.includes(OS_MISSION_ID),
+    `${label}: refusal identity must be canonical`,
+  );
 }
 
 /** The exact side-effect counter table the brief requires (§9). */
@@ -927,15 +971,36 @@ async function dispatchAmbiguouslyThenReconstruct(
 }
 
 /**
- * The state every scenario must observe immediately after the ambiguity: the OS
- * says truth is unknown, and no execution-advancing action is offered until it
- * is reconciled.
+ * The state every scenario must observe immediately after the ambiguity.
+ *
+ * Both halves are asserted: the child spine's **durable** record, which is the
+ * authority, and the OS projection of it. The durable half is what makes this
+ * a state rather than an advisory hint — it survives reconstruction and it is
+ * what refuses the resume.
  */
-async function assertAmbiguityIsProjected(
+async function assertAmbiguityIsDurable(
   operator: OperatorHarness,
   label: string,
 ): Promise<OsObservation> {
   const interrupted = await readOs(operator.baseUrl, OS_MISSION_ID);
+  const child = await readChild(operator.baseUrl, text(interrupted.childMissionId));
+
+  assert.equal(
+    child.executionState, "reconciliation_required",
+    `${label}: the child spine must durably record that the outcome is unknown`);
+  assert.equal(
+    child.lastConfirmedBoundary, "downstream_request_prepared",
+    `${label}: the last thing durably confirmed was that the request was prepared`);
+  // Repository truth uses "not_started" rather than null for "no reconciliation
+  // has run yet" — the canonical MissionReconciliationOutcome member.
+  assert.equal(
+    child.reconciliationOutcome, "not_started",
+    `${label}: no reconciliation has run yet`);
+  assert.equal(child.retryCount, 0, `${label}: no retry has been spent`);
+  assert.deepEqual(
+    child.nextPermittedActions, ["Reconcile", "Stop / escalate"],
+    `${label}: the owning authority offers investigation and escalation only`);
+
   assert.equal(
     interrupted.status,
     "reconciliation_required",
@@ -969,7 +1034,7 @@ async function assertAmbiguityIsProjected(
 // ---------------------------------------------------------------------------
 
 test(
-  "A1 binds the existing draft when an unobserved dispatch actually created one",
+  "E1 refuses resume, then binds the existing draft when the dispatch did create one",
   { timeout: 180_000 },
   async (context) => {
     const boundary = createAutoPosterBoundary();
@@ -993,7 +1058,7 @@ test(
       providerPublishCalls: 0,
     }, "the side effect happened and no response was ever observed");
 
-    const interrupted = await assertAmbiguityIsProjected(operator, "A1");
+    const interrupted = await assertAmbiguityIsDurable(operator, "E1");
     assert.equal(interrupted.jobId, null, "Operator holds no authoritative downstream identity");
     const draftId = boundary.posts[0]!.id;
     const childMissionId = text(interrupted.childMissionId);
@@ -1007,6 +1072,18 @@ test(
       traceId: interrupted.traceId,
       childMissionId: interrupted.childMissionId,
     };
+
+    // --- Resume is refused, and costs nothing -------------------------------
+    const refusedResume = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
+    assertReconciliationRefusal(refusedResume, childMissionId, "E1");
+    assert.deepEqual(
+      sideEffects(boundary), afterAmbiguity,
+      "the refused resume performed no lookup, no dispatch, no create, no publish");
+    assert.deepEqual(
+      await readChild(operator.baseUrl, childMissionId),
+      await readChild(operator.baseUrl, childMissionId),
+      "durable child truth is stable across the refusal");
 
     // --- Reconcile: exactly one authoritative lookup, zero side effects -----
     const reconciled = await call(
@@ -1079,7 +1156,7 @@ test(
     assert.equal(reread.jobId, draftId);
     assert.deepEqual(sideEffects(boundary), finalCounts);
 
-    console.log(`A1 (Reality A) observed evidence:\n${JSON.stringify({
+    console.log(`E1 (Reality A) observed evidence:\n${JSON.stringify({
       ambiguity: {
         status: interrupted.status,
         laneState: interrupted.laneState,
@@ -1120,7 +1197,7 @@ test(
 // ---------------------------------------------------------------------------
 
 test(
-  "A2 unlocks exactly one safe retry when an unobserved dispatch created nothing",
+  "E2 refuses resume, then unlocks exactly one safe retry when the dispatch created nothing",
   { timeout: 180_000 },
   async (context) => {
     const boundary = createAutoPosterBoundary();
@@ -1144,7 +1221,7 @@ test(
       providerPublishCalls: 0,
     }, "the request reached the boundary and created nothing");
 
-    const interrupted = await assertAmbiguityIsProjected(operator, "A2");
+    const interrupted = await assertAmbiguityIsDurable(operator, "E2");
     assert.equal(interrupted.jobId, null);
     const childMissionId = text(interrupted.childMissionId);
     const identityBefore = {
@@ -1156,6 +1233,20 @@ test(
       traceId: interrupted.traceId,
       childMissionId: interrupted.childMissionId,
     };
+
+    // --- Resume is refused, and costs nothing -------------------------------
+    // Unknown is not absent: with no draft downstream, a speculative retry here
+    // would look harmless and would still be wrong, because nothing yet proves
+    // the first attempt failed to create one.
+    const refusedResume = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
+    assertReconciliationRefusal(refusedResume, childMissionId, "E2");
+    assert.deepEqual(
+      sideEffects(boundary), afterAmbiguity,
+      "the refused resume performed no lookup, no retry, and created no draft");
+    assert.equal(
+      (await readChild(operator.baseUrl, childMissionId)).retryCount, 0,
+      "no retry was spent by the refusal");
 
     // --- Reconcile: prove absence with exactly one lookup -------------------
     const reconciled = await call(
@@ -1222,10 +1313,10 @@ test(
       scheduleRequestAttempts: 2,
       scheduleResponsesObserved: 1,
       durableCreateCalls: 1,
-      // Two explicit reconciliations, plus the one the resume performs itself
-      // immediately before spending the retry — absence is re-proven against
-      // live downstream truth at the moment of acting, not trusted from before.
-      draftLookupCalls: 3,
+      // Exactly the two explicit reconciliations. The resume adds none: it
+      // executes the decision reconciliation already made, and never
+      // re-performs the investigation authority itself.
+      draftLookupCalls: 2,
       draftBindingsFound: 0,
       drafts: 1,
       providerPublishCalls: 0,
@@ -1240,7 +1331,7 @@ test(
     assert.equal(reread.jobId, completed.jobId);
     assert.deepEqual(sideEffects(boundary), finalCounts);
 
-    console.log(`A2 (Reality B) observed evidence:\n${JSON.stringify({
+    console.log(`E2 (Reality B) observed evidence:\n${JSON.stringify({
       ambiguity: {
         status: interrupted.status,
         laneState: interrupted.laneState,
@@ -1272,7 +1363,7 @@ test(
 // ---------------------------------------------------------------------------
 
 test(
-  "A3 keeps retry locked when the reconciliation lookup cannot establish truth",
+  "E3 keeps retry locked when the reconciliation lookup cannot establish truth",
   { timeout: 180_000 },
   async (context) => {
     const boundary = createAutoPosterBoundary();
@@ -1289,7 +1380,7 @@ test(
     const afterAmbiguity = sideEffects(boundary);
     assert.equal(afterAmbiguity.drafts, 1);
     const draftId = boundary.posts[0]!.id;
-    const interrupted = await assertAmbiguityIsProjected(operator, "A3");
+    const interrupted = await assertAmbiguityIsDurable(operator, "E3");
     const childMissionId = text(interrupted.childMissionId);
 
     // --- The lookup itself is now ambiguous ---------------------------------
@@ -1337,20 +1428,16 @@ test(
       "the OS projects that same classification rather than inventing one");
 
     // --- The decisive refusal ----------------------------------------------
-    // A resume issued while the lookup is still broken cannot establish truth,
-    // so it must refuse rather than guess. This is the property that makes the
-    // whole design safe: the retry is locked behind established truth, not
-    // behind an operator remembering to reconcile first.
+    // A failed investigation leaves the mission exactly as unknown as before,
+    // so resume is refused identically — and now without even attempting a
+    // lookup of its own, because investigation is not resume's authority.
     const resumeWhileUnknown = await call(
       operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
-    assert.equal(
-      resumeWhileUnknown.status, 409,
-      `resume must refuse while truth is unknown: ${JSON.stringify(resumeWhileUnknown.body)}`);
-    assert.equal(text(resumeWhileUnknown.body.code), "PLATFORM_COMMAND_EXECUTION_INCOMPLETE");
+    assertReconciliationRefusal(resumeWhileUnknown, childMissionId, "E3");
     assert.deepEqual(sideEffects(boundary), {
       ...afterAmbiguity,
-      draftLookupCalls: 2,
-    }, "the refused resume attempted one more lookup and created nothing");
+      draftLookupCalls: 1,
+    }, "the refused resume performed no lookup of its own and created nothing");
 
     const afterRefusal = await readOs(operator.baseUrl, OS_MISSION_ID);
     assert.equal(afterRefusal.status, "reconciliation_required", "the refusal did not soften state");
@@ -1374,14 +1461,14 @@ test(
       scheduleRequestAttempts: 1,
       scheduleResponsesObserved: 0,
       durableCreateCalls: 1,
-      draftLookupCalls: 3,
+      draftLookupCalls: 2,
       draftBindingsFound: 1,
       drafts: 1,
       providerPublishCalls: 0,
-    }, "two failed lookups then a successful one still yield exactly one draft");
+    }, "a failed lookup then a successful one still yield exactly one draft");
     assertNothingPublished(boundary);
 
-    console.log(`A3 (lookup failure) observed evidence:\n${JSON.stringify({
+    console.log(`E3 (lookup failure) observed evidence:\n${JSON.stringify({
       afterFailedLookup: {
         status: afterFailure.status,
         laneState: afterFailure.laneState,
@@ -1402,74 +1489,139 @@ test(
 );
 
 // ---------------------------------------------------------------------------
-// D1 — the observed deviation, pinned
+// E5 — repeated and out-of-order control actions
 //
-// The brief specifies that `resume` be refused with a typed 409 until a
-// separate `reconcile` call has run. This repository does not work that way: a
-// Platform `resume` reaching a child in `failed_recoverable` performs the
-// authoritative lookup itself (missionGraphService dispatchNode) and only then
-// decides, so a resume issued during ambiguity is accepted rather than refused.
-//
-// That difference is in the operator gesture, not in the safety property — A3
-// already proves the retry is locked whenever truth cannot be established. This
-// test pins the deviation so it stays deliberate: whichever reality is true
-// underneath, an ambiguous resume must still converge on exactly one draft and
-// must never publish.
+// Every refusal below must leave every downstream counter untouched. This is
+// where "a command to learn what happened never becomes permission to act" is
+// checked from the other direction: by trying to make it happen.
 // ---------------------------------------------------------------------------
 
-for (const reality of [
-  { name: "A: the draft already exists", transport: "drop_after_create" as ScheduleTransport,
-    expectedAttempts: 1, expectedClassification: "RECOVERED_EXISTING_DOWNSTREAM_RESULT" },
-  { name: "B: no draft exists", transport: "drop_before_create" as ScheduleTransport,
-    expectedAttempts: 2, expectedClassification: "SAFE_RETRY_COMPLETED" },
-]) {
-  test(
-    `D1 resume during ambiguity reconciles before acting and never duplicates (Reality ${reality.name})`,
-    { timeout: 180_000 },
-    async (context) => {
-      const boundary = createAutoPosterBoundary();
-      const autoPoster = await startAutoPoster(boundary);
-      const root = disposableRoot();
-      context.after(async () => { await autoPoster.stop().catch(() => undefined); });
+test(
+  "E5 refuses repeated and out-of-order control actions without any downstream effect",
+  { timeout: 180_000 },
+  async (context) => {
+    const boundary = createAutoPosterBoundary();
+    const autoPoster = await startAutoPoster(boundary);
+    const root = disposableRoot();
+    context.after(async () => { await autoPoster.stop().catch(() => undefined); });
 
-      const { operator, graphHash } = await dispatchAmbiguouslyThenReconstruct(
-        root, boundary, autoPoster.baseUrl, reality.transport);
-      context.after(async () => { await operator.stop().catch(() => undefined); });
+    const { operator, graphHash } = await dispatchAmbiguouslyThenReconstruct(
+      root, boundary, autoPoster.baseUrl, "drop_after_create");
+    context.after(async () => { await operator.stop().catch(() => undefined); });
 
-      const interrupted = await assertAmbiguityIsProjected(operator, "D1");
-      assert.equal(interrupted.jobId, null);
+    const interrupted = await assertAmbiguityIsDurable(operator, "E6");
+    const childMissionId = text(interrupted.childMissionId);
+    const ambiguous = sideEffects(boundary);
 
-      // No explicit reconcile: straight to resume while the outcome is unknown.
-      const resumed = await call(
+    // Repeated resume during ambiguity: refused identically every time.
+    for (const attempt of [1, 2, 3]) {
+      const refused = await call(
         operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
-      assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
-      const completed = observe(resumed.body);
+      assertReconciliationRefusal(refused, childMissionId, `E5 resume attempt ${attempt}`);
+      assert.deepEqual(
+        sideEffects(boundary), ambiguous,
+        `E5: refused resume ${attempt} changed a downstream counter`);
+    }
 
-      assert.equal(completed.status, "completed");
-      assert.equal(
-        completed.recoveryClassification, reality.expectedClassification,
-        "the recovery must be classified from the lookup result, never assumed");
+    // A resume carrying the wrong graph hash is refused on the binding, and
+    // still never reaches downstream.
+    const wrongHash = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN,
+      { graphHash: "0".repeat(64) });
+    assert.equal(wrongHash.status, 409, JSON.stringify(wrongHash.body));
+    assert.equal(wrongHash.body.code, "OPERATOR_GRAPH_APPROVAL_HASH_MISMATCH");
+    assert.deepEqual(sideEffects(boundary), ambiguous);
 
-      const counts = sideEffects(boundary);
-      assert.equal(counts.drafts, 1, "exactly one draft exists in both realities");
-      assert.equal(counts.durableCreateCalls, 1, "exactly one durable create ever happened");
-      assert.equal(
-        counts.draftLookupCalls, 1,
-        "the resume performed the authoritative lookup itself before acting");
-      assert.equal(
-        counts.scheduleRequestAttempts, reality.expectedAttempts,
-        "presence binds without redispatch; absence dispatches exactly once more");
-      assert.equal(completed.jobId, boundary.posts[0]!.id);
-      assertNothingPublished(boundary);
+    // Reconcile, then complete through the explicit two-step path.
+    const reconciled = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/reconcile`, CONTROL_TOKEN, {});
+    assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
+    const resumed = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
+    assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+    const completed = observe(resumed.body);
+    assert.equal(completed.status, "completed");
+    const settled = sideEffects(boundary);
+    assert.equal(settled.drafts, 1);
 
-      console.log(`D1 (Reality ${reality.name}) observed evidence:\n${JSON.stringify({
-        ambiguityStatus: interrupted.status,
-        ambiguityActions: interrupted.nextPermittedActions,
-        resumeStatus: resumed.status,
-        recoveryClassification: completed.recoveryClassification,
-        jobId: completed.jobId,
-        counters: counts,
-      }, null, 2)}`);
-    },
-  );
-}
+    // Repeated resume after completion is replay-only.
+    const replayed = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
+    assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+    assert.equal(observe(replayed.body).jobId, completed.jobId, "replay returns the same jobId");
+    assert.deepEqual(sideEffects(boundary), settled, "replay created and published nothing");
+
+    // Reconcile after completion is a typed refusal from the owning authority.
+    const reconcileAfterDone = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/reconcile`, CONTROL_TOKEN, {});
+    assert.equal(reconcileAfterDone.status, 409, JSON.stringify(reconcileAfterDone.body));
+    assert.equal(reconcileAfterDone.body.code, "RECOVERY_ACTION_NOT_PERMITTED");
+    assert.deepEqual(sideEffects(boundary), settled);
+    assertNothingPublished(boundary);
+
+    console.log(`E5 (repeated actions) observed evidence:\n${JSON.stringify({
+      refusedResumesDuringAmbiguity: 3,
+      wrongHashCode: wrongHash.body.code,
+      replayJobId: observe(replayed.body).jobId,
+      reconcileAfterCompletionCode: reconcileAfterDone.body.code,
+      counters: { ambiguous, settled },
+    }, null, 2)}`);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// E6 — stop stays available throughout ambiguity
+//
+// Escalating to a human must never be gated on knowing what happened
+// downstream: that is precisely when a human is most needed.
+// ---------------------------------------------------------------------------
+
+test(
+  "E6 stops an ambiguous mission and refuses every later control action",
+  { timeout: 180_000 },
+  async (context) => {
+    const boundary = createAutoPosterBoundary();
+    const autoPoster = await startAutoPoster(boundary);
+    const root = disposableRoot();
+    context.after(async () => { await autoPoster.stop().catch(() => undefined); });
+
+    // Reality A underneath: a real draft exists and must survive the stop
+    // untouched and unpublished.
+    const { operator, graphHash } = await dispatchAmbiguouslyThenReconstruct(
+      root, boundary, autoPoster.baseUrl, "drop_after_create");
+    context.after(async () => { await operator.stop().catch(() => undefined); });
+
+    const interrupted = await assertAmbiguityIsDurable(operator, "E6");
+    assert.ok(
+      interrupted.nextPermittedActions.includes("stop"),
+      "stop must be offered while the outcome is unknown");
+    const ambiguous = sideEffects(boundary);
+    assert.equal(ambiguous.drafts, 1);
+
+    const stopped = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/stop`, CONTROL_TOKEN,
+      { cancelledBy: "founder", reason: "Escalated while the downstream outcome was unknown." });
+    assert.equal(stopped.status, 200, JSON.stringify(stopped.body));
+    const observation = observe(stopped.body);
+    assert.equal(observation.status, "stopped", "stop produces the canonical stopped state");
+    assert.deepEqual(observation.nextPermittedActions, []);
+    assert.deepEqual(sideEffects(boundary), ambiguous, "stopping changed no downstream count");
+
+    // The stop is durable, and every later control action is refused.
+    assert.equal((await readOs(operator.baseUrl, OS_MISSION_ID)).status, "stopped");
+    const resumeAfterStop = await call(
+      operator.baseUrl, "POST", `/api/os/missions/${OS_MISSION_ID}/resume`, CONTROL_TOKEN, { graphHash });
+    assert.equal(resumeAfterStop.status, 409, JSON.stringify(resumeAfterStop.body));
+    assert.ok(text(resumeAfterStop.body.code).length > 0, "the refusal is typed");
+    assert.deepEqual(sideEffects(boundary), ambiguous);
+    assert.equal((await readOs(operator.baseUrl, OS_MISSION_ID)).status, "stopped");
+    assertNothingPublished(boundary);
+
+    console.log(`E6 (stop during ambiguity) observed evidence:\n${JSON.stringify({
+      ambiguityActions: interrupted.nextPermittedActions,
+      stoppedStatus: observation.status,
+      resumeAfterStopCode: resumeAfterStop.body.code,
+      counters: ambiguous,
+    }, null, 2)}`);
+  },
+);

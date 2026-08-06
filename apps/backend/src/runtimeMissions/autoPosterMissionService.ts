@@ -358,7 +358,15 @@ export function permittedRecoveryActions(execution: MissionExecutionRecord): Aut
       ? ["Reconcile", "Resume safely", "Stop / escalate"]
       : ["Reconcile", "Stop / escalate"];
   }
-  if (execution.currentState === "reconciliation_required") return ["Stop / escalate"];
+  if (execution.currentState === "reconciliation_required") {
+    // A conflict is two durable records for one exact scope: no lookup can
+    // resolve that, so only a human can. Every other reconciliation_required
+    // is the ambiguous case an authoritative lookup still can resolve, so
+    // Reconcile is offered — and Resume safely never is, from either.
+    return execution.reconciliationOutcome === "conflict"
+      ? ["Stop / escalate"]
+      : ["Reconcile", "Stop / escalate"];
+  }
   if (execution.currentState === "recovery_in_progress") return ["Reconcile"];
   return [];
 }
@@ -1470,7 +1478,18 @@ export class AutoPosterMissionService {
     const recoverable = runtimeResult.status === "unavailable"
       || runtimeResult.status === "failed"
       || commercialDenial;
-    const failedState = recoverable ? "failed_recoverable" : "failed_terminal";
+    // An unreachable downstream is the one outcome Operator cannot interpret:
+    // the request left, nothing authoritative came back, and the side effect
+    // may or may not exist. That is not an ordinary recoverable failure and
+    // must not be resumable — it is durably reconciliation_required until an
+    // authoritative lookup establishes which world we are in. Every other
+    // failure here was actually observed, so it keeps its existing state.
+    const outcomeUnobserved = runtimeResult.status === "unavailable";
+    const failedState = outcomeUnobserved
+      ? "reconciliation_required"
+      : recoverable
+        ? "failed_recoverable"
+        : "failed_terminal";
     const failedAt = this.now().toISOString();
     withTransaction(this.database, () => {
       this.ensureLegacyMissionLedgerLineage(mission.missionId);
@@ -1486,7 +1505,9 @@ export class AutoPosterMissionService {
       const current = this.journal.requireExecution(mission.missionId);
       this.journal.transition(mission.missionId, failedState, {
         actor: "chanter-agent-runtime",
-        reason: commercialDenial
+        reason: outcomeUnobserved
+          ? "The request left Operator and no authoritative response returned; downstream presence is unknown until it is reconciled."
+          : commercialDenial
           ? "Runtime returned a typed commercial denial; explicit reconciliation is required before a governed retry."
           : recoverable
           ? "Runtime could not prove whether the downstream boundary completed; reconciliation is required before retry."
@@ -1736,7 +1757,13 @@ export class AutoPosterMissionService {
     withTransaction(this.database, () => {
       this.ensureLegacyMissionLedgerLineage(mission.missionId);
       let currentExecution = this.journal.requireExecution(mission.missionId);
-      if (currentExecution.currentState !== "failed_recoverable") {
+      // reconciliation_required is already the durable "interrupted, outcome
+      // unknown" record, so it needs no synthetic interruption marker — it is
+      // exactly the state this claim exists to resolve.
+      if (
+        currentExecution.currentState !== "failed_recoverable"
+        && currentExecution.currentState !== "reconciliation_required"
+      ) {
         const interruptedAt = this.now().toISOString();
         const interruptedError = {
           code: "RECOVERY_INTERRUPTED_EXECUTION",
@@ -1796,7 +1823,11 @@ export class AutoPosterMissionService {
         const currentExecution = this.journal.requireExecution(mission.missionId);
         this.journal.transition(
           mission.missionId,
-          unavailable ? "failed_recoverable" : "failed_terminal",
+          // A lookup that could not reach AutoPoster establishes nothing, so
+          // the mission stays exactly as unknown as it was: still
+          // reconciliation_required, still no retry unlocked. Timeout is not
+          // absence, and a failed investigation is not a failed mission.
+          unavailable ? "reconciliation_required" : "failed_terminal",
           {
             actor: ACTOR_ID,
             reason: typedError.message,
@@ -1968,6 +1999,16 @@ export class AutoPosterMissionService {
   async resumeSafely(missionId: string): Promise<AutoPosterRuntimeMission> {
     const mission = this.getMission(missionId);
     const execution = this.journal.requireExecution(mission.missionId);
+    // Investigation and execution are separate authorities. While downstream
+    // truth is unknown, resume carries no permission to act and says so with
+    // the specific code, rather than the generic not-permitted refusal.
+    if (execution.currentState === "reconciliation_required") {
+      throw new OperatorError(
+        "Downstream truth is unknown; an explicit reconciliation must establish it before any resume.",
+        409,
+        "RECOVERY_RECONCILIATION_REQUIRED",
+      );
+    }
     this.assertRecoveryActionAllowed(execution, "Resume safely");
     if (!mission.approvedBy) {
       throw new OperatorError("Mission approval is missing; recovery cannot bypass approval.", 409);

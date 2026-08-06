@@ -76,6 +76,7 @@ import {
   type OsMissionState,
   type OsMissionTypedError,
   type OsMissionView,
+  type ParsedOsMissionId,
 } from "./osMissionContract.js";
 
 /**
@@ -155,22 +156,6 @@ function childOwnsExecution(execution: AutoPosterMissionExecutionView | null): b
     && execution.state !== "failed_terminal";
 }
 
-/**
- * True when the owning child authority will not let execution advance until an
- * authoritative downstream lookup has established truth: it offers Reconcile
- * and withholds Resume safely.
- *
- * This reads the authority's own decision rather than making one here. It is
- * how "the request left, no response came back, and nobody knows whether the
- * side effect happened" is told apart from an ordinary recoverable failure — a
- * distinction the operator must see, because in the first case the only safe
- * next act is to investigate.
- */
-function childRequiresReconciliation(execution: AutoPosterMissionExecutionView | null): boolean {
-  if (!childOwnsExecution(execution) || execution === null) return false;
-  return execution.nextPermittedActions.includes("Reconcile")
-    && !execution.nextPermittedActions.includes("Resume safely");
-}
 
 export class OsMissionControlService {
   constructor(private readonly dependencies: OsMissionControlServiceDependencies) {}
@@ -388,9 +373,51 @@ export class OsMissionControlService {
     }
   }
 
+  /**
+   * Re-throws a lane's reconciliation refusal with the canonical context an
+   * operator needs to act on it.
+   *
+   * The decision is entirely the owning lane's — only its description is
+   * enriched here. Every value is a canonical identifier or a durable state
+   * name, so nothing path-like or secret-shaped can reach the response.
+   */
+  private describeReconciliationRefusal(parsed: ParsedOsMissionId, error: unknown): unknown {
+    if (
+      !(error instanceof OperatorError)
+      || error.code !== "RECOVERY_RECONCILIATION_REQUIRED"
+      || error.details
+    ) {
+      return error;
+    }
+    const osMissionId = osMissionIdFor(parsed.lane, parsed.laneNativeId);
+    let currentState = "unknown";
+    try {
+      currentState = this.get(osMissionId).status;
+    } catch {
+      // The refusal is the answer even if the projection cannot be rebuilt.
+    }
+    return new OperatorError(error.message, error.statusCode, error.code, {
+      osMissionId,
+      lane: parsed.lane,
+      currentState,
+      requiredAction: "reconcile",
+    });
+  }
+
   /** Continues an interrupted execution without any speculative duplicate. */
   async resume(osMissionIdValue: unknown, rawBody: unknown): Promise<OsMissionView> {
     const parsed = this.requireParsedId(osMissionIdValue);
+    try {
+      return await this.resumeInLane(parsed, rawBody);
+    } catch (error) {
+      throw this.describeReconciliationRefusal(parsed, error);
+    }
+  }
+
+  private async resumeInLane(
+    parsed: ParsedOsMissionId,
+    rawBody: unknown,
+  ): Promise<OsMissionView> {
     switch (parsed.lane) {
       case "generic_governed_task":
         return this.projectGenericMission(
@@ -645,18 +672,14 @@ export class OsMissionControlService {
           : graph
             ? osStateFromGraphState(graph.status)
             : "approved";
-        const resolved = command.lifecycleState === "failed_recoverable"
+        // An attempt whose downstream outcome was never observed is durably
+        // reconciliation_required in the child spine, and that state is more
+        // severe than recoverable, so it survives this projection unchanged.
+        // No inference is needed here: the OS reports the lane's own truth.
+        return command.lifecycleState === "failed_recoverable"
           && !MORE_SEVERE_THAN_RECOVERABLE.has(derived)
           ? "failed_recoverable"
           : derived;
-        // An attempt whose downstream outcome was never observed is not an
-        // ordinary recoverable failure, and reporting it as one invites exactly
-        // the speculative retry that duplicates real-world work. The owning
-        // child authority already withholds every execution-advancing action
-        // here; the OS names that condition rather than flattening it.
-        return resolved === "failed_recoverable" && childRequiresReconciliation(childExecution)
-          ? "reconciliation_required"
-          : resolved;
       }
     }
   }

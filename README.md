@@ -302,7 +302,22 @@ selecting on `runtimeMissionId` and then requiring exact equality on the
 idempotency key, payload hash, action, workspace, provider, account, and
 scheduled time — no fuzzy matching and no inference.
 
-Both realities converge on exactly one draft:
+Such a dispatch is durably `reconciliation_required` in the child mission spine
+— a state of its own, not an ordinary recoverable failure — and investigation
+and execution are separate authorities from that point on:
+
+| Action | Authority |
+|---|---|
+| `reconcile` | investigates; never dispatches, creates a draft, or spends a retry |
+| `resume` | executes only what a durable reconciliation already permitted |
+| `stop` | escalates to a human, and stays available throughout |
+
+A `resume` issued before reconciliation returns `409
+RECOVERY_RECONCILIATION_REQUIRED` **having performed zero downstream lookups**.
+It does not quietly investigate on the operator's behalf, and the refusal names
+the mission, its lane, its current state, and the action that would unblock it.
+
+Both realities then converge on exactly one draft:
 
 - **Reality A** (draft exists) — one attempt, one durable create, the existing
   `jobId` is bound, no redispatch;
@@ -310,8 +325,9 @@ Both realities converge on exactly one draft:
   and spent exactly once, two attempts, one durable create.
 
 A reconciliation lookup that itself fails is recorded as `unavailable`, never as
-absence: the state stays `reconciliation_required`, no retry is unlocked, and a
-resume attempted while truth is still unknown is refused with a typed 409.
+absence: the state stays `reconciliation_required` and no retry is unlocked. A
+`conflict` — two durable records for one exact scope — is the one
+`reconciliation_required` no lookup can resolve, so it offers escalation only.
 
 ### Canonical validation gate
 

@@ -38,6 +38,13 @@ export class OperatorError extends Error {
     message: string,
     public readonly statusCode: number,
     public readonly code?: string,
+    /**
+     * Optional structured context for a typed refusal — what was refused and
+     * what would make it permitted. Serialized verbatim onto the error
+     * response, so it must carry only canonical identifiers and durable state
+     * names: never a filesystem path, a token, or any protected value.
+     */
+    public readonly details?: Readonly<Record<string, string>>,
   ) {
     super(message);
   }
