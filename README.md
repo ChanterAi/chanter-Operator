@@ -226,6 +226,34 @@ Outputs (git-ignored under `var/os-unified/`, override with `--out <dir>`):
 - `terminal-result.json` — verdict, observed identities, per-step observations;
 - `unified-evidence.md` — the run's evidence artifact.
 
+### Runbook — unified recovery and reconciliation proof
+
+```powershell
+npm run test:os-recovery
+```
+
+`os:unified` proves both lanes' happy paths, replay, and typed conflict. This
+proof covers what that one cannot: it interrupts real executions at real
+durable boundaries through the mission spine's injectable failure seam, then
+drives the whole recovery through `/api/os/missions/:osMissionId/{reconcile,
+resume,stop}` over real HTTP, asserting the projected OS state *and* the
+downstream side-effect count at every step. It proves that
+
+- a result observed but not yet journaled projects as
+  `downstream_result_observed`, never `completed`;
+- an ambiguous downstream outcome offers `reconcile` and `stop` but **not**
+  `resume`, so retry stays locked until downstream truth is known;
+- reconciliation reads downstream truth exactly once and creates nothing;
+- exactly one bounded safe retry is then permitted, and the whole recovery
+  leaves exactly one downstream artifact;
+- a human stop projects the canonical `stopped` state — not `failed_terminal` —
+  while the lane's own state is preserved verbatim.
+
+It runs fully in process against disposable state: no server process, no Loop
+Governor subprocess, no network, a few seconds end to end. It does not re-prove
+lane-level recovery, which the AutoPoster recovery suite and the generic
+mission spine suite already own.
+
 ### Canonical validation gate
 
 `npm run os:assembly` proves the generic mission path and `npm run os:unified`
@@ -237,7 +265,7 @@ prove them — from drifting:
 npm run validate:os
 ```
 
-It runs eight stages in order, stopping at the first failure and exiting with
+It runs nine stages in order, stopping at the first failure and exiting with
 that stage's real exit code:
 
 1. `typecheck` — repository typecheck (backend + frontend);
@@ -247,19 +275,23 @@ that stage's real exit code:
    `tools/persisted-approval-authority`, `tools/platform-canonical`, and
    `tools/resilience-evidence`;
 3. `build` — production build;
-4. `test:platform-canonical:e2e` — canonical Platform command authority proof:
+4. `test:os-recovery` — the unified recovery and reconciliation proof above.
+   It is the cheapest proof in the gate (fully in process, no server, no
+   subprocess, no network), so a broken recovery contract is reported in
+   seconds rather than after the multi-minute cross-repository proofs;
+5. `test:platform-canonical:e2e` — canonical Platform command authority proof:
    one platform command becomes exactly one **unapproved** AutoPoster draft
    under persisted human authority, replays across an Operator restart without
    creating a second draft, refuses a conflicting payload with a typed error,
    and never publishes;
-5. `test:phase2c:mission` — Phase 2C generic mission proof;
-6. `test:approval-migration:e2e` — signed approval migration proof;
-7. `os:assembly` — the end-to-end operational assembly proof above;
-8. `os:unified` — the unified mission control plane proof above.
+6. `test:phase2c:mission` — Phase 2C generic mission proof;
+7. `test:approval-migration:e2e` — signed approval migration proof;
+8. `os:assembly` — the end-to-end operational assembly proof above;
+9. `os:unified` — the unified mission control plane proof above.
 
-Stage 8 is last by cost and by diagnostic value: it drives both lanes, a real
+Stage 9 is last by cost and by diagnostic value: it drives both lanes, a real
 Loop Governor child process, and a real AutoPoster boundary, so the narrower
-single-lane stage 7 is the more useful first signal when something breaks.
+single-lane stage 8 is the more useful first signal when something breaks.
 
 Stage 2 exists because these tool surfaces sit outside the backend program,
 which compiles only `src/`. Without it a proof harness can rot silently, which

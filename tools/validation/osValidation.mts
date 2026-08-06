@@ -30,6 +30,14 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
   Object.freeze({ name: "Repository typecheck (backend + frontend)", script: "typecheck" }),
   Object.freeze({ name: "Tools static typecheck", script: "typecheck:tools" }),
   Object.freeze({ name: "Production build", script: "build" }),
+  // Cheapest proof in the gate: fully in-process, no server, no subprocess, no
+  // network. It interrupts real executions at real durable boundaries, so a
+  // broken recovery contract is reported in seconds rather than after the
+  // multi-minute cross-repository proofs below.
+  Object.freeze({
+    name: "OS unified recovery and reconciliation proof",
+    script: "test:os-recovery",
+  }),
   Object.freeze({
     name: "Canonical Platform command authority proof",
     script: "test:platform-canonical:e2e",

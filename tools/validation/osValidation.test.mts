@@ -119,6 +119,7 @@ describe("CHANTER OS validation orchestration", () => {
         "typecheck",
         "typecheck:tools",
         "build",
+        "test:os-recovery",
         "test:platform-canonical:e2e",
         "test:phase2c:mission",
         "test:approval-migration:e2e",
@@ -126,6 +127,25 @@ describe("CHANTER OS validation orchestration", () => {
         "os:unified",
       ],
     );
+  });
+
+  it("orders the in-process recovery proof ahead of every cross-repository proof", () => {
+    const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
+    const recovery = scripts.indexOf("test:os-recovery");
+
+    // Cheapest and most diagnostic first is the gate's ordering contract, and
+    // the recovery proof is the only proof that needs no server, subprocess,
+    // or network at all.
+    for (const slower of [
+      "test:platform-canonical:e2e",
+      "test:phase2c:mission",
+      "test:approval-migration:e2e",
+      "os:assembly",
+      "os:unified",
+    ]) {
+      assert.ok(recovery < scripts.indexOf(slower), `recovery must precede ${slower}`);
+    }
+    assert.ok(recovery > scripts.indexOf("build"), "static checks and the build still come first");
   });
 });
 
@@ -153,6 +173,22 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.equal(outcome.exitCode, 11, "the failing stage's real exit code is preserved");
     assert.equal(started.includes("os:unified"), false, "the unified proof must never start");
     assert.deepEqual(outcome.skipped, ["OS unified mission control plane"]);
+  });
+
+  it("skips every proof after a failing in-process recovery proof", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "test:os-recovery": 5 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.exitCode, 5);
+    assert.deepEqual(
+      started,
+      ["typecheck", "typecheck:tools", "build", "test:os-recovery"],
+      "no cross-repository proof may start after the cheap recovery proof fails",
+    );
+    assert.equal(outcome.skipped.length, 5);
   });
 
   it("preserves the unified proof's exact exit code and completes nothing after it", async () => {
