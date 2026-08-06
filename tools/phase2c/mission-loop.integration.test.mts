@@ -49,6 +49,7 @@ const [
   { createAutoPosterRuntimeMissionExecutor },
   { OperatorService },
   { ensureWorkspace },
+  { approvalAuthorityFixtureFor, cleanupApprovalAuthorityFixtures },
 ] = await Promise.all([
   import("../../apps/backend/src/app.js"),
   import("../../apps/backend/src/audit/auditLogger.js"),
@@ -61,6 +62,7 @@ const [
   import("../../apps/backend/src/runtimeMissions/autoPosterRuntime.js"),
   import("../../apps/backend/src/services/operatorService.js"),
   import("../../apps/backend/src/workspace/pathGuard.js"),
+  import("../../apps/backend/tests/helpers/approvalAuthorityFixture.js"),
 ]);
 
 const operatorRoot = path.resolve(import.meta.dirname, "../..");
@@ -117,12 +119,17 @@ function startOperator(
     }),
     { agentRunLedgerService: ledger, protectedValues },
   );
+  // Approval-required execution is authorized only by a persisted, signed
+  // approval bound to an exact repository revision. The binding is keyed by the
+  // database path so a restart against the same durable mission universe keeps
+  // the same checkpoints, observations, and claims.
   const executor = createLoopGovernorMissionExecutor({
     pythonExecutable,
     governorRoot,
     dataDir: governorDataDir,
     timeoutMs: 60_000,
     timeoutValid: true,
+    approvalAuthority: approvalAuthorityFixtureFor(databasePath),
   });
   const generic = new GenericMissionService(database, executor, {
     agentRunLedgerService: ledger,
@@ -165,6 +172,7 @@ function restoreEnvironment(): void {
 
 test.after(() => {
   restoreEnvironment();
+  cleanupApprovalAuthorityFixtures();
 });
 
 async function postJson(

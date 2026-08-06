@@ -115,6 +115,44 @@ npm run release:report   # Release Operator: write evidence report
 npm run mission:compile -- --intent "..."   # Mission Compiler
 ```
 
+## Runbook — CHANTER OS end-to-end operational assembly
+
+One command proves the canonical CHANTER OS mission path end to end, locally,
+against disposable state:
+
+```powershell
+npm run os:assembly
+```
+
+It submits `tools/os-assembly/mission-envelope.example.json` to a real Operator
+server process (the production `createRuntime()` wiring), then proves:
+
+1. submission is durable and returns `approval_required` with no side effect;
+2. approval is refused without the independent control capability;
+3. a persisted, signed approval — bound to an exact repository revision —
+   executes through Agent Runtime into **exactly one** Loop Governor manual
+   (agent-frozen) task and relay loop;
+4. the Operator process is killed abruptly and restarted against the same
+   durable state;
+5. replaying the same mission returns the same task/loop and creates no
+   duplicate;
+6. the same mission ID carrying a different payload is refused with
+   `409 OPERATOR_MISSION_PAYLOAD_MISMATCH`.
+
+Prerequisites: an absolute `python` on `PATH` (override with
+`LOOP_GOVERNOR_PYTHON`) and `chanter-loop.governor` checked out beside this
+repository. Nothing publishes, deploys, or touches a live product checkout, and
+real coding-agent execution stays frozen throughout.
+
+Outputs (git-ignored under `var/os-assembly/`, override with `--out <dir>`):
+
+- `terminal-result.json` — machine-readable terminal result (verdict, observed
+  mission/task/loop IDs, payload hash, per-step observations);
+- `assembly-evidence.md` — the run's evidence artifact.
+
+Add `--keep` to retain the temporary working state for inspection. The command
+exits non-zero on any failed step.
+
 ## Related in-repo docs
 
 - `tools/release-operator/README.md`
