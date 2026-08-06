@@ -30,6 +30,10 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
   Object.freeze({ name: "Repository typecheck (backend + frontend)", script: "typecheck" }),
   Object.freeze({ name: "Tools static typecheck", script: "typecheck:tools" }),
   Object.freeze({ name: "Production build", script: "build" }),
+  Object.freeze({
+    name: "Canonical Platform command authority proof",
+    script: "test:platform-canonical:e2e",
+  }),
   Object.freeze({ name: "Phase 2C generic mission proof", script: "test:phase2c:mission" }),
   Object.freeze({ name: "Signed approval migration E2E", script: "test:approval-migration:e2e" }),
   Object.freeze({ name: "OS end-to-end operational assembly", script: "os:assembly" }),

@@ -119,6 +119,7 @@ describe("CHANTER OS validation orchestration", () => {
         "typecheck",
         "typecheck:tools",
         "build",
+        "test:platform-canonical:e2e",
         "test:phase2c:mission",
         "test:approval-migration:e2e",
         "os:assembly",

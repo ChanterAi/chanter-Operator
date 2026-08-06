@@ -163,8 +163,8 @@ prove it — from drifting:
 npm run validate:os
 ```
 
-It runs six stages in order, stopping at the first failure and exiting with that
-stage's real exit code:
+It runs seven stages in order, stopping at the first failure and exiting with
+that stage's real exit code:
 
 1. `typecheck` — repository typecheck (backend + frontend);
 2. `typecheck:tools` — static typecheck of the CHANTER OS tool surfaces via
@@ -172,9 +172,14 @@ stage's real exit code:
    `tools/validation`, `tools/persisted-approval-authority`,
    `tools/platform-canonical`, and `tools/resilience-evidence`;
 3. `build` — production build;
-4. `test:phase2c:mission` — Phase 2C generic mission proof;
-5. `test:approval-migration:e2e` — signed approval migration proof;
-6. `os:assembly` — the end-to-end operational assembly proof above.
+4. `test:platform-canonical:e2e` — canonical Platform command authority proof:
+   one platform command becomes exactly one **unapproved** AutoPoster draft
+   under persisted human authority, replays across an Operator restart without
+   creating a second draft, refuses a conflicting payload with a typed error,
+   and never publishes;
+5. `test:phase2c:mission` — Phase 2C generic mission proof;
+6. `test:approval-migration:e2e` — signed approval migration proof;
+7. `os:assembly` — the end-to-end operational assembly proof above.
 
 Stage 2 exists because these tool surfaces sit outside the backend program,
 which compiles only `src/`. Without it a proof harness can rot silently, which

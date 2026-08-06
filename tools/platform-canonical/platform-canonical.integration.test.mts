@@ -79,6 +79,7 @@ const [
   { createAutoPosterRuntimeMissionExecutor },
   { OperatorService },
   { ensureWorkspace },
+  { approvalAuthorityFixtureFor, cleanupApprovalAuthorityFixtures },
 ] = await Promise.all([
   import("../../apps/backend/src/app.js"),
   import("../../apps/backend/src/audit/auditLogger.js"),
@@ -98,6 +99,7 @@ const [
   import("../../apps/backend/src/runtimeMissions/autoPosterRuntime.js"),
   import("../../apps/backend/src/services/operatorService.js"),
   import("../../apps/backend/src/workspace/pathGuard.js"),
+  import("../../apps/backend/tests/helpers/approvalAuthorityFixture.js"),
 ]);
 
 const require = createRequire(import.meta.url);
@@ -395,7 +397,14 @@ async function startOperator(
   root: string,
   autoPosterBaseUrl: string,
 ): Promise<RunningOperator> {
-  const database = createDatabase(path.join(root, "operator.sqlite"));
+  const databasePath = path.join(root, "operator.sqlite");
+  const database = createDatabase(databasePath);
+  // Approval-required execution is authorized only by a persisted, signed
+  // approval bound to an exact repository revision. Production wires one
+  // authority into both mission executors (runtime.ts); this mirrors that.
+  // Keyed by database path so a replay against the same durable mission
+  // universe reuses the same checkpoints, observations, and claims.
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
   const protectedValues = [
     SUBMIT_TOKEN,
     CONTROL_TOKEN,
@@ -416,6 +425,7 @@ async function startOperator(
     userId: OWNER_ID,
     timeoutMs: 5_000,
     timeoutValid: true,
+    approvalAuthority,
   });
   const runtimeMissions = new AutoPosterMissionService(database, executor, {
     agentRunLedgerService: ledger,
@@ -425,7 +435,13 @@ async function startOperator(
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      {
+        pythonExecutable: "",
+        governorRoot: "",
+        dataDir: "",
+        timeoutValid: true,
+        approvalAuthority,
+      },
       { port: loopPort() },
     ),
     {
@@ -601,6 +617,7 @@ after(() => {
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+  cleanupApprovalAuthorityFixtures();
 });
 
 test(
