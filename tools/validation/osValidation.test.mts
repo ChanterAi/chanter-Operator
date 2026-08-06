@@ -120,6 +120,7 @@ describe("CHANTER OS validation orchestration", () => {
         "typecheck:tools",
         "build",
         "test:os-recovery",
+        "test:os-platform-recovery",
         "test:platform-canonical:e2e",
         "test:phase2c:mission",
         "test:approval-migration:e2e",
@@ -129,13 +130,13 @@ describe("CHANTER OS validation orchestration", () => {
     );
   });
 
-  it("orders the in-process recovery proof ahead of every cross-repository proof", () => {
+  it("orders both in-process recovery proofs ahead of every cross-repository proof", () => {
     const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
     const recovery = scripts.indexOf("test:os-recovery");
+    const platformRecovery = scripts.indexOf("test:os-platform-recovery");
 
     // Cheapest and most diagnostic first is the gate's ordering contract, and
-    // the recovery proof is the only proof that needs no server, subprocess,
-    // or network at all.
+    // these are the only proofs needing no server, subprocess, or network.
     for (const slower of [
       "test:platform-canonical:e2e",
       "test:phase2c:mission",
@@ -143,9 +144,17 @@ describe("CHANTER OS validation orchestration", () => {
       "os:assembly",
       "os:unified",
     ]) {
-      assert.ok(recovery < scripts.indexOf(slower), `recovery must precede ${slower}`);
+      assert.ok(recovery < scripts.indexOf(slower), `generic recovery must precede ${slower}`);
+      assert.ok(
+        platformRecovery < scripts.indexOf(slower),
+        `platform recovery must precede ${slower}`,
+      );
     }
     assert.ok(recovery > scripts.indexOf("build"), "static checks and the build still come first");
+    assert.ok(
+      recovery < platformRecovery,
+      "the single-authority recovery proof is the more useful first signal",
+    );
   });
 });
 
@@ -186,9 +195,38 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.deepEqual(
       started,
       ["typecheck", "typecheck:tools", "build", "test:os-recovery"],
-      "no cross-repository proof may start after the cheap recovery proof fails",
+      "no later proof may start after the cheap recovery proof fails",
     );
-    assert.equal(outcome.skipped.length, 5);
+    assert.equal(
+      started.includes("test:os-platform-recovery"),
+      false,
+      "the Platform recovery proof must never start",
+    );
+    assert.equal(outcome.skipped.length, 6);
+  });
+
+  it("preserves the Platform recovery proof's exact exit code and skips all later stages", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "test:os-platform-recovery": 17 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 17, "the real child exit code is not collapsed to 1");
+    assert.equal(outcome.failedStage?.script, "test:os-platform-recovery");
+    assert.deepEqual(
+      started,
+      ["typecheck", "typecheck:tools", "build", "test:os-recovery", "test:os-platform-recovery"],
+      "every earlier stage ran exactly once, in order",
+    );
+    assert.deepEqual(outcome.skipped, [
+      "Canonical Platform command authority proof",
+      "Phase 2C generic mission proof",
+      "Signed approval migration E2E",
+      "OS end-to-end operational assembly",
+      "OS unified mission control plane",
+    ]);
   });
 
   it("preserves the unified proof's exact exit code and completes nothing after it", async () => {

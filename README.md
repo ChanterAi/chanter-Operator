@@ -254,6 +254,31 @@ Governor subprocess, no network, a few seconds end to end. It does not re-prove
 lane-level recovery, which the AutoPoster recovery suite and the generic
 mission spine suite already own.
 
+### Runbook — unified Platform-lane recovery proof
+
+```powershell
+npm run test:os-platform-recovery
+```
+
+The same shape as the proof above, for the Platform AutoPoster lane — whose
+recovery spans three durable authorities at once (the Platform command, the
+Phase 2D mission graph, and the child AutoPoster mission) and whose downstream
+side effect is a real product draft. Five scenarios interrupt a real execution
+at a real durable boundary, tear the Operator services down, **reconstruct them
+against the same SQLite file**, and then drive recovery through
+`/api/os/missions/:osMissionId/{reconcile,resume,stop}`.
+
+The core case interrupts *after* the child AutoPoster mission created the draft
+and its queue id was journaled, but before the child result, node completion,
+and graph completion were persisted. It proves that recovery converges on the
+**same `jobId`, child mission, graph, and command**, with
+`scheduleContractCalls = 1`, `durableCreateCalls = 1`, `drafts = 1`, and
+`providerPublishCalls = 0` held constant across reconcile, resume, repeated
+read, and replay — and that the draft stays unapproved throughout.
+
+Interruptions here are injected exceptions plus service reconstruction, not
+process kills; genuine process-kill durability is proven by `os:unified`.
+
 ### Canonical validation gate
 
 `npm run os:assembly` proves the generic mission path and `npm run os:unified`
@@ -265,33 +290,36 @@ prove them — from drifting:
 npm run validate:os
 ```
 
-It runs nine stages in order, stopping at the first failure and exiting with
+It runs ten stages in order, stopping at the first failure and exiting with
 that stage's real exit code:
 
 1. `typecheck` — repository typecheck (backend + frontend);
 2. `typecheck:tools` — static typecheck of the CHANTER OS tool surfaces via
    `tsconfig.tools.json`: `tools/phase2c`, `tools/os-assembly`,
-   `tools/os-unified`, `tools/validation`,
-   `tools/persisted-approval-authority`, `tools/platform-canonical`, and
-   `tools/resilience-evidence`;
+   `tools/os-platform-recovery`, `tools/os-recovery`, `tools/os-unified`,
+   `tools/validation`, `tools/persisted-approval-authority`,
+   `tools/platform-canonical`, and `tools/resilience-evidence`;
 3. `build` — production build;
 4. `test:os-recovery` — the unified recovery and reconciliation proof above.
    It is the cheapest proof in the gate (fully in process, no server, no
    subprocess, no network), so a broken recovery contract is reported in
    seconds rather than after the multi-minute cross-repository proofs;
-5. `test:platform-canonical:e2e` — canonical Platform command authority proof:
+5. `test:os-platform-recovery` — the Platform-lane recovery proof above; same
+   in-process shape, but spanning three durable authorities, so it runs second
+   of the two;
+6. `test:platform-canonical:e2e` — canonical Platform command authority proof:
    one platform command becomes exactly one **unapproved** AutoPoster draft
    under persisted human authority, replays across an Operator restart without
    creating a second draft, refuses a conflicting payload with a typed error,
    and never publishes;
-6. `test:phase2c:mission` — Phase 2C generic mission proof;
-7. `test:approval-migration:e2e` — signed approval migration proof;
-8. `os:assembly` — the end-to-end operational assembly proof above;
-9. `os:unified` — the unified mission control plane proof above.
+7. `test:phase2c:mission` — Phase 2C generic mission proof;
+8. `test:approval-migration:e2e` — signed approval migration proof;
+9. `os:assembly` — the end-to-end operational assembly proof above;
+10. `os:unified` — the unified mission control plane proof above.
 
-Stage 9 is last by cost and by diagnostic value: it drives both lanes, a real
+Stage 10 is last by cost and by diagnostic value: it drives both lanes, a real
 Loop Governor child process, and a real AutoPoster boundary, so the narrower
-single-lane stage 8 is the more useful first signal when something breaks.
+single-lane stage 9 is the more useful first signal when something breaks.
 
 Stage 2 exists because these tool surfaces sit outside the backend program,
 which compiles only `src/`. Without it a proof harness can rot silently, which

@@ -84,6 +84,17 @@ import {
  */
 const MAX_LANE_READ = 100;
 
+/**
+ * States that outrank a command's own recorded `failed_recoverable`. Anything
+ * outside this set describes progress, not outcome, and must not overwrite a
+ * durably recorded recoverable failure. See `platformStatus`.
+ */
+const MORE_SEVERE_THAN_RECOVERABLE: ReadonlySet<OsMissionState> = new Set<OsMissionState>([
+  "reconciliation_required",
+  "failed_terminal",
+  "stopped",
+]);
+
 const LANE_ACTION_TO_OS_ACTION: Readonly<
   Record<GenericMissionRecoveryAction & AutoPosterRecoveryAction, OsMissionAction>
 > = Object.freeze({
@@ -567,6 +578,18 @@ export class OsMissionControlService {
    * truth regardless of what the command row still says about its own
    * lifecycle; every other case falls through to the child mission's durable
    * execution journal, then to the graph, then to the command lifecycle alone.
+   *
+   * One asymmetry has to be handled explicitly. A Platform command spans three
+   * durable authorities, and an interrupted execution can leave the command
+   * recording `failed_recoverable` while the graph or child still reports how
+   * far execution *got* — `approved` when no node ever started, or even
+   * `completed` when the child finished but the command's own linkage and
+   * evidence never did. Reporting those directly would answer "how far did
+   * execution reach" when the operator asked "what state is this mission in",
+   * and would silently drop the durably recorded fact that an attempt failed
+   * and recovery is required. So deeper evidence may only ever *deepen* the
+   * answer: it can report something more severe than the recorded failure, but
+   * never something that reads as unattempted or finished.
    */
   private platformStatus(
     command: PlatformAutoPosterCommandView,
@@ -585,14 +608,20 @@ export class OsMissionControlService {
       case "failed":
         return "failed_terminal";
       case "executing":
-      case "failed_recoverable":
-        if (childState) {
-          return osStateFromExecutionState(
+      case "failed_recoverable": {
+        const derived = childState
+          ? osStateFromExecutionState(
             childState as OsLaneExecutionState,
             childRecoveryClassification,
-          );
-        }
-        return graph ? osStateFromGraphState(graph.status) : "approved";
+          )
+          : graph
+            ? osStateFromGraphState(graph.status)
+            : "approved";
+        return command.lifecycleState === "failed_recoverable"
+          && !MORE_SEVERE_THAN_RECOVERABLE.has(derived)
+          ? "failed_recoverable"
+          : derived;
+      }
     }
   }
 

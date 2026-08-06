@@ -38,6 +38,13 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
     name: "OS unified recovery and reconciliation proof",
     script: "test:os-recovery",
   }),
+  // Same in-process shape as the stage above and still far cheaper than any
+  // cross-repository proof, but it spans three durable authorities (command,
+  // graph, child mission), so it runs second of the two.
+  Object.freeze({
+    name: "OS unified Platform-lane recovery proof",
+    script: "test:os-platform-recovery",
+  }),
   Object.freeze({
     name: "Canonical Platform command authority proof",
     script: "test:platform-canonical:e2e",
