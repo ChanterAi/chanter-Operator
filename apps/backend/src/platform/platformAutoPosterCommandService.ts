@@ -619,6 +619,24 @@ export class PlatformAutoPosterCommandService {
     });
   }
 
+  /**
+   * Every AutoPoster child mission currently owned by a canonical Platform
+   * command.
+   *
+   * Read-only, and deliberately owned here rather than by the caller: the
+   * unified CHANTER OS read model needs to exclude these missions from its
+   * direct-AutoPoster lane so one command is never counted twice, and the
+   * service that owns this table is the only place that should query it.
+   */
+  ownedChildMissionIds(): ReadonlySet<string> {
+    const rows = this.database.prepare(`
+      SELECT child_mission_id
+        FROM operator_platform_autoposter_commands
+       WHERE child_mission_id IS NOT NULL
+    `).all() as unknown as Array<{ child_mission_id: string }>;
+    return new Set(rows.map((row) => row.child_mission_id));
+  }
+
   private parseCommand(
     input: Record<string, unknown>,
     durableRequestedAt?: string,

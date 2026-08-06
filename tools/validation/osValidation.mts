@@ -37,6 +37,11 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
   Object.freeze({ name: "Phase 2C generic mission proof", script: "test:phase2c:mission" }),
   Object.freeze({ name: "Signed approval migration E2E", script: "test:approval-migration:e2e" }),
   Object.freeze({ name: "OS end-to-end operational assembly", script: "os:assembly" }),
+  // Last by cost and by diagnostic value: it drives both execution lanes, a
+  // real Loop Governor child process, and a real AutoPoster boundary through
+  // the unified control plane, so the narrower single-lane assembly proof
+  // above is the more useful first signal when something breaks.
+  Object.freeze({ name: "OS unified mission control plane", script: "os:unified" }),
 ]);
 
 /** Resolves to the stage's real process exit code. */

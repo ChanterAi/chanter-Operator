@@ -18,6 +18,7 @@ import { ensureWorkspace } from "./workspace/pathGuard.js";
 import { AgentRunLedgerService } from "./agentRunLedger/agentRunLedgerService.js";
 import { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
 import { PlatformAutoPosterCommandService } from "./platform/platformAutoPosterCommandService.js";
+import { OsMissionControlService } from "./os/osMissionControlService.js";
 
 export function createRuntime() {
   const database = createDatabase(config.databasePath);
@@ -108,6 +109,17 @@ export function createRuntime() {
   const safeCommitCloseoutService = new SafeCommitCloseoutService(database, {
     protectedValues,
   });
+  // The unified CHANTER OS control plane is composed from the same canonical
+  // authorities constructed above — it owns no store of its own, so it is
+  // wired last and holds only references.
+  const osMissionControlService = new OsMissionControlService({
+    genericMissions: genericMissionService,
+    autoPosterMissions: runtimeMissionService,
+    platformCommands: platformAutoPosterCommandService,
+    missionGraphs: missionGraphService,
+    loopGovernorExecutor: loopGovernorMissionExecutor,
+    autoPosterExecutor: runtimeMissionExecutor,
+  });
   return {
     database,
     service,
@@ -121,6 +133,7 @@ export function createRuntime() {
     autoPosterObservationWorker,
     autoPosterMissionEvidenceService,
     platformAutoPosterCommandService,
+    osMissionControlService,
     safeCommitCloseoutService,
   };
 }

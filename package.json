@@ -43,7 +43,8 @@
     "test:provider-proof-runner": "node --import tsx --test tools/local-mission/provider-proof-mode.test.mts",
     "mission:services:stop": "node --import tsx tools/local-mission/stop-services.mts",
     "autoposter:mission:local:seed-account": "node --import tsx tools/local-mission/seed-connected-account.mts",
-    "os:assembly": "node --import tsx tools/os-assembly/run-end-to-end-assembly.mts"
+    "os:assembly": "node --import tsx tools/os-assembly/run-end-to-end-assembly.mts",
+    "os:unified": "node --import tsx tools/os-unified/run-unified-mission-control.mts"
   },
   "engines": {
     "node": ">=22.13.0"

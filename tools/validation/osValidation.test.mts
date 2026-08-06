@@ -123,7 +123,72 @@ describe("CHANTER OS validation orchestration", () => {
         "test:phase2c:mission",
         "test:approval-migration:e2e",
         "os:assembly",
+        "os:unified",
       ],
     );
+  });
+});
+
+/*
+ * Fail-fast propagation measured against the *real* stage list.
+ *
+ * The tests above prove the orchestration contract on a synthetic list; these
+ * prove it on the exact sequence the gate ships, so removing or reordering a
+ * canonical stage cannot quietly keep the contract green.
+ *
+ * `os:unified` is the terminal stage, so "a failure skips everything after it"
+ * is proven here in the two ways that are actually observable: an earlier
+ * failure must skip `os:unified`, and a failure *in* `os:unified` must
+ * propagate its exact child exit code without claiming any stage after it ran.
+ */
+describe("CHANTER OS validation gate — unified proof fail-fast", () => {
+  it("skips the unified proof when an earlier canonical stage fails", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "os:assembly": 11 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 11, "the failing stage's real exit code is preserved");
+    assert.equal(started.includes("os:unified"), false, "the unified proof must never start");
+    assert.deepEqual(outcome.skipped, ["OS unified mission control plane"]);
+  });
+
+  it("preserves the unified proof's exact exit code and completes nothing after it", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "os:unified": 23 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 23, "the unified proof's real exit code is not collapsed to 1");
+    assert.equal(outcome.failedStage?.script, "os:unified");
+    assert.deepEqual(
+      started,
+      OS_VALIDATION_STAGES.map((stage) => stage.script),
+      "every earlier stage ran exactly once, in order",
+    );
+    assert.equal(
+      outcome.completed.includes("OS unified mission control plane"),
+      false,
+      "a failing stage is never reported as completed",
+    );
+    assert.deepEqual(outcome.skipped, [], "nothing follows the terminal stage");
+  });
+
+  it("fails closed when the unified proof cannot be started at all", async () => {
+    const outcome = await runOsValidation({
+      run: async (stage) => {
+        if (stage.script === "os:unified") throw new Error("spawn failed");
+        return 0;
+      },
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.failedStage?.script, "os:unified");
   });
 });

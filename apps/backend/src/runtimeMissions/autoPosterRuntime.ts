@@ -22,13 +22,16 @@ import {
 } from "chanter-agent-runtime";
 import {
   createOperatorPersistedApprovalAuthority,
+  describePersistedApprovalAuthority,
   downstreamOperationTypeFor,
   mirrorPersistedApprovalAuthority,
   missionScopedStateDir,
   prepareApprovedRuntimeAuthority,
   retireUnresolvedRuntimeClaim,
+  UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION,
   type OperatorClaimRetirementOutcome,
   type OperatorApprovalAuthorityConfiguration,
+  type OperatorApprovalAuthorityProjection,
   type OperatorApprovalAuthorityOutcome,
   type OperatorApprovalDecision,
   type OperatorPersistedApprovalAuthority,
@@ -86,6 +89,12 @@ export interface AutoPosterRuntimeMissionExecutor {
     request: RuntimeMissionRequest,
     decision: OperatorApprovalDecision,
   ): Promise<OperatorApprovalAuthorityOutcome>;
+  /**
+   * Read-only projection of the persisted approval authority bound to one
+   * mission, for the unified CHANTER OS authority view. Grants nothing and
+   * decides nothing; it only reports durable truth.
+   */
+  describeApprovalAuthority(missionId: string): OperatorApprovalAuthorityProjection;
   /**
    * Retires an unresolved durable claim after the caller's own reconciliation
    * proved the downstream produced nothing. Never invoked speculatively.
@@ -325,6 +334,11 @@ export function createAutoPosterRuntimeMissionExecutor(
         }),
       );
     },
+    describeApprovalAuthority: (missionId) => (
+      approvalAuthority
+        ? describePersistedApprovalAuthority(approvalAuthority, missionId)
+        : UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION
+    ),
     retireUnresolvedClaim: (missionId) => (
       approvalAuthority ? retireUnresolvedRuntimeClaim(approvalAuthority, missionId) : "unsupported"
     ),

@@ -118,6 +118,12 @@ export interface OperatorPersistedApprovalAuthority {
   readonly stateDir: string;
   readonly idempotencyStore: RuntimeMissionIdempotencyStore & RuntimeApprovalCheckpointStore;
   readonly runLedger: RuntimeMissionRunLedger;
+  /**
+   * True once a usable signing identity exists. Holding a key and being trusted
+   * are separate statements, so this is reported separately from `trustStore`:
+   * an authority is only fully trustworthy when both hold.
+   */
+  readonly issuerConfigured: boolean;
   /** Trusted issuers the Runtime verifies against; absent when unconfigured. */
   readonly trustStore: RuntimeApprovalTrustStore | undefined;
   /** True once the Runtime has published the immutable checkpoint manifest. */
@@ -435,6 +441,7 @@ export function createOperatorPersistedApprovalAuthority(
     stateDir,
     idempotencyStore,
     runLedger,
+    issuerConfigured: issuer !== null,
     trustStore,
     hasCheckpoint: (missionId) => {
       try {
@@ -543,6 +550,120 @@ export function createOperatorPersistedApprovalAuthority(
       }
       return withPersistedHashes(identity.authority, request.missionId);
     },
+  };
+}
+
+/**
+ * A read-only description of the persisted approval authority bound to one
+ * mission, for the unified CHANTER OS authority view.
+ *
+ * Purely observational: it reads durable records and decides nothing. It can
+ * never publish a checkpoint, mint an observation, or authorize execution —
+ * those remain the Runtime's decisions behind `prepareApproval` / `execute`.
+ */
+export interface OperatorApprovalAuthorityProjection {
+  /** True when a persisted approval checkpoint authority is wired at all. */
+  readonly configured: boolean;
+  readonly binding: "direct" | "managed" | "unconfigured";
+  readonly issuerConfigured: boolean;
+  readonly trustStoreConfigured: boolean;
+  readonly checkpoint: {
+    readonly repositoryId: string;
+    readonly expectedHead: string;
+    readonly approvalRequestId: string;
+    readonly approvalPolicyId: string;
+    readonly manifestHash: string;
+  } | null;
+  readonly observation: {
+    readonly status: "approved" | "rejected";
+    readonly approverId: string | null;
+    readonly observedAt: string;
+    readonly approvalExpiresAt: string | null;
+    readonly observationHash: string;
+  } | null;
+  /** The typed reason authority is absent or unusable; `null` when it holds. */
+  readonly refusalCode: string | null;
+}
+
+/** The projection returned when no approval authority is configured at all. */
+export const UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION: OperatorApprovalAuthorityProjection =
+  Object.freeze({
+    configured: false,
+    binding: "unconfigured" as const,
+    issuerConfigured: false,
+    trustStoreConfigured: false,
+    checkpoint: null,
+    observation: null,
+    refusalCode: "OPERATOR_APPROVAL_AUTHORITY_NOT_CONFIGURED",
+  });
+
+/**
+ * Reads the durable approval checkpoint and observation bound to one mission.
+ *
+ * Unreadable durable state is reported as a typed refusal rather than as
+ * "no approval", because the two mean very different things to a reader and
+ * only one of them is safe to act on.
+ */
+export function describePersistedApprovalAuthority(
+  authority: OperatorPersistedApprovalAuthority,
+  missionId: string,
+): OperatorApprovalAuthorityProjection {
+  const base = {
+    configured: true,
+    binding: authority.binding,
+    issuerConfigured: authority.issuerConfigured,
+    trustStoreConfigured: authority.trustStore !== undefined,
+  } as const;
+
+  let manifest;
+  let observation;
+  try {
+    manifest = authority.idempotencyStore.getApprovalCheckpointManifest(missionId);
+    observation = manifest
+      ? authority.idempotencyStore.getApprovalObservation(missionId)
+      : undefined;
+  } catch {
+    return {
+      ...base,
+      checkpoint: null,
+      observation: null,
+      refusalCode: "OPERATOR_APPROVAL_AUTHORITY_UNREADABLE",
+    };
+  }
+
+  const refusalCode = !authority.issuerConfigured
+    ? "OPERATOR_APPROVAL_ISSUER_NOT_CONFIGURED"
+    : authority.trustStore === undefined
+      ? "OPERATOR_APPROVAL_TRUST_STORE_NOT_CONFIGURED"
+      : !manifest
+        ? "OPERATOR_APPROVAL_CHECKPOINT_MISSING"
+        : !observation
+          ? "OPERATOR_APPROVAL_OBSERVATION_MISSING"
+          : observation.status === "rejected"
+            ? "OPERATOR_APPROVAL_REJECTED"
+            : null;
+
+  return {
+    ...base,
+    checkpoint: manifest
+      ? {
+        repositoryId: manifest.repositoryId,
+        expectedHead: manifest.expectedHead,
+        approvalRequestId: manifest.approvalRequestId,
+        approvalPolicyId: manifest.approvalPolicyId,
+        manifestHash: manifest.manifestHash,
+      }
+      : null,
+    observation: observation
+      ? {
+        status: observation.status,
+        approverId: observation.approverId,
+        observedAt: observation.observedAt,
+        approvalExpiresAt: observation.approvalExpiresAt ?? null,
+        observationHash: observation.observationHash,
+      }
+      : null,
+    refusalCode,
   };
 }
 

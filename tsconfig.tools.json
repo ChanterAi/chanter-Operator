@@ -14,6 +14,7 @@
   "include": [
     "tools/phase2c",
     "tools/os-assembly",
+    "tools/os-unified",
     "tools/validation",
     "tools/persisted-approval-authority",
     "tools/platform-canonical",

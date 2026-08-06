@@ -1415,7 +1415,10 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
       network_execution_enabled: false,
       missionSubmit: {
         configured: true,
+        // The unified CHANTER OS intake sits on the same submit capability as
+        // every lane-specific submission route it delegates to.
         endpoints: [
+          "/api/os/missions",
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
           "/api/mission-graphs/autoposter-schedule",
@@ -1428,6 +1431,10 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
         isolated: true,
         ready: true,
         endpoints: [
+          "/api/os/missions/:osMissionId/approve",
+          "/api/os/missions/:osMissionId/reconcile",
+          "/api/os/missions/:osMissionId/resume",
+          "/api/os/missions/:osMissionId/stop",
           "/api/runtime-missions/:missionId/approve",
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",

@@ -13,6 +13,7 @@ import type { AutoPosterResultProjectionService } from "./missions/autoPosterRes
 import type { AutoPosterObservationService } from "./missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "./safeCommit/safeCommitCloseoutService.js";
 import type { PlatformAutoPosterCommandService } from "./platform/platformAutoPosterCommandService.js";
+import type { OsMissionControlService } from "./os/osMissionControlService.js";
 
 export function createApp(
   service: OperatorService,
@@ -31,6 +32,8 @@ export function createApp(
   // Canonical Platform linkage is appended to preserve every existing
   // positional test/app call site.
   platformAutoPosterCommandService?: PlatformAutoPosterCommandService,
+  // The unified CHANTER OS control plane is appended for the same reason.
+  osMissionControlService?: OsMissionControlService,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -48,6 +51,7 @@ export function createApp(
     autoPosterGraphIntakeService,
     autoPosterMissionEvidenceService,
     platformAutoPosterCommandService,
+    osMissionControlService,
   ));
 
   app.use((_request, response) => {
