@@ -1,0 +1,19 @@
+{
+  "//": "Static coverage for the CHANTER OS operational proof tools. These files live outside the backend program (which compiles and emits only src/), so without this config nothing typechecks them and they rot silently. Compiler options mirror apps/backend/tsconfig.json exactly, minus emit: same target, module system, and strictness, so a tool and the production code it drives are held to one standard.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": [
+    "tools/phase2c",
+    "tools/os-assembly",
+    "tools/validation"
+  ]
+}

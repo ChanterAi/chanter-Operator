@@ -153,6 +153,37 @@ Outputs (git-ignored under `var/os-assembly/`, override with `--out <dir>`):
 Add `--keep` to retain the temporary working state for inspection. The command
 exits non-zero on any failed step.
 
+### Canonical validation gate
+
+`npm run os:assembly` proves the mission path. `npm run validate:os` is the
+canonical gate that keeps it — and the static correctness of the tools that
+prove it — from drifting:
+
+```powershell
+npm run validate:os
+```
+
+It runs six stages in order, stopping at the first failure and exiting with that
+stage's real exit code:
+
+1. `typecheck` — repository typecheck (backend + frontend);
+2. `typecheck:tools` — static typecheck of `tools/phase2c`, `tools/os-assembly`,
+   and `tools/validation` via `tsconfig.tools.json`;
+3. `build` — production build;
+4. `test:phase2c:mission` — Phase 2C generic mission proof;
+5. `test:approval-migration:e2e` — signed approval migration proof;
+6. `os:assembly` — the end-to-end operational assembly proof above.
+
+Stage 2 exists because these tool surfaces sit outside the backend program,
+which compiles only `src/`. Without it a proof harness can rot silently, which
+is exactly how the Phase 2C harness drifted previously.
+
+Local process execution only: it does not push, merge, deploy, publish, or
+execute a real coding agent, and it leaves no tracked repository modifications.
+Expect roughly three to four minutes end to end, dominated by the two
+cross-repository proofs. `npm run test:os-validation` covers the gate's own
+ordering and failure-propagation contract.
+
 ## Related in-repo docs
 
 - `tools/release-operator/README.md`
