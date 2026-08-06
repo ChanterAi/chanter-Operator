@@ -39,6 +39,7 @@
     "test:approval-migration:e2e": "node --import tsx --test tools/persisted-approval-authority/consumer-migration.integration.test.mts",
     "test:os-recovery": "node --import tsx --test tools/os-recovery/os-recovery.integration.test.mts",
     "test:os-platform-recovery": "node --import tsx --test tools/os-platform-recovery/os-platform-recovery.integration.test.mts",
+    "test:os-ambiguous-reconciliation": "node --import tsx --test tools/os-ambiguous-reconciliation/os-ambiguous-reconciliation.integration.test.mts",
     "test:resilience:cross-process": "node tools/resilience-evidence/clean-source-validation.mjs",
     "test:runtime:clean-source": "node tools/resilience-evidence/clean-source-validation.mjs --runtime-tests",
     "autoposter:mission:local": "node --import tsx tools/local-mission/run-mission.mts",

@@ -279,6 +279,40 @@ read, and replay — and that the draft stays unapproved throughout.
 Interruptions here are injected exceptions plus service reconstruction, not
 process kills; genuine process-kill durability is proven by `os:unified`.
 
+### Runbook — ambiguous-downstream reconciliation proof
+
+```powershell
+npm run test:os-ambiguous-reconciliation
+```
+
+Every recovery proof above shares one property: downstream truth was already
+knowable from durable state Operator itself held. This closes the remaining
+case — **the request left Operator, no authoritative response came back, and
+Operator cannot know whether the side effect happened.** That is the exact
+boundary at which unsafe systems duplicate real-world work.
+
+The ambiguity is injected at the AutoPoster HTTP transport, which the test
+process owns end to end. `drop_after_create` runs the real handler to
+completion — the draft is durably created — and then destroys the socket
+instead of flushing the response. `drop_before_create` destroys the socket on
+arrival, after the request provably reached the boundary and before any handler
+runs. Operator sees an unreachable peer in both cases and cannot tell them
+apart; only AutoPoster's durable store can. Reconciliation resolves them by
+selecting on `runtimeMissionId` and then requiring exact equality on the
+idempotency key, payload hash, action, workspace, provider, account, and
+scheduled time — no fuzzy matching and no inference.
+
+Both realities converge on exactly one draft:
+
+- **Reality A** (draft exists) — one attempt, one durable create, the existing
+  `jobId` is bound, no redispatch;
+- **Reality B** (draft absent) — absence is proven, one safe retry is unlocked
+  and spent exactly once, two attempts, one durable create.
+
+A reconciliation lookup that itself fails is recorded as `unavailable`, never as
+absence: the state stays `reconciliation_required`, no retry is unlocked, and a
+resume attempted while truth is still unknown is refused with a typed 409.
+
 ### Canonical validation gate
 
 `npm run os:assembly` proves the generic mission path and `npm run os:unified`
@@ -290,14 +324,14 @@ prove them — from drifting:
 npm run validate:os
 ```
 
-It runs ten stages in order, stopping at the first failure and exiting with
+It runs eleven stages in order, stopping at the first failure and exiting with
 that stage's real exit code:
 
 1. `typecheck` — repository typecheck (backend + frontend);
 2. `typecheck:tools` — static typecheck of the CHANTER OS tool surfaces via
-   `tsconfig.tools.json`: `tools/phase2c`, `tools/os-assembly`,
-   `tools/os-platform-recovery`, `tools/os-recovery`, `tools/os-unified`,
-   `tools/validation`, `tools/persisted-approval-authority`,
+   `tsconfig.tools.json`: `tools/phase2c`, `tools/os-ambiguous-reconciliation`,
+   `tools/os-assembly`, `tools/os-platform-recovery`, `tools/os-recovery`,
+   `tools/os-unified`, `tools/validation`, `tools/persisted-approval-authority`,
    `tools/platform-canonical`, and `tools/resilience-evidence`;
 3. `build` — production build;
 4. `test:os-recovery` — the unified recovery and reconciliation proof above.
@@ -306,16 +340,20 @@ that stage's real exit code:
    seconds rather than after the multi-minute cross-repository proofs;
 5. `test:os-platform-recovery` — the Platform-lane recovery proof above; same
    in-process shape, but spanning three durable authorities, so it runs second
-   of the two;
-6. `test:platform-canonical:e2e` — canonical Platform command authority proof:
+   of the three;
+6. `test:os-ambiguous-reconciliation` — the ambiguous-downstream reconciliation
+   proof above. Last of the in-process recovery proofs and still cheaper than
+   any cross-repository stage: it covers the hardest case, so a plainly broken
+   recovery contract is reported by the two deterministic stages first;
+7. `test:platform-canonical:e2e` — canonical Platform command authority proof:
    one platform command becomes exactly one **unapproved** AutoPoster draft
    under persisted human authority, replays across an Operator restart without
    creating a second draft, refuses a conflicting payload with a typed error,
    and never publishes;
-7. `test:phase2c:mission` — Phase 2C generic mission proof;
-8. `test:approval-migration:e2e` — signed approval migration proof;
-9. `os:assembly` — the end-to-end operational assembly proof above;
-10. `os:unified` — the unified mission control plane proof above.
+8. `test:phase2c:mission` — Phase 2C generic mission proof;
+9. `test:approval-migration:e2e` — signed approval migration proof;
+10. `os:assembly` — the end-to-end operational assembly proof above;
+11. `os:unified` — the unified mission control plane proof above.
 
 Stage 10 is last by cost and by diagnostic value: it drives both lanes, a real
 Loop Governor child process, and a real AutoPoster boundary, so the narrower

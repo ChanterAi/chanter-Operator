@@ -30,6 +30,7 @@
  * about what it returns, and two reads of an unchanged mission are identical.
  */
 import type {
+  AutoPosterMissionExecutionView,
   AutoPosterMissionService,
   AutoPosterRecoveryAction,
   AutoPosterRuntimeMission,
@@ -141,6 +142,34 @@ function osActionsFrom(
 
 function typedErrorOf(value: { code: string; message: string } | null): OsMissionTypedError | null {
   return value ? { code: value.code, message: value.message } : null;
+}
+
+/**
+ * True while the child mission spine still owns this execution — that is, until
+ * it reaches one of its own terminal states. Past that point the child is
+ * finished and only the command and its graph have anything left to advance.
+ */
+function childOwnsExecution(execution: AutoPosterMissionExecutionView | null): boolean {
+  return execution !== null
+    && execution.state !== "completed"
+    && execution.state !== "failed_terminal";
+}
+
+/**
+ * True when the owning child authority will not let execution advance until an
+ * authoritative downstream lookup has established truth: it offers Reconcile
+ * and withholds Resume safely.
+ *
+ * This reads the authority's own decision rather than making one here. It is
+ * how "the request left, no response came back, and nobody knows whether the
+ * side effect happened" is told apart from an ordinary recoverable failure — a
+ * distinction the operator must see, because in the first case the only safe
+ * next act is to investigate.
+ */
+function childRequiresReconciliation(execution: AutoPosterMissionExecutionView | null): boolean {
+  if (!childOwnsExecution(execution) || execution === null) return false;
+  return execution.nextPermittedActions.includes("Reconcile")
+    && !execution.nextPermittedActions.includes("Resume safely");
 }
 
 export class OsMissionControlService {
@@ -504,7 +533,7 @@ export class OsMissionControlService {
       ? this.dependencies.autoPosterExecutor.describeApprovalAuthority(command.missionId)
       : this.dependencies.autoPosterExecutor.describeApprovalAuthority("");
 
-    const status = this.platformStatus(command, graph, childExecution?.state ?? null, childExecution?.recoveryClassification ?? "");
+    const status = this.platformStatus(command, graph, childExecution);
     const downstream: OsDownstreamIdentity | null = command.jobIds.length > 0
       ? {
         kind: "autoposter_unapproved_draft",
@@ -555,7 +584,7 @@ export class OsMissionControlService {
           childExecution.recoveryClassification,
         )
         : null,
-      nextPermittedActions: this.platformActions(status, childExecution?.nextPermittedActions ?? []),
+      nextPermittedActions: this.platformActions(status, childExecution),
       typedError: typedErrorOf(command.error ?? childExecution?.typedError ?? null),
       laneReference: {
         laneNativeId: command.commandId,
@@ -594,8 +623,7 @@ export class OsMissionControlService {
   private platformStatus(
     command: PlatformAutoPosterCommandView,
     graph: MissionGraphView | null,
-    childState: string | null,
-    childRecoveryClassification: string,
+    childExecution: AutoPosterMissionExecutionView | null,
   ): OsMissionState {
     if (graph?.status === "cancelled") return "stopped";
     switch (command.lifecycleState) {
@@ -609,18 +637,26 @@ export class OsMissionControlService {
         return "failed_terminal";
       case "executing":
       case "failed_recoverable": {
-        const derived = childState
+        const derived = childExecution
           ? osStateFromExecutionState(
-            childState as OsLaneExecutionState,
-            childRecoveryClassification,
+            childExecution.state as OsLaneExecutionState,
+            childExecution.recoveryClassification,
           )
           : graph
             ? osStateFromGraphState(graph.status)
             : "approved";
-        return command.lifecycleState === "failed_recoverable"
+        const resolved = command.lifecycleState === "failed_recoverable"
           && !MORE_SEVERE_THAN_RECOVERABLE.has(derived)
           ? "failed_recoverable"
           : derived;
+        // An attempt whose downstream outcome was never observed is not an
+        // ordinary recoverable failure, and reporting it as one invites exactly
+        // the speculative retry that duplicates real-world work. The owning
+        // child authority already withholds every execution-advancing action
+        // here; the OS names that condition rather than flattening it.
+        return resolved === "failed_recoverable" && childRequiresReconciliation(childExecution)
+          ? "reconciliation_required"
+          : resolved;
       }
     }
   }
@@ -831,16 +867,26 @@ export class OsMissionControlService {
 
   private platformActions(
     status: OsMissionState,
-    childActions: readonly AutoPosterRecoveryAction[],
+    childExecution: AutoPosterMissionExecutionView | null,
   ): OsMissionAction[] {
     if (status === "approval_required") return ["approve"];
     if (status === "completed" || status === "failed_terminal" || status === "stopped") return [];
     if (status === "submitted") return [];
-    const actions = new Set<OsMissionAction>(["resume", "stop"]);
-    for (const action of osActionsFrom(childActions)) {
-      if (action === "reconcile") actions.add(action);
+    // While the child mission spine owns the execution, its permitted actions
+    // are the answer and are projected as-is. Advertising `resume` on top of
+    // them would announce an execution-advancing action the owning authority
+    // withholds — and it withholds it precisely when downstream truth is still
+    // unknown. Stop stays available throughout: escalating to a human is never
+    // gated on knowing what happened downstream.
+    if (childOwnsExecution(childExecution) && childExecution !== null) {
+      return [...new Set<OsMissionAction>([
+        ...osActionsFrom(childExecution.nextPermittedActions),
+        "stop",
+      ])];
     }
-    return [...actions];
+    // No child holds the execution: either none was dispatched yet or it has
+    // already finished, and only the command and its graph remain to advance.
+    return ["resume", "stop"];
   }
 
   // -------------------------------------------------------------------------

@@ -121,6 +121,7 @@ describe("CHANTER OS validation orchestration", () => {
         "build",
         "test:os-recovery",
         "test:os-platform-recovery",
+        "test:os-ambiguous-reconciliation",
         "test:platform-canonical:e2e",
         "test:phase2c:mission",
         "test:approval-migration:e2e",
@@ -130,10 +131,11 @@ describe("CHANTER OS validation orchestration", () => {
     );
   });
 
-  it("orders both in-process recovery proofs ahead of every cross-repository proof", () => {
+  it("orders every in-process recovery proof ahead of every cross-repository proof", () => {
     const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
     const recovery = scripts.indexOf("test:os-recovery");
     const platformRecovery = scripts.indexOf("test:os-platform-recovery");
+    const ambiguous = scripts.indexOf("test:os-ambiguous-reconciliation");
 
     // Cheapest and most diagnostic first is the gate's ordering contract, and
     // these are the only proofs needing no server, subprocess, or network.
@@ -149,11 +151,19 @@ describe("CHANTER OS validation orchestration", () => {
         platformRecovery < scripts.indexOf(slower),
         `platform recovery must precede ${slower}`,
       );
+      assert.ok(
+        ambiguous < scripts.indexOf(slower),
+        `ambiguous reconciliation must precede ${slower}`,
+      );
     }
     assert.ok(recovery > scripts.indexOf("build"), "static checks and the build still come first");
     assert.ok(
       recovery < platformRecovery,
       "the single-authority recovery proof is the more useful first signal",
+    );
+    assert.ok(
+      platformRecovery < ambiguous,
+      "the deterministic recovery proofs precede the ambiguous-outcome proof",
     );
   });
 });
@@ -202,7 +212,12 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       false,
       "the Platform recovery proof must never start",
     );
-    assert.equal(outcome.skipped.length, 6);
+    assert.equal(
+      started.includes("test:os-ambiguous-reconciliation"),
+      false,
+      "the ambiguous reconciliation proof must never start",
+    );
+    assert.equal(outcome.skipped.length, 7);
   });
 
   it("preserves the Platform recovery proof's exact exit code and skips all later stages", async () => {
@@ -221,12 +236,75 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "every earlier stage ran exactly once, in order",
     );
     assert.deepEqual(outcome.skipped, [
+      "OS ambiguous-downstream reconciliation proof",
       "Canonical Platform command authority proof",
       "Phase 2C generic mission proof",
       "Signed approval migration E2E",
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
     ]);
+  });
+
+  it("preserves the ambiguous reconciliation proof's exit code and skips all later stages", async () => {
+    const started: string[] = [];
+    const outcome = await runOsValidation({
+      run: stubRunner({ "test:os-ambiguous-reconciliation": 19 }, started),
+      log: silent,
+    });
+
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.exitCode, 19, "the real child exit code is not collapsed to 1");
+    assert.equal(outcome.failedStage?.script, "test:os-ambiguous-reconciliation");
+    assert.deepEqual(
+      started,
+      [
+        "typecheck",
+        "typecheck:tools",
+        "build",
+        "test:os-recovery",
+        "test:os-platform-recovery",
+        "test:os-ambiguous-reconciliation",
+      ],
+      "every earlier stage ran exactly once, in order",
+    );
+    assert.deepEqual(outcome.skipped, [
+      "Canonical Platform command authority proof",
+      "Phase 2C generic mission proof",
+      "Signed approval migration E2E",
+      "OS end-to-end operational assembly",
+      "OS unified mission control plane",
+    ]);
+  });
+
+  it("never starts the ambiguous reconciliation proof after an earlier recovery stage fails", async () => {
+    for (const earlier of ["test:os-recovery", "test:os-platform-recovery"]) {
+      const started: string[] = [];
+      const outcome = await runOsValidation({
+        run: stubRunner({ [earlier]: 13 }, started),
+        log: silent,
+      });
+
+      assert.equal(outcome.exitCode, 13, `${earlier} must propagate its own exit code`);
+      assert.equal(
+        started.includes("test:os-ambiguous-reconciliation"),
+        false,
+        `the ambiguous reconciliation proof must never start after ${earlier} fails`,
+      );
+      assert.ok(
+        outcome.skipped.includes("OS ambiguous-downstream reconciliation proof"),
+        "it must be reported as skipped rather than silently omitted",
+      );
+    }
+  });
+
+  it("refuses to drop the ambiguous reconciliation stage from the canonical gate", () => {
+    assert.equal(
+      OS_VALIDATION_STAGES.filter(
+        (stage) => stage.script === "test:os-ambiguous-reconciliation",
+      ).length,
+      1,
+      "the stage must appear exactly once in the canonical gate",
+    );
   });
 
   it("preserves the unified proof's exact exit code and completes nothing after it", async () => {

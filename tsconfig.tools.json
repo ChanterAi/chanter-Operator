@@ -13,6 +13,7 @@
   },
   "include": [
     "tools/phase2c",
+    "tools/os-ambiguous-reconciliation",
     "tools/os-assembly",
     "tools/os-platform-recovery",
     "tools/os-recovery",

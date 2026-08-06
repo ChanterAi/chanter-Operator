@@ -45,6 +45,14 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
     name: "OS unified Platform-lane recovery proof",
     script: "test:os-platform-recovery",
   }),
+  // Last of the three in-process recovery proofs and still cheaper than any
+  // cross-repository stage. It runs after the deterministic ones because it is
+  // the hardest case — the downstream outcome was never observed — so a plain
+  // broken recovery contract is reported by the two stages above first.
+  Object.freeze({
+    name: "OS ambiguous-downstream reconciliation proof",
+    script: "test:os-ambiguous-reconciliation",
+  }),
   Object.freeze({
     name: "Canonical Platform command authority proof",
     script: "test:platform-canonical:e2e",
