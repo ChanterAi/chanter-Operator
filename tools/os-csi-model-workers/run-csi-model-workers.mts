@@ -1851,37 +1851,154 @@ try {
     );
 
     await step("Reconcile each charge against the provider's own billing record", async () => {
+      // Driven, not merely read.
+      //
+      // The inline attempt runs milliseconds after the provider answers, and
+      // OpenRouter writes its generation record *after* the completion returns.
+      // The first live billed run asked three milliseconds later and got
+      // `HTTP 404` for two generations that had genuinely been billed — two real
+      // charges left permanently unconfirmable, because a mission replay is
+      // refused at `AGENTIC_PROVIDER_ALREADY_INVOKED` before reconciliation is
+      // reachable. Confirmation therefore has to be something that can happen
+      // later, from durable state, and this step is what asks for it.
+      const beforeCalls = providerCallCount(databasePath, billedMissionId);
+      const beforeMicros = providerUsageRows(databasePath, billedMissionId)
+        .reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+
+      const reconciled = await postJson(
+        operator!.baseUrl, `/api/os/missions/${osBilledId}/billing/reconcile`, controlToken, {});
+      assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
+      const summary = record(reconciled.body);
+
+      // Reconciliation is a read. It may not buy anything, and the durable
+      // provider-usage table is where a purchase would have shown up.
+      const afterCalls = providerCallCount(databasePath, billedMissionId);
+      assert.equal(afterCalls, beforeCalls, "Reconciliation must never issue another provider call.");
+      assert.equal(summary.inferenceCallsIssued, 0);
+
       const rows = providerUsageRows(databasePath, billedMissionId);
       const verdicts: string[] = [];
+      const evidence: Record<string, unknown>[] = [];
       for (const row of rows) {
         const reconciliation = JSON.parse(String(row.reconciliation_json ?? "{}")) as Record<string, unknown>;
         verdicts.push(String(reconciliation.verdict));
+        // Captured before any assertion: a failed run must still be able to say
+        // which generation was charged what, and by whom it was confirmed.
+        evidence.push({
+          nodeId: row.node_id,
+          providerGenerationId: row.provider_request_id,
+          chanterRecordedCostMicros: row.monetary_cost_micros,
+          providerOwnedCostMicros: reconciliation.externalAmountMicros ?? null,
+          deltaMicros: reconciliation.deltaMicros ?? null,
+          verdict: reconciliation.verdict,
+          lookupAttempts: reconciliation.attempts ?? null,
+          upstreamProvider: reconciliation.upstreamProvider ?? null,
+          checkedAt: reconciliation.checkedAt ?? null,
+          detail: reconciliation.detail ?? null,
+        });
+      }
+      observed.billedReconciliationVerdicts = verdicts;
+      observed.billedReconciliationEvidence = evidence;
+      observed.billedReconciliationLookupAttempts = summary.lookupAttempts;
+      observed.billedReconciliationInferenceCalls = 0;
+
+      for (const [index, row] of rows.entries()) {
+        const reconciliation = JSON.parse(String(row.reconciliation_json ?? "{}")) as Record<string, unknown>;
         assert.equal(
           reconciliation.evidenceType,
           "provider_generation_lookup",
           "billing evidence must come from the provider's own record, never a price list",
         );
-        // `unavailable` is honest and permitted; `mismatched` is not, because it
-        // means the charge and the provider's record genuinely disagree.
+        // `mismatched` means the charge and the provider's record genuinely
+        // disagree. It is never smoothed away, and never polled away either.
         assert.notEqual(
           reconciliation.verdict,
           "mismatched",
           `The provider's record disagrees with the recorded charge: ${JSON.stringify(reconciliation)}`,
         );
-        if (reconciliation.verdict === "matched") {
-          assert.equal(reconciliation.deltaMicros, 0 || reconciliation.deltaMicros);
-          assert.ok(Number(reconciliation.externalAmountMicros) > 0);
-        }
+        assert.equal(
+          reconciliation.verdict,
+          "matched",
+          `Charge ${index + 1} is not confirmed by the provider's own record: `
+          + `${JSON.stringify(evidence[index])}`,
+        );
+        // The provider's own number, and it must actually be a number that
+        // agrees with what CHANTER recorded.
+        assert.ok(
+          Number(reconciliation.externalAmountMicros) > 0,
+          "a confirmed charge must carry the provider's own amount",
+        );
+        assert.ok(
+          Math.abs(Number(reconciliation.deltaMicros)) <= 1,
+          "a confirmed charge agrees with the provider to within rounding",
+        );
+        assert.ok(
+          Number(reconciliation.attempts) >= 1,
+          "the polling count must be reported, not inferred",
+        );
       }
-      observed.billedReconciliationVerdicts = verdicts;
-      const allMatched = verdicts.every((verdict) => verdict === "matched");
-      observed.billedProviderProven = allMatched;
-      assert.ok(
-        allMatched,
-        `Billing reconciliation did not confirm every charge: ${verdicts.join(", ")}. `
-        + "A PASS requires the provider's own record to confirm what CHANTER recorded.",
+
+      // Nothing about the charge itself moved. Reconciliation adds evidence; it
+      // must never restate the thing it is evidence for.
+      const afterMicros = rows.reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+      assert.equal(afterMicros, beforeMicros, "Reconciliation must not change what was spent.");
+      assert.equal(summary.verdict, "matched");
+      assert.equal(summary.chargesConfirmed, rows.length);
+      assert.equal(summary.chargesUnconfirmed, 0);
+
+      observed.billedProviderProven = true;
+      return {
+        verdict: summary.verdict,
+        chargesConfirmed: summary.chargesConfirmed,
+        lookupAttempts: summary.lookupAttempts,
+        additionalInferenceCalls: afterCalls - beforeCalls,
+        reconciliationSource: "provider_generation_lookup",
+        evidence,
+      };
+    });
+
+    await step("Reconcile again through a restarted server, buying nothing", async () => {
+      // Restart reconciliation is the property that makes the seam safe to
+      // operate: a charge that could only be confirmed by the process that
+      // incurred it would be unconfirmable after any crash.
+      const beforeCalls = providerCallCount(databasePath, billedMissionId);
+      const beforeMicros = providerUsageRows(databasePath, billedMissionId)
+        .reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+
+      await killOperator(operator);
+      operator = null;
+      port = await freePort();
+      operator = await startOperator(environmentFor(), port);
+
+      const again = await postJson(
+        operator.baseUrl, `/api/os/missions/${osBilledId}/billing/reconcile`, controlToken, {});
+      assert.equal(again.status, 200, JSON.stringify(again.body));
+      const summary = record(again.body);
+
+      const afterCalls = providerCallCount(databasePath, billedMissionId);
+      const afterMicros = providerUsageRows(databasePath, billedMissionId)
+        .reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+
+      assert.equal(summary.verdict, "matched", "a restart reaches the same conclusion");
+      assert.equal(afterCalls, beforeCalls, "a restarted reconciliation must not buy a provider call");
+      assert.equal(afterMicros, beforeMicros, "a restarted reconciliation must not change what was spent");
+      assert.equal(summary.inferenceCallsIssued, 0);
+      // Already-settled charges are not looked up again, so a restart is free.
+      assert.equal(summary.lookupAttempts, 0, "a settled charge is never re-read");
+      assert.equal(
+        list(summary.outcomes).every((outcome) => record(outcome).alreadySettled === true),
+        true,
       );
-      return { verdicts, reconciliationSource: "provider_generation_lookup" };
+
+      observed.billedRestartReconciliationVerdict = summary.verdict;
+      observed.billedRestartLookupAttempts = summary.lookupAttempts;
+      return {
+        verdict: summary.verdict,
+        providerCalls: `${beforeCalls} -> ${afterCalls}`,
+        monetaryCostMicros: `${beforeMicros} -> ${afterMicros}`,
+        lookupAttempts: summary.lookupAttempts,
+        additionalInferenceCalls: afterCalls - beforeCalls,
+      };
     });
 
     await step("Prove a replay of the billed mission purchases nothing", async () => {
@@ -1991,6 +2108,27 @@ try {
       : "Billed external provider cost authority: NOT PROVEN",
   );
   console.log(`  Charge state: ${chargeState}`);
+  // Confirmation is a separate fact from the charge, and is reported as one.
+  // "A charge was recorded" and "the counterparty's own record confirms it" are
+  // different claims, and collapsing them is how an unverified number starts
+  // reading as a verified one.
+  if (Array.isArray(observed.billedReconciliationEvidence)) {
+    console.log("  Provider-owned billing evidence:");
+    for (const entry of observed.billedReconciliationEvidence as Record<string, unknown>[]) {
+      console.log(
+        `    ${String(entry.nodeId)} ${String(entry.providerGenerationId)}`
+        + ` chanter=${String(entry.chanterRecordedCostMicros)}µ`
+        + ` provider=${String(entry.providerOwnedCostMicros)}µ`
+        + ` delta=${String(entry.deltaMicros)}µ`
+        + ` verdict=${String(entry.verdict)}`
+        + ` lookups=${String(entry.lookupAttempts)}`,
+      );
+    }
+    console.log(
+      `    additional inference calls during reconciliation: `
+      + `${String(observed.billedReconciliationInferenceCalls ?? "?")}`,
+    );
+  }
   if (failure) console.error(`Failure: ${failure}`);
 
   // A failed run that spent money keeps its durable state. The provider usage

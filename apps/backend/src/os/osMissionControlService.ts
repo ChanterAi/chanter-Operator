@@ -54,6 +54,7 @@ import {
   UNCONFIGURED_APPROVAL_AUTHORITY_PROJECTION,
   type OperatorApprovalAuthorityProjection,
 } from "../runtimeMissions/persistedApprovalAuthority.js";
+import type { AgenticBillingReconciliationSummary } from "chanter-agent-runtime";
 import type { AgenticMissionService } from "../agentic/agenticMissionService.js";
 import type { AgenticMissionRecord, AgenticNodeRecord } from "../agentic/agenticPlanJournal.js";
 import { OperatorError } from "../services/operatorService.js";
@@ -309,6 +310,17 @@ export class OsMissionControlService {
       this.requirePlanGovernedId(osMissionIdValue),
       this.requireNodeId(nodeId),
     );
+  }
+
+  /**
+   * Re-reads this mission's recorded charges from the providers that issued them.
+   *
+   * Mission-scoped and idempotent. It reaches only the providers' billing-record
+   * endpoints, so calling it — at any time, after any restart, any number of
+   * times — cannot produce an inference request or a second charge.
+   */
+  reconcileBilling(osMissionIdValue: unknown): Promise<AgenticBillingReconciliationSummary> {
+    return this.requireAgentic().reconcileBilling(this.requirePlanGovernedId(osMissionIdValue));
   }
 
   resumeNode(osMissionIdValue: unknown, nodeId: unknown): Promise<AgenticNodeRecord> {

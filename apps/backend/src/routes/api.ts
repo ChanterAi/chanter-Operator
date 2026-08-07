@@ -255,6 +255,7 @@ export function createApiRouter(
           "/api/os/missions/:osMissionId/reconcile",
           "/api/os/missions/:osMissionId/resume",
           "/api/os/missions/:osMissionId/stop",
+          "/api/os/missions/:osMissionId/billing/reconcile",
           "/api/os/missions/:osMissionId/nodes/:nodeId/reconcile",
           "/api/os/missions/:osMissionId/nodes/:nodeId/resume",
           "/api/os/missions/:osMissionId/nodes/:nodeId/stop",
@@ -903,6 +904,23 @@ export function createApiRouter(
       } catch (error) {
         next(error);
       }
+    },
+  );
+
+  // Billing reconciliation is mission-scoped, not node-scoped: a charge belongs
+  // to the account, and the question it answers — "did the counterparty's own
+  // record confirm what we recorded?" — is asked of every charge the mission
+  // incurred. It carries the mission-control capability because it is a
+  // financial read against a real billing account, and it is safe to repeat:
+  // the only provider surface it can reach is the billing-record endpoint.
+  router.post(
+    "/os/missions/:osMissionId/billing/reconcile",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .reconcileBilling(String(request.params.osMissionId))
+        .then((summary) => response.json(summary))
+        .catch(next);
     },
   );
 

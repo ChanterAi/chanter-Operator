@@ -16,6 +16,7 @@
     "tools/os-agentic-fabric",
     "tools/os-ambiguous-reconciliation",
     "tools/os-assembly",
+    "tools/os-billing-reconciliation",
     "tools/os-csi-model-workers",
     "tools/os-platform-recovery",
     "tools/os-recovery",

@@ -35,6 +35,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   executeAgenticNode,
+  reconcileRecordedCharges,
+  type AgenticBillingReconciliationSummary,
   type AgenticNodeRecordStore,
   type GovernedModelInvocationOptions,
   type AgenticNodeRequest,
@@ -113,6 +115,22 @@ export interface AgenticFabricDependencies {
    * between the provider answering and the worker returning.
    */
   readonly providerFailureInjector?: GovernedModelInvocationOptions["failureInjector"];
+  /**
+   * How billing lookups wait between polls. Injected only so a test can prove
+   * the poll sequence without sleeping through the real backoff schedule.
+   */
+  readonly billingReconciliationWait?: (milliseconds: number) => Promise<void>;
+  /**
+   * Provider transports, overriding those derived from configuration.
+   *
+   * Injected the same way `governor` is, and for the same reason: a transport is
+   * a dependency, not a policy. It cannot change *what is bought* — model
+   * identity, price mode, and data handling all come from the code-defined
+   * binding registry, which this does not touch. It only changes how the request
+   * travels, which is what lets a test drive a billing-record endpoint without a
+   * live account.
+   */
+  readonly providerAdapters?: GovernedModelInvocationOptions["adapters"];
 }
 
 export interface AgenticMissionView {
@@ -212,10 +230,18 @@ export class AgenticMissionService {
     this.recordStore = this.journal.createWorkerRecordStore(this.now);
     this.providerInvocation = {
       registry: createOperatorProviderBindingRegistry(dependencies.configuration.providers),
-      adapters: createAgenticProviderAdapters(dependencies.configuration.providers),
+      adapters: dependencies.providerAdapters
+        ?? createAgenticProviderAdapters(dependencies.configuration.providers),
       usageStore: this.journal.createProviderUsageStore(),
       ...(dependencies.providerFailureInjector
         ? { failureInjector: dependencies.providerFailureInjector }
+        : {}),
+      // The inline billing lookup polls past a provider's eventual consistency,
+      // which means it genuinely waits. Threading the same injected wait here
+      // keeps a test from sleeping through a real backoff schedule on the
+      // node's critical path.
+      ...(dependencies.billingReconciliationWait
+        ? { reconciliationWait: dependencies.billingReconciliationWait }
         : {}),
     };
     this.tools = createAgenticToolSurface(dependencies.configuration.paths, {
@@ -1019,6 +1045,77 @@ export class AgenticMissionService {
       reconciledAt: timestamp,
       evidenceReferences: [`worker-record:${node.idempotencyKey}`],
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Billing reconciliation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Re-reads this mission's recorded charges from the providers that issued them.
+   *
+   * Separate from `reconcileNode`, which resolves an *execution* ambiguity. This
+   * resolves a *financial* one: the charge is known and durable, and what is
+   * missing is the counterparty's own confirmation of it.
+   *
+   * It exists because the inline attempt runs milliseconds after the provider
+   * answers, and a provider's billing record is written after the completion
+   * returns. The first live billed run lost both verdicts to that race — two
+   * real charges, two generation ids, two `HTTP 404`s three milliseconds later —
+   * and had no way to ask again, because a mission replay is refused at
+   * `AGENTIC_PROVIDER_ALREADY_INVOKED` before reconciliation is reachable.
+   *
+   * The generation ids were already durable. This is the reader for them, and it
+   * is safe to call at any time, from any process, any number of times: the only
+   * provider method it can reach is `reconcile`, so no invocation of it can
+   * produce a second inference call or a second charge.
+   */
+  async reconcileBilling(missionId: string): Promise<AgenticBillingReconciliationSummary> {
+    // Requires a real mission, so an unknown id is a typed 404 rather than a
+    // vacuously successful reconciliation of nothing.
+    const mission = this.journal.requireMission(missionId);
+    const summary = await reconcileRecordedCharges(this.journal.listProviderUsage(missionId), {
+      registry: this.providerInvocation.registry,
+      adapters: this.providerInvocation.adapters,
+      usageStore: this.providerInvocation.usageStore,
+      ...(this.dependencies.billingReconciliationWait
+        ? { wait: this.dependencies.billingReconciliationWait }
+        : {}),
+    });
+
+    // The mission's durable value observation carries a billing verdict, and it
+    // was computed when the mission finished — before this evidence existed. A
+    // completed mission whose charges are now confirmed must not keep asserting
+    // that they are unconfirmed: that is a stale financial statement, and the
+    // number a human reads later is this one, not the reconciliation response.
+    //
+    // Only the two billing fields are refreshed, and only when they actually
+    // change, and the refresh is journaled as its own event. Everything else the
+    // observation asserts was measured at completion and stays exactly as
+    // recorded — this is an added confirmation, not a re-opened mission.
+    const observation = mission.valueObservation;
+    if (observation && summary.chargesConsidered > 0) {
+      const refreshed: AgenticValueObservation = {
+        ...observation,
+        billedProviderCallCount: summary.chargesConsidered,
+        billingReconciliationVerdict: summary.verdict,
+      };
+      if (refreshed.billingReconciliationVerdict !== observation.billingReconciliationVerdict
+        || refreshed.billedProviderCallCount !== observation.billedProviderCallCount) {
+        this.journal.updateMission(missionId, {
+          eventType: "mission_billing_reconciled",
+          actor: mission.actorId,
+          reason: `Provider-owned billing evidence for ${summary.chargesConfirmed} of `
+            + `${summary.chargesConsidered} charge(s) resolved the verdict to ${summary.verdict}.`,
+          timestamp: this.now(),
+          valueObservation: refreshed,
+          evidenceReferences: summary.outcomes
+            .filter((outcome) => outcome.providerRequestId !== null)
+            .map((outcome) => `provider-generation:${String(outcome.providerRequestId)}`),
+        });
+      }
+    }
+    return summary;
   }
 
   /** Reads real durable truth for one node. Never guesses, never executes. */

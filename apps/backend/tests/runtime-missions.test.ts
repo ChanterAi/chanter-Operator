@@ -1435,6 +1435,9 @@ describe("Operator -> Runtime -> AutoPoster schedule mission P0", () => {
           "/api/os/missions/:osMissionId/reconcile",
           "/api/os/missions/:osMissionId/resume",
           "/api/os/missions/:osMissionId/stop",
+          // Billing reconciliation is mission-scoped and carries the same
+          // capability: it is a financial read against a real billing account.
+          "/api/os/missions/:osMissionId/billing/reconcile",
           // Node-level control shares the same capability: reconciling one node
           // is the same authority as reconciling the mission, only narrower.
           "/api/os/missions/:osMissionId/nodes/:nodeId/reconcile",
