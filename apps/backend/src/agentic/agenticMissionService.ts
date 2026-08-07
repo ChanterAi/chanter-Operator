@@ -762,13 +762,62 @@ export class AgenticMissionService {
           : null,
       },
     );
-    this.journal.transitionMission(mission.missionId, unknownOutcome ? "reconciliation_required" : "failed_recoverable", {
-      actor: mission.actorId,
-      reason: `Node ${node.nodeId} did not complete.`,
+    this.convergePlanFailure(
+      mission.missionId,
+      mission.actorId,
+      unknownOutcome ? "reconciliation_required" : "failed_recoverable",
+      `Node ${node.nodeId} did not complete.`,
       timestamp,
-      typedError: result.typedError
+      result.typedError
         ? { code: result.typedError.code, message: result.typedError.message }
         : null,
+    );
+  }
+
+  /**
+   * Moves the plan to its aggregate failure state, once.
+   *
+   * Plan failure is a **convergence, not an event**. Every failed node
+   * independently reports that the plan can no longer make progress, and one
+   * admitted batch routinely produces several such reports — two independent
+   * specialists failing for the same systematic reason is the ordinary case, not
+   * an exotic one. The first report moves the plan; the rest re-assert a fact
+   * that is already durable.
+   *
+   * Applying them anyway asks the state machine for `X -> X`, which it correctly
+   * refuses. The visible symptom is perverse: the mission fails on its *second*
+   * piece of bad news rather than its first, and reports a transition defect
+   * instead of whatever actually went wrong.
+   *
+   * Fixed here rather than by admitting self-transitions to the journal's map.
+   * `X -> X` genuinely is not a valid *transition*, and permitting it globally
+   * would let every other state silently re-enter itself — including terminal
+   * ones. What is legitimate is a caller recognising it has nothing left to
+   * change. That is orchestration policy, and the service owns it; the journal
+   * owns only whether a change is valid.
+   *
+   * Severity is never lowered. `reconciliation_required` means some node's
+   * outcome is genuinely *unknown*, which is strictly more conservative than a
+   * decided failure. A later decided failure must not downgrade it, or the plan
+   * would read as merely recoverable while an unresolved side effect stands —
+   * and a human would be invited to resume rather than to reconcile.
+   */
+  private convergePlanFailure(
+    missionId: string,
+    actor: string,
+    targetState: Extract<AgenticNodeState, "reconciliation_required" | "failed_recoverable">,
+    reason: string,
+    timestamp: string,
+    typedError: { code: string; message: string } | null,
+  ): void {
+    const current = this.journal.requireMission(missionId).status;
+    if (current === targetState) return;
+    if (current === "reconciliation_required" && targetState === "failed_recoverable") return;
+    this.journal.transitionMission(missionId, targetState, {
+      actor,
+      reason,
+      timestamp,
+      typedError,
     });
   }
 

@@ -94,7 +94,37 @@ export const EXTERNAL_BILLED_BINDING_ID = "external.openrouter.deepseek-v4-flash
  * able to swap it could change all three without review.
  */
 export const EXTERNAL_BILLED_MODEL_ID = "deepseek/deepseek-v4-flash" as const;
-export const EXTERNAL_BILLED_UPSTREAM_PROVIDERS: readonly string[] = Object.freeze(["deepseek"]);
+
+/**
+ * The exact upstream endpoint `provider.only` pins, derived from live endpoint
+ * truth rather than from the model author.
+ *
+ * Observed 2026-08-07 from `GET /api/v1/models/deepseek/deepseek-v4-flash/endpoints`
+ * (read-only; no inference issued). That surface returned 20 endpoints, and the
+ * relevant facts were:
+ *
+ *   - the slug `provider.only` accepts is the endpoint's **`tag`**, not its
+ *     `provider_name` — `"baidu/fp8"`, not `"Baidu"`;
+ *   - **`deepseek` is a valid tag but declares `structured_outputs: false`**.
+ *     That is what broke the first billed acceptance run: pinning it while
+ *     sending a strict `json_schema` under `require_parameters: true` and
+ *     `allow_fallbacks: false` left zero eligible endpoints, so both specialists
+ *     were refused at routing before any inference;
+ *   - 15 of the 20 endpoints declare both `response_format` and
+ *     `structured_outputs`.
+ *
+ * `baidu/fp8` is pinned from that eligible set on reviewed grounds: highest
+ * observed uptime (99.83% / 24h, 99.91% / 30m), fp8 rather than the more
+ * aggressive fp4 quantization for a judgement-bearing specialist whose claims a
+ * verifier must check, a 131 072-token completion ceiling far above this
+ * binding's 1 024, and near-lowest cost. It supports every parameter the adapter
+ * sends — and notably **not** `seed`, which is why the adapter does not send one.
+ *
+ * Changing this slug requires re-reading endpoint truth. Cost figures observed
+ * alongside it are routing evidence only: CHANTER's monetary authority is the
+ * charge OpenRouter reports per call, never a catalogue rate.
+ */
+export const EXTERNAL_BILLED_UPSTREAM_PROVIDERS: readonly string[] = Object.freeze(["baidu/fp8"]);
 
 function bindings(configuration: AgenticProviderConfiguration): readonly AgenticProviderBinding[] {
   const liveEnabled = configuration.localModelBaseUrl.trim().length > 0;

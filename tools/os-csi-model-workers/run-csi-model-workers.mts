@@ -1505,9 +1505,18 @@ try {
         const created = await postJson(
           context.baseUrl, "/api/os/missions", submitToken, simulatorSubmission(context.missionId));
         assert.equal(created.status, 201);
-        await postJson(
+        // The status is asserted even where the mission is expected to fail.
+        // An unasserted approve is what hid the plan-convergence defect for two
+        // P0s: every node-state assertion still passed, because the node
+        // transitions had already committed before the plan transition threw.
+        const approved = await postJson(
           context.baseUrl, `/api/os/missions/${context.osMissionId}/approve`, controlToken,
           { approvedBy: APPROVER });
+        assert.equal(
+          approved.status,
+          200,
+          `Advancing this scenario must not fault the plan state machine: ${JSON.stringify(approved.body)}`,
+        );
 
         const rows = providerUsageRows(context.databasePath, context.missionId);
         // One dispatch per specialist and no fallback: an unknown outcome may
@@ -1555,9 +1564,18 @@ try {
         const created = await postJson(
           context.baseUrl, "/api/os/missions", submitToken, simulatorSubmission(context.missionId));
         assert.equal(created.status, 201);
-        await postJson(
+        // The status is asserted even where the mission is expected to fail.
+        // An unasserted approve is what hid the plan-convergence defect for two
+        // P0s: every node-state assertion still passed, because the node
+        // transitions had already committed before the plan transition threw.
+        const approved = await postJson(
           context.baseUrl, `/api/os/missions/${context.osMissionId}/approve`, controlToken,
           { approvedBy: APPROVER });
+        assert.equal(
+          approved.status,
+          200,
+          `Advancing this scenario must not fault the plan state machine: ${JSON.stringify(approved.body)}`,
+        );
 
         const rows = providerUsageRows(context.databasePath, context.missionId);
         const malformed = rows.filter((row) => String(row.typed_error_json ?? "").includes("OUTPUT_NOT_JSON"));
@@ -1593,9 +1611,18 @@ try {
           context.baseUrl, "/api/os/missions", submitToken,
           simulatorSubmission(context.missionId, { modelNodeCostCeilingMicros: 1 }));
         assert.equal(created.status, 201);
-        await postJson(
+        // The status is asserted even where the mission is expected to fail.
+        // An unasserted approve is what hid the plan-convergence defect for two
+        // P0s: every node-state assertion still passed, because the node
+        // transitions had already committed before the plan transition threw.
+        const approved = await postJson(
           context.baseUrl, `/api/os/missions/${context.osMissionId}/approve`, controlToken,
           { approvedBy: APPROVER });
+        assert.equal(
+          approved.status,
+          200,
+          `Advancing this scenario must not fault the plan state machine: ${JSON.stringify(approved.body)}`,
+        );
 
         assert.equal(
           providerUsageRows(context.databasePath, context.missionId).length,
@@ -1627,9 +1654,18 @@ try {
             modelNodeCostCeilingMicros: 5_000,
           }));
         assert.equal(created.status, 201);
-        await postJson(
+        // The status is asserted even where the mission is expected to fail.
+        // An unasserted approve is what hid the plan-convergence defect for two
+        // P0s: every node-state assertion still passed, because the node
+        // transitions had already committed before the plan transition threw.
+        const approved = await postJson(
           context.baseUrl, `/api/os/missions/${context.osMissionId}/approve`, controlToken,
           { approvedBy: APPROVER });
+        assert.equal(
+          approved.status,
+          200,
+          `Advancing this scenario must not fault the plan state machine: ${JSON.stringify(approved.body)}`,
+        );
 
         assert.equal(
           providerUsageRows(context.databasePath, context.missionId).length,
@@ -1660,9 +1696,18 @@ try {
             requestedAt,
           }));
         assert.equal(created.status, 201);
-        await postJson(
+        // The status is asserted even where the mission is expected to fail.
+        // An unasserted approve is what hid the plan-convergence defect for two
+        // P0s: every node-state assertion still passed, because the node
+        // transitions had already committed before the plan transition threw.
+        const approved = await postJson(
           context.baseUrl, `/api/os/missions/${context.osMissionId}/approve`, controlToken,
           { approvedBy: APPROVER });
+        assert.equal(
+          approved.status,
+          200,
+          `Advancing this scenario must not fault the plan state machine: ${JSON.stringify(approved.body)}`,
+        );
 
         const rows = providerUsageRows(context.databasePath, context.missionId);
         for (const row of rows) {
@@ -1737,6 +1782,39 @@ try {
         assert.equal(approved.status, 200, JSON.stringify(approved.body));
 
         const rows = providerUsageRows(databasePath, billedMissionId);
+
+        // Capture the forensic record BEFORE asserting anything about it.
+        //
+        // The first live run asserted its way through the rows and threw on the
+        // first bad field, so the surviving report carried no generation id, no
+        // finish reason, no token counts and no charge — for calls that had
+        // already been paid for. An assertion that destroys the evidence it was
+        // examining makes a real charge unreconcilable.
+        observed.billedProviderCalls = rows.length;
+        observed.billedProviderEvidence = rows.map((row) => ({
+          nodeId: row.node_id,
+          bindingId: row.binding_id,
+          providerName: row.provider_name,
+          modelId: row.model_id,
+          mode: row.mode,
+          providerRequestId: row.provider_request_id,
+          finishReason: row.finish_reason,
+          inputTokens: row.input_tokens,
+          outputTokens: row.output_tokens,
+          totalTokens: row.total_tokens,
+          monetaryCostMicros: row.monetary_cost_micros,
+          monetaryCostSource: row.monetary_cost_source,
+          requestHash: row.request_hash,
+          rawResponseHash: row.raw_response_hash,
+          responseHash: row.response_hash,
+          reconciliation: row.reconciliation_json,
+          typedError: row.typed_error_json,
+        }));
+        observed.billedChargeMicros = rows.reduce(
+          (total, row) => total + (row.monetary_cost_micros === null ? 0 : Number(row.monetary_cost_micros)),
+          0,
+        );
+
         assert.equal(rows.length, 2, `Expected exactly two billed calls, saw ${rows.length}.`);
         let totalMicros = 0;
         for (const row of rows) {
@@ -1897,17 +1975,33 @@ try {
   console.log(`Report: ${reportPath}`);
   const passed = steps.filter((entry) => entry.outcome === "passed").length;
   console.log(`${verdict}  (${passed}/${steps.length} steps)`);
+  // Never claim a charge did not occur unless that was actually established.
+  // "NOT PROVEN" is a statement about evidence; "no charge occurred" is a
+  // statement about money, and conflating them tells a human they were not
+  // billed when nobody checked. The two are reported separately.
+  const chargeState = observed.billedProviderConfigured !== true
+    ? "no billed provider was configured, so no charge was possible"
+    : observed.billedChargeMicros !== undefined && observed.billedChargeMicros !== null
+      ? `A CHARGE WAS RECORDED: ${String(observed.billedChargeMicros)} micros across `
+        + `${String(observed.billedProviderCalls ?? "?")} provider call(s)`
+      : "whether a charge occurred is UNKNOWN from this run's surviving evidence";
   console.log(
     observed.billedProviderProven === true
       ? "Billed external provider cost authority: PROVEN (real charge measured and reconciled)"
-      : "Billed external provider cost authority: NOT PROVEN (no billed charge occurred)",
+      : "Billed external provider cost authority: NOT PROVEN",
   );
+  console.log(`  Charge state: ${chargeState}`);
   if (failure) console.error(`Failure: ${failure}`);
 
-  if (!keepArtifacts) {
+  // A failed run that spent money keeps its durable state. The provider usage
+  // rows are the only record of what was charged, and deleting them to keep the
+  // filesystem tidy would destroy the evidence needed to reconcile a real
+  // charge — precisely when it matters most.
+  const spentMoney = observed.billedProviderConfigured === true;
+  if (!keepArtifacts && !(spentMoney && verdict !== "PASS")) {
     rmSync(temporaryRoot, { recursive: true, force: true });
   } else {
-    console.log(`Kept temporary root: ${temporaryRoot}`);
+    console.log(`Kept temporary root (durable provider-usage state preserved): ${temporaryRoot}`);
   }
   process.exitCode = verdict === "PASS" ? 0 : 1;
 }
