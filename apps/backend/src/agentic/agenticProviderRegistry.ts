@@ -36,6 +36,7 @@
 import {
   createAgenticProviderBindingRegistry,
   OLLAMA_ADAPTER_ID,
+  OPENROUTER_ADAPTER_ID,
   SIMULATED_ADAPTER_ID,
   type AgenticProviderBinding,
   type AgenticProviderBindingRegistry,
@@ -66,11 +67,34 @@ export interface AgenticProviderConfiguration {
   readonly simulatorEnabled: boolean;
   /** Which reviewed simulator scenario is active. `disabled` registers none. */
   readonly simulatorScenario: AgenticSimulatorScenario;
+  /**
+   * Credential for the billed external provider, from secure configuration only.
+   *
+   * Empty disables the external binding entirely. This is the single switch that
+   * decides whether this deployment can spend money at all — an unconfigured
+   * deployment cannot reach a billed provider even if a mission asks for one.
+   */
+  readonly openRouterApiKey: string;
+  /** Origin only. Configuration, never mission input. */
+  readonly openRouterBaseUrl: string;
 }
 
 export const LOCAL_JUDGMENT_BINDING_ID = "local.ollama.gemma4-e4b.judgment" as const;
 export const SIMULATOR_PRIMARY_BINDING_ID = "simulator.primary" as const;
 export const SIMULATOR_FALLBACK_BINDING_ID = "simulator.fallback" as const;
+export const EXTERNAL_BILLED_BINDING_ID = "external.openrouter.deepseek-v4-flash.judgment" as const;
+
+/**
+ * The exact model this binding is authorized to purchase, and the exact upstream
+ * endpoint it may be served by.
+ *
+ * Both are reviewed code, not configuration. Configuration supplies the
+ * credential and the origin; it cannot change *what is bought*, because model
+ * identity determines price, capability, and data handling, and a deployment
+ * able to swap it could change all three without review.
+ */
+export const EXTERNAL_BILLED_MODEL_ID = "deepseek/deepseek-v4-flash" as const;
+export const EXTERNAL_BILLED_UPSTREAM_PROVIDERS: readonly string[] = Object.freeze(["deepseek"]);
 
 function bindings(configuration: AgenticProviderConfiguration): readonly AgenticProviderBinding[] {
   const liveEnabled = configuration.localModelBaseUrl.trim().length > 0;
@@ -104,6 +128,47 @@ function bindings(configuration: AgenticProviderConfiguration): readonly Agentic
       // would be the worst possible fallback.
       fallbackBindingId: null,
       dataHandlingClass: "local_process_only",
+      mode: "live",
+    },
+    {
+      // The one binding that spends money.
+      //
+      // OpenRouter is the *billing counterparty*: it charges the account, and it
+      // states the charge in the response. DeepSeek is the model it routes to,
+      // and what OpenRouter itself pays upstream is provenance only. Recording
+      // the model vendor as the provider would attribute CHANTER's spend to a
+      // party it has no billing relationship with.
+      bindingId: EXTERNAL_BILLED_BINDING_ID,
+      providerName: "openrouter",
+      adapterId: OPENROUTER_ADAPTER_ID,
+      modelId: EXTERNAL_BILLED_MODEL_ID,
+      enabled: configuration.openRouterApiKey.trim().length > 0,
+      structuredOutputMode: "json_schema",
+      // Well below the model's own million-token window. A bound this fabric
+      // chose, not one the model happens to permit — the ceiling exists to cap
+      // spend, and a ceiling set to the vendor's maximum caps nothing.
+      maxContextTokens: 32_000,
+      maxOutputTokens: 1_024,
+      timeoutMs: 120_000,
+      pricing: {
+        // The reason this provider was selected: it reports what it charged, so
+        // no price snapshot is needed and no rate is ever invented.
+        costMode: "provider_reported",
+        pricingRevision: null,
+        inputMicrosPerMillionTokens: null,
+        outputMicrosPerMillionTokens: null,
+        unpricedReason: null,
+      },
+      // One attempt, and no rate-limit fallback. Every automatic second attempt
+      // against a billed provider is a second real charge.
+      retryPolicy: { maxAttempts: 1, fallbackOnRateLimit: false },
+      // Terminal. A billed provider must never silently fall back to a free or
+      // simulated one: the answer would be cheaper and wrong, and the mission
+      // would have no way to tell.
+      fallbackBindingId: null,
+      // The first binding in this fabric where admitted context leaves the
+      // machine. Declared, so the fact is reviewable rather than implicit.
+      dataHandlingClass: "external_processor",
       mode: "live",
     },
     {
@@ -166,13 +231,18 @@ function bindings(configuration: AgenticProviderConfiguration): readonly Agentic
  * the absence of anything to select.
  */
 const CAPABILITY_BINDINGS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  // Order is preference order, and the free local provider stays first
+  // deliberately: a mission that does not explicitly ask to spend money does not
+  // spend money. The billed binding is reachable only by naming it.
   "architecture.analyze": Object.freeze([
     LOCAL_JUDGMENT_BINDING_ID,
+    EXTERNAL_BILLED_BINDING_ID,
     SIMULATOR_PRIMARY_BINDING_ID,
     SIMULATOR_FALLBACK_BINDING_ID,
   ]),
   "risk.analyze": Object.freeze([
     LOCAL_JUDGMENT_BINDING_ID,
+    EXTERNAL_BILLED_BINDING_ID,
     SIMULATOR_PRIMARY_BINDING_ID,
     SIMULATOR_FALLBACK_BINDING_ID,
   ]),
@@ -190,7 +260,13 @@ export function capabilitySupportsModelWorker(capabilityId: string): boolean {
 /** Every binding id in the reviewed registry, independent of configuration. */
 export function allRegisteredBindingIds(): readonly string[] {
   return Object.freeze(
-    bindings({ localModelBaseUrl: "configured", simulatorEnabled: true, simulatorScenario: "succeed" }).map((binding) => binding.bindingId),
+    bindings({
+      localModelBaseUrl: "configured",
+      simulatorEnabled: true,
+      simulatorScenario: "succeed",
+      openRouterApiKey: "configured",
+      openRouterBaseUrl: "https://openrouter.ai",
+    }).map((binding) => binding.bindingId),
   );
 }
 

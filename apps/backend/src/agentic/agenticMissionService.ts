@@ -1414,6 +1414,21 @@ export class AgenticMissionService {
         node.workerKind === "model_worker"
         && node.reconciliationOutcome === "worker_result_found"
         && this.journal.countProviderCallsForNode(node.idempotencyKey) > 0).length,
+      // Only calls that actually carried a charge. A local unbilled call and a
+      // failed dispatch both cost nothing, and counting them here would make an
+      // unbilled run indistinguishable from a billed one.
+      billedProviderCallCount: measured.filter((usage) => usage.monetaryCostMicros !== null).length,
+      billingReconciliationVerdict: (() => {
+        const billed = measured.filter((usage) => usage.monetaryCostMicros !== null);
+        if (billed.length === 0) return "not_attempted";
+        const verdicts = new Set(billed.map((usage) => usage.reconciliation.verdict));
+        // A single disagreement is reported as such even when other calls
+        // matched: `mixed` is the honest answer, and collapsing it to the
+        // majority verdict would hide the only charge worth investigating.
+        return verdicts.size === 1
+          ? ([...verdicts][0] as AgenticValueObservation["billingReconciliationVerdict"])
+          : "mixed";
+      })(),
       modelIdentitiesUsed: [...new Set(
         providerUsage.map((usage) => `${usage.providerName}/${usage.modelId}`),
       )].sort(),

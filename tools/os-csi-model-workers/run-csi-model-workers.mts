@@ -80,6 +80,10 @@ const LOCAL_MODEL_BASE_URL =
 const LIVE_BINDING_ID = "local.ollama.gemma4-e4b.judgment";
 const LIVE_MODEL_ID = "gemma4:e4b";
 const SIMULATOR_PRIMARY = "simulator.primary";
+const EXTERNAL_BILLED_BINDING_ID = "external.openrouter.deepseek-v4-flash.judgment";
+const EXTERNAL_BILLED_MODEL_ID = "deepseek/deepseek-v4-flash";
+/** Credential for the one billed provider. Read for presence only; never printed. */
+const OPENROUTER_API_KEY = process.env.AGENTIC_FABRIC_OPENROUTER_API_KEY?.trim() ?? "";
 const SIMULATOR_FALLBACK = "simulator.fallback";
 
 /**
@@ -101,6 +105,16 @@ function argValue(flag: string): string | undefined {
   return index >= 0 ? argv[index + 1] : undefined;
 }
 const keepArtifacts = argv.includes("--keep");
+/**
+ * Makes the billed external provider mandatory rather than merely reported.
+ *
+ * The canonical acceptance command for the Billed External Provider Cost
+ * Authority P0 **must** pass this. Without it the run still exercises the whole
+ * unbilled fabric and reports the billed seam as unproven — which keeps the
+ * canonical gate usable before a credential is provisioned, without ever letting
+ * a green gate imply that real money was governed.
+ */
+const requireBilledProvider = argv.includes("--require-billed-provider");
 /**
  * Permits the run to continue without a reachable live provider.
  *
@@ -632,6 +646,9 @@ function environmentFor(overrides: Record<string, string> = {}): Record<string, 
     AGENTIC_FABRIC_ARTIFACT_DIR: artifactRoot,
     AGENTIC_FABRIC_APPROVAL_TTL_MS: "1800000",
     AGENTIC_FABRIC_LOCAL_MODEL_BASE_URL: LOCAL_MODEL_BASE_URL,
+    // Passed through to the real server process so the billed binding can be
+    // enabled. Empty when unprovisioned, which leaves it disabled.
+    AGENTIC_FABRIC_OPENROUTER_API_KEY: OPENROUTER_API_KEY,
     OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT: operatorRoot,
     ...overrides,
   };
@@ -678,9 +695,25 @@ try {
           + "you intend to skip the live-provider evidence, and report the result as BLOCKED.",
         );
       }
+      // Checked here, before a single token is spent, so the billed acceptance
+      // command fails on a missing prerequisite in seconds rather than after
+      // minutes of local inference it was never going to be able to use.
+      if (requireBilledProvider && OPENROUTER_API_KEY.length === 0) {
+        throw new Error(
+          "--require-billed-provider was passed but AGENTIC_FABRIC_OPENROUTER_API_KEY is empty. "
+          + "The billed cost-authority seam cannot be proven without an authorized credential, and no "
+          + "unbilled evidence substitutes for it.",
+        );
+      }
       observed.liveProviderReachable = reachable;
       observed.liveProviderModels = models;
-      return { baseUrl: LOCAL_MODEL_BASE_URL, reachable, models };
+      return {
+        baseUrl: LOCAL_MODEL_BASE_URL,
+        reachable,
+        models,
+        billedProviderConfigured: OPENROUTER_API_KEY.length > 0,
+        billedProviderRequired: requireBilledProvider,
+      };
     },
   );
   const liveProvider = providerProbe.reachable === true;
@@ -1142,6 +1175,11 @@ try {
             localModelBaseUrl: LOCAL_MODEL_BASE_URL,
             simulatorEnabled: false,
             simulatorScenario: "disabled",
+            // Configured identically to the server process so the in-process
+            // recovery phase resolves the same registry. The recovery mission
+            // uses the local binding, so nothing here is purchased.
+            openRouterApiKey: OPENROUTER_API_KEY,
+            openRouterBaseUrl: "https://openrouter.ai",
           },
         },
         failureInjector: (boundary, context) => {
@@ -1649,6 +1687,185 @@ try {
     );
   });
 
+  // =========================================================================
+  phase("H — billed external provider cost authority");
+  // =========================================================================
+
+  const billedConfigured = OPENROUTER_API_KEY.length > 0;
+  observed.billedProviderConfigured = billedConfigured;
+  observed.billedProviderProven = false;
+
+  await step("Establish whether a billed external provider is authorized", async () => {
+    // Presence only. The value is never read into any output, and the run's own
+    // credential is scanned for *absence* in durable state further below. The
+    // hard requirement was already enforced in phase A, before any spend.
+    return {
+      billedProviderConfigured: billedConfigured,
+      required: requireBilledProvider,
+      bindingId: EXTERNAL_BILLED_BINDING_ID,
+      modelId: EXTERNAL_BILLED_MODEL_ID,
+    };
+  });
+
+  if (billedConfigured) {
+    const billedMissionId = `csi-billed-${runId}`;
+    const osBilledId = `os:governed_agentic_mission:${billedMissionId}`;
+    const billedArtifact = `BILLED_${ARTIFACT_NAME}`;
+
+    const billed = await step(
+      "Purchase two real inference calls and record the provider-reported charge",
+      async () => {
+        port = await freePort();
+        operator = await startOperator(environmentFor(), port);
+
+        const created = await postJson(operator.baseUrl, "/api/os/missions", submitToken, submission({
+          missionId: billedMissionId,
+          artifactName: billedArtifact,
+          requestedAt,
+          objective: "Prove billed external provider cost authority end to end.",
+          providerBindings: [
+            { capabilityId: "architecture.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+            { capabilityId: "risk.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+          ],
+        }));
+        assert.equal(created.status, 201, JSON.stringify(created.body));
+
+        // Nothing is purchased before a human grants execution authority.
+        assert.equal(providerCallCount(databasePath, billedMissionId), 0);
+        const approved = await postJson(
+          operator.baseUrl, `/api/os/missions/${osBilledId}/approve`, controlToken, { approvedBy: APPROVER });
+        assert.equal(approved.status, 200, JSON.stringify(approved.body));
+
+        const rows = providerUsageRows(databasePath, billedMissionId);
+        assert.equal(rows.length, 2, `Expected exactly two billed calls, saw ${rows.length}.`);
+        let totalMicros = 0;
+        for (const row of rows) {
+          assert.equal(row.binding_id, EXTERNAL_BILLED_BINDING_ID);
+          // The counterparty that charged the account — not the model vendor.
+          assert.equal(row.provider_name, "openrouter");
+          assert.equal(row.model_id, EXTERNAL_BILLED_MODEL_ID);
+          assert.equal(row.mode, "live", "a billed call must never be recorded as test mode");
+          assert.equal(row.typed_error_json, null, JSON.stringify(row.typed_error_json));
+
+          assert.ok(Number(row.input_tokens) > 0, "provider-authoritative input tokens");
+          assert.ok(Number(row.output_tokens) > 0, "provider-authoritative output tokens");
+
+          // The seam this whole P0 exists to close.
+          const micros = Number(row.monetary_cost_micros);
+          assert.ok(
+            row.monetary_cost_micros !== null && Number.isFinite(micros) && micros > 0,
+            "a billed call must record a real non-null monetary charge",
+          );
+          assert.equal(row.monetary_cost_source, "provider_reported");
+          assert.equal(row.pricing_revision, null, "a reported charge needs no invented price");
+          assert.ok(String(row.provider_request_id ?? "").length > 0, "the generation id must be recorded");
+          totalMicros += micros;
+        }
+        observed.billedProviderCalls = rows.length;
+        observed.billedTotalMicros = totalMicros;
+        return {
+          billedCalls: rows.length,
+          totalMonetaryCostMicros: totalMicros,
+          totalMonetaryCostUsd: (totalMicros / 1_000_000).toFixed(6),
+          monetaryCostSource: "provider_reported",
+        };
+      },
+    );
+
+    await step("Reconcile each charge against the provider's own billing record", async () => {
+      const rows = providerUsageRows(databasePath, billedMissionId);
+      const verdicts: string[] = [];
+      for (const row of rows) {
+        const reconciliation = JSON.parse(String(row.reconciliation_json ?? "{}")) as Record<string, unknown>;
+        verdicts.push(String(reconciliation.verdict));
+        assert.equal(
+          reconciliation.evidenceType,
+          "provider_generation_lookup",
+          "billing evidence must come from the provider's own record, never a price list",
+        );
+        // `unavailable` is honest and permitted; `mismatched` is not, because it
+        // means the charge and the provider's record genuinely disagree.
+        assert.notEqual(
+          reconciliation.verdict,
+          "mismatched",
+          `The provider's record disagrees with the recorded charge: ${JSON.stringify(reconciliation)}`,
+        );
+        if (reconciliation.verdict === "matched") {
+          assert.equal(reconciliation.deltaMicros, 0 || reconciliation.deltaMicros);
+          assert.ok(Number(reconciliation.externalAmountMicros) > 0);
+        }
+      }
+      observed.billedReconciliationVerdicts = verdicts;
+      const allMatched = verdicts.every((verdict) => verdict === "matched");
+      observed.billedProviderProven = allMatched;
+      assert.ok(
+        allMatched,
+        `Billing reconciliation did not confirm every charge: ${verdicts.join(", ")}. `
+        + "A PASS requires the provider's own record to confirm what CHANTER recorded.",
+      );
+      return { verdicts, reconciliationSource: "provider_generation_lookup" };
+    });
+
+    await step("Prove a replay of the billed mission purchases nothing", async () => {
+      const beforeRows = providerUsageRows(databasePath, billedMissionId);
+      const beforeMicros = beforeRows.reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+
+      // An abrupt kill, then the identical submission against the same state.
+      await killOperator(operator);
+      operator = null;
+      port = await freePort();
+      operator = await startOperator(environmentFor(), port);
+
+      const replayed = await postJson(operator.baseUrl, "/api/os/missions", submitToken, submission({
+        missionId: billedMissionId,
+        artifactName: billedArtifact,
+        requestedAt,
+        objective: "Prove billed external provider cost authority end to end.",
+        providerBindings: [
+          { capabilityId: "architecture.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+          { capabilityId: "risk.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+        ],
+      }));
+      assert.equal(replayed.status, 200);
+      assert.equal(replayed.body.replayed, true);
+
+      const afterRows = providerUsageRows(databasePath, billedMissionId);
+      const afterMicros = afterRows.reduce((total, row) => total + Number(row.monetary_cost_micros ?? 0), 0);
+      assert.equal(afterRows.length, beforeRows.length, "a replay must not purchase another call");
+      assert.equal(afterMicros, beforeMicros, "a replay must not change what was spent");
+      return {
+        billedCalls: `${beforeRows.length} -> ${afterRows.length}`,
+        monetaryCostMicros: `${beforeMicros} -> ${afterMicros}`,
+      };
+    });
+
+    await step("Prove the billed credential reached no durable record", async () => {
+      const text = agenticDatabaseText(databasePath);
+      // The literal value is used in memory only, for an absence check. It is
+      // never printed, and only the result of the check is reported.
+      assert.ok(!text.includes(OPENROUTER_API_KEY), "the provider credential must never be persisted");
+      assert.doesNotMatch(text, /Bearer\s+sk-or-/i);
+      assert.doesNotMatch(text, /sk-or-v1-[A-Za-z0-9]{8,}/);
+      return { credentialPersisted: false, credentialValueChecked: true, credentialValuePrinted: false };
+    });
+  } else {
+    await step("Report the billed cost-authority seam as unproven", async () => {
+      // Reported, never skipped silently. A green gate must not imply that real
+      // money was governed when no billed provider was ever reachable.
+      console.log("");
+      console.log("  !! BILLED EXTERNAL PROVIDER COST AUTHORITY: NOT PROVEN");
+      console.log("     No AGENTIC_FABRIC_OPENROUTER_API_KEY is configured, so no real charge was");
+      console.log("     incurred, measured, or reconciled. Everything above is unbilled evidence.");
+      console.log("     The P0 acceptance command is:");
+      console.log("       npm run os:csi-model-workers -- --require-billed-provider");
+      return {
+        billedProviderProven: false,
+        reason: "no billed external provider credential is configured",
+        monetaryCostMicros: null,
+      };
+    });
+  }
+
   verdict = "PASS";
 } catch (error) {
   failure = error instanceof Error ? error.message : String(error);
@@ -1666,6 +1883,9 @@ try {
       startedAt,
       completedAt: new Date().toISOString(),
       liveProviderRequired: !allowMissingProvider,
+      billedProviderRequired: requireBilledProvider,
+      billedProviderConfigured: observed.billedProviderConfigured ?? false,
+      billedProviderProven: observed.billedProviderProven ?? false,
       localModelBaseUrl: LOCAL_MODEL_BASE_URL,
       observed,
       steps,
@@ -1677,6 +1897,11 @@ try {
   console.log(`Report: ${reportPath}`);
   const passed = steps.filter((entry) => entry.outcome === "passed").length;
   console.log(`${verdict}  (${passed}/${steps.length} steps)`);
+  console.log(
+    observed.billedProviderProven === true
+      ? "Billed external provider cost authority: PROVEN (real charge measured and reconciled)"
+      : "Billed external provider cost authority: NOT PROVEN (no billed charge occurred)",
+  );
   if (failure) console.error(`Failure: ${failure}`);
 
   if (!keepArtifacts) {

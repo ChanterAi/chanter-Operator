@@ -1099,6 +1099,10 @@ CREATE TABLE IF NOT EXISTS operator_agentic_provider_usage (
   fallback_decision TEXT NOT NULL,
   fallback_from_binding_id TEXT,
   evidence_references_json TEXT NOT NULL,
+  -- Independent billing evidence for this exact charge, attached after the row
+  -- is already durable. Written by a second statement on purpose: the charge
+  -- must survive even when the evidence for it cannot be obtained.
+  reconciliation_json TEXT,
   recorded_at TEXT NOT NULL
 );
 

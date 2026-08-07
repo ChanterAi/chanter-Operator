@@ -32,11 +32,15 @@ import type {
   AgenticNodeRecordStore,
   AgenticNodeToolCallRecord,
   AgenticNodeWorkerRecord,
+  AgenticProviderReconciliation,
   AgenticProviderUsageRecord,
   AgenticProviderUsageStore,
   JsonValue,
 } from "chanter-agent-runtime";
-import { AGENTIC_MODEL_PROVIDER_CONTRACT_VERSION } from "chanter-agent-runtime";
+import {
+  AGENTIC_MODEL_PROVIDER_CONTRACT_VERSION,
+  AGENTIC_RECONCILIATION_NOT_ATTEMPTED,
+} from "chanter-agent-runtime";
 import { OperatorError } from "../services/operatorService.js";
 import type {
   AgenticCompiledPlan,
@@ -383,6 +387,7 @@ interface ProviderUsageRow {
   fallback_decision: string;
   fallback_from_binding_id: string | null;
   evidence_references_json: string;
+  reconciliation_json: string | null;
   recorded_at: string;
 }
 
@@ -1133,6 +1138,8 @@ export class AgenticPlanJournal {
       fallbackDecision: row.fallback_decision as AgenticProviderUsageRecord["fallbackDecision"],
       fallbackFromBindingId: row.fallback_from_binding_id,
       evidenceReferencesCited: parseJson<string[]>(row.evidence_references_json) ?? [],
+      reconciliation: parseJson<AgenticProviderReconciliation>(row.reconciliation_json)
+        ?? AGENTIC_RECONCILIATION_NOT_ATTEMPTED,
       recordedAt: row.recorded_at,
     });
 
@@ -1154,8 +1161,8 @@ export class AgenticPlanJournal {
             request_hash, raw_response_hash, response_hash, input_tokens, output_tokens, total_tokens,
             monetary_cost_micros, monetary_cost_source, monetary_cost_unavailable_reason, pricing_revision,
             latency_ms, finish_reason, typed_error_json, fallback_decision, fallback_from_binding_id,
-            evidence_references_json, recorded_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            evidence_references_json, reconciliation_json, recorded_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           usage.providerCallKey,
           usage.missionId,
@@ -1185,8 +1192,17 @@ export class AgenticPlanJournal {
           usage.fallbackDecision,
           usage.fallbackFromBindingId,
           JSON.stringify(usage.evidenceReferencesCited),
+          JSON.stringify(usage.reconciliation),
           usage.recordedAt,
         );
+      },
+      recordReconciliation(providerCallKey: string, reconciliation: AgenticProviderReconciliation): void {
+        // Updates only. A reconciliation describes a charge that is already
+        // durable; creating a row here would be evidence for a charge nobody
+        // recorded, which is worse than no evidence at all.
+        database.prepare(
+          "UPDATE operator_agentic_provider_usage SET reconciliation_json = ? WHERE provider_call_key = ?",
+        ).run(JSON.stringify(reconciliation), providerCallKey);
       },
       listForNode(idempotencyKey: string): readonly AgenticProviderUsageRecord[] {
         return (database

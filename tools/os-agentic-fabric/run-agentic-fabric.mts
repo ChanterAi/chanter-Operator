@@ -1202,6 +1202,9 @@ try {
             localModelBaseUrl: "",
             simulatorEnabled: false,
             simulatorScenario: "disabled",
+            // No billed provider either. This proof spends nothing at all.
+            openRouterApiKey: "",
+            openRouterBaseUrl: "https://openrouter.ai",
           },
         },
         failureInjector: (boundary, context) => {

@@ -37,9 +37,12 @@ import {
   capabilitySupportsModelWorker,
   createOperatorProviderBindingRegistry,
   defaultBindingFor,
+  EXTERNAL_BILLED_BINDING_ID,
+  EXTERNAL_BILLED_MODEL_ID,
   LOCAL_JUDGMENT_BINDING_ID,
   SIMULATOR_PRIMARY_BINDING_ID,
 } from "../src/agentic/agenticProviderRegistry.js";
+import { costEnforcementFor, OPENROUTER_ADAPTER_ID } from "chanter-agent-runtime";
 import {
   AGENTIC_SIMULATOR_SCENARIOS,
   createAgenticProviderAdapters,
@@ -208,6 +211,8 @@ describe("closed provider registry", () => {
       localModelBaseUrl: "",
       simulatorEnabled: false,
       simulatorScenario: "disabled",
+      openRouterApiKey: "",
+      openRouterBaseUrl: "https://openrouter.ai",
     });
     expect(registry.resolve(LOCAL_JUDGMENT_BINDING_ID)?.enabled).toBe(false);
     expect(defaultBindingFor("architecture.analyze", registry)).toBeNull();
@@ -218,6 +223,8 @@ describe("closed provider registry", () => {
       localModelBaseUrl: "http://127.0.0.1:11434",
       simulatorEnabled: true,
       simulatorScenario: "succeed",
+      openRouterApiKey: "",
+      openRouterBaseUrl: "https://openrouter.ai",
     });
     expect(defaultBindingFor("architecture.analyze", registry)).toBe(LOCAL_JUDGMENT_BINDING_ID);
   });
@@ -227,6 +234,8 @@ describe("closed provider registry", () => {
       localModelBaseUrl: "http://127.0.0.1:11434",
       simulatorEnabled: false,
       simulatorScenario: "disabled",
+      openRouterApiKey: "",
+      openRouterBaseUrl: "https://openrouter.ai",
     });
     const pricing = registry.resolve(LOCAL_JUDGMENT_BINDING_ID)?.pricing;
     expect(pricing?.costMode).toBe("unpriced_local_compute");
@@ -239,6 +248,8 @@ describe("closed provider registry", () => {
       localModelBaseUrl: "",
       simulatorEnabled: false,
       simulatorScenario: "disabled",
+      openRouterApiKey: "",
+      openRouterBaseUrl: "https://openrouter.ai",
     });
     expect(adapters.size).toBe(0);
   });
@@ -253,6 +264,103 @@ describe("closed provider registry", () => {
   it("keeps every registered binding id stable, independent of configuration", () => {
     expect([...allRegisteredBindingIds()]).toContain(LOCAL_JUDGMENT_BINDING_ID);
     expect([...authorizedBindingIdsFor("architecture.analyze")][0]).toBe(LOCAL_JUDGMENT_BINDING_ID);
+  });
+});
+
+describe("billed external provider binding", () => {
+  const configured = {
+    localModelBaseUrl: "",
+    simulatorEnabled: false,
+    simulatorScenario: "disabled" as const,
+    openRouterApiKey: "sk-or-v1-not-a-real-key-0000000000000000",
+    openRouterBaseUrl: "https://openrouter.ai",
+  };
+  const unconfigured = { ...configured, openRouterApiKey: "" };
+
+  it("cannot spend anything when no credential is configured", () => {
+    const registry = createOperatorProviderBindingRegistry(unconfigured);
+    expect(registry.resolve(EXTERNAL_BILLED_BINDING_ID)?.enabled).toBe(false);
+    // Two independent gates: the binding is disabled *and* no transport exists.
+    expect(createAgenticProviderAdapters(unconfigured).has(OPENROUTER_ADAPTER_ID)).toBe(false);
+  });
+
+  it("registers exactly one transport once a credential is configured", () => {
+    const registry = createOperatorProviderBindingRegistry(configured);
+    expect(registry.resolve(EXTERNAL_BILLED_BINDING_ID)?.enabled).toBe(true);
+    expect(createAgenticProviderAdapters(configured).has(OPENROUTER_ADAPTER_ID)).toBe(true);
+  });
+
+  it("names the billing counterparty as the provider, not the model vendor", () => {
+    const binding = createOperatorProviderBindingRegistry(configured).resolve(EXTERNAL_BILLED_BINDING_ID);
+    // OpenRouter charges the account. DeepSeek is what it routes to, and
+    // attributing the spend to DeepSeek would name a party CHANTER has no
+    // billing relationship with.
+    expect(binding?.providerName).toBe("openrouter");
+    expect(binding?.modelId).toBe(EXTERNAL_BILLED_MODEL_ID);
+    expect(binding?.mode).toBe("live");
+  });
+
+  it("declares provider-reported cost and therefore needs no invented price", () => {
+    const binding = createOperatorProviderBindingRegistry(configured).resolve(EXTERNAL_BILLED_BINDING_ID);
+    expect(binding?.pricing.costMode).toBe("provider_reported");
+    expect(binding?.pricing.inputMicrosPerMillionTokens).toBeNull();
+    expect(binding?.pricing.outputMicrosPerMillionTokens).toBeNull();
+    expect(binding?.pricing.pricingRevision).toBeNull();
+    // Post-only: the amount does not exist until the provider states it, so
+    // claiming pre-dispatch monetary enforcement would be false.
+    expect(costEnforcementFor(binding!)).toBe("post_only");
+  });
+
+  it("never falls back from a billed call to a cheaper or simulated one", () => {
+    const binding = createOperatorProviderBindingRegistry(configured).resolve(EXTERNAL_BILLED_BINDING_ID);
+    expect(binding?.fallbackBindingId).toBeNull();
+    expect(binding?.retryPolicy.maxAttempts).toBe(1);
+    expect(binding?.retryPolicy.fallbackOnRateLimit).toBe(false);
+  });
+
+  it("declares that admitted context leaves the machine", () => {
+    const registry = createOperatorProviderBindingRegistry(configured);
+    expect(registry.resolve(EXTERNAL_BILLED_BINDING_ID)?.dataHandlingClass).toBe("external_processor");
+    // Every other binding stays local, so the external one is the exception
+    // rather than the norm — and is visible as such.
+    for (const id of [LOCAL_JUDGMENT_BINDING_ID, SIMULATOR_PRIMARY_BINDING_ID]) {
+      expect(registry.resolve(id)?.dataHandlingClass).toBe("local_process_only");
+    }
+  });
+
+  it("keeps the free local provider ahead of the billed one in preference order", () => {
+    const order = [...authorizedBindingIdsFor("architecture.analyze")];
+    expect(order.indexOf(LOCAL_JUDGMENT_BINDING_ID)).toBeLessThan(order.indexOf(EXTERNAL_BILLED_BINDING_ID));
+    // A mission that does not name the billed binding does not spend money,
+    // even when a credential is present.
+    const registry = createOperatorProviderBindingRegistry({ ...configured, localModelBaseUrl: "http://127.0.0.1:11434" });
+    expect(defaultBindingFor("architecture.analyze", registry)).toBe(LOCAL_JUDGMENT_BINDING_ID);
+  });
+
+  it("is selectable by a mission, and binds into the node payload hash", () => {
+    const intent = compileAgenticIntent(submission({
+      ...MODEL_SUBMISSION,
+      providerBindings: [
+        { capabilityId: "architecture.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+        { capabilityId: "risk.analyze", bindingId: EXTERNAL_BILLED_BINDING_ID },
+      ],
+    }));
+    const billed = compileAgenticPlan(intent, bundle()).plan;
+    const local = compileAgenticPlan(compileAgenticIntent(submission(MODEL_SUBMISSION)), bundle()).plan;
+    const billedN2 = billed.nodes.find((node) => node.nodeId === "N2");
+    expect(billedN2?.providerBindingId).toBe(EXTERNAL_BILLED_BINDING_ID);
+    // Changing which provider a node uses changes the node, which changes the
+    // plan — so an approval given for a free provider cannot silently carry
+    // onto a billed one.
+    expect(billedN2?.payloadHash).not.toBe(local.nodes.find((node) => node.nodeId === "N2")?.payloadHash);
+    expect(billed.planId).not.toBe(local.planId);
+  });
+
+  it("still refuses to attach the billed binding to a deterministic capability", () => {
+    expect(refusalCode(() => compileAgenticIntent(submission({
+      ...MODEL_SUBMISSION,
+      providerBindings: [{ capabilityId: "outcome.verify", bindingId: EXTERNAL_BILLED_BINDING_ID }],
+    })))).toBe("AGENTIC_INTENT_MODEL_WORKER_NOT_PERMITTED");
   });
 });
 

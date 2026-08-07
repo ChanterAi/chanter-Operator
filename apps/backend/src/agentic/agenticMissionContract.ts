@@ -581,6 +581,25 @@ export interface AgenticValueObservation {
     | "not_measured"
     | "mixed";
   readonly duplicateModelCallsPrevented: number;
+  /**
+   * Provider calls that actually cost money — those carrying a measured charge.
+   *
+   * Distinct from `providerCallCount`, which includes unbilled local inference
+   * and failed dispatches. Conflating them would make an unbilled run look
+   * financially identical to a billed one.
+   */
+  readonly billedProviderCallCount: number;
+  /**
+   * Whether those charges were independently confirmed against the provider's
+   * own billing record. `mixed` when billed calls disagree, which is itself the
+   * signal — it must never be collapsed into the more favourable verdict.
+   */
+  readonly billingReconciliationVerdict:
+    | "matched"
+    | "mismatched"
+    | "unavailable"
+    | "not_attempted"
+    | "mixed";
   /** `provider/model` identities actually invoked, sorted and de-duplicated. */
   readonly modelIdentitiesUsed: readonly string[];
   /** Provider call keys of the durable usage rows this observation summarizes. */

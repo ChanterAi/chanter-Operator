@@ -25,15 +25,20 @@
  */
 import {
   createOllamaModelAdapter,
+  createOpenRouterModelAdapter,
   createSimulatedModelAdapter,
   OLLAMA_ADAPTER_ID,
+  OPENROUTER_ADAPTER_ID,
   SIMULATED_ADAPTER_ID,
   type AgenticProviderAdapter,
   type AgenticProviderDispatch,
   type SimulatedProviderBehaviour,
   type SimulatedProviderScript,
 } from "chanter-agent-runtime";
-import type { AgenticProviderConfiguration } from "./agenticProviderRegistry.js";
+import {
+  EXTERNAL_BILLED_UPSTREAM_PROVIDERS,
+  type AgenticProviderConfiguration,
+} from "./agenticProviderRegistry.js";
 
 /**
  * Closed set of simulator scenarios. Test mode only.
@@ -140,6 +145,24 @@ export function createAgenticProviderAdapters(
       // A malformed base URL leaves the adapter unregistered rather than
       // throwing at startup. The binding then fails closed at the moment it is
       // used, naming the problem far more precisely than a boot crash would.
+    }
+  }
+  // The billed adapter exists only when a credential does. Without one there is
+  // no transport, so the enabled-check and the adapter-check both have to fail
+  // before money could be spent — two independent gates, not one.
+  const openRouterKey = configuration.openRouterApiKey.trim();
+  if (openRouterKey) {
+    try {
+      adapters.set(OPENROUTER_ADAPTER_ID, createOpenRouterModelAdapter({
+        baseUrl: configuration.openRouterBaseUrl.trim() || "https://openrouter.ai",
+        apiKey: openRouterKey,
+        allowedUpstreamProviders: EXTERNAL_BILLED_UPSTREAM_PROVIDERS,
+        title: "CHANTER OS",
+      }));
+    } catch {
+      // A malformed origin or empty credential leaves the adapter unregistered,
+      // so the binding fails closed at use with a typed error rather than
+      // crashing the process at boot.
     }
   }
   if (configuration.simulatorEnabled && configuration.simulatorScenario !== "disabled") {

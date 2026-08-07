@@ -300,6 +300,16 @@ export const config = {
       simulatorScenario: normalizeSimulatorScenario(
         process.env.AGENTIC_FABRIC_SIMULATOR_SCENARIO ?? "",
       ),
+      /**
+       * Credential for the one billed external provider, from the environment
+       * only. It is read here, passed to the adapter closure, and never written
+       * to a binding, a durable record, a log, or an artifact. Empty leaves the
+       * billed binding disabled and its adapter unregistered, so an
+       * unconfigured deployment cannot spend money at all.
+       */
+      openRouterApiKey: process.env.AGENTIC_FABRIC_OPENROUTER_API_KEY?.trim() ?? "",
+      openRouterBaseUrl:
+        process.env.AGENTIC_FABRIC_OPENROUTER_BASE_URL?.trim() || "https://openrouter.ai",
     },
   },
   missionSubmit: {
