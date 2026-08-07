@@ -41,13 +41,22 @@ import {
   type AgenticContextSourceType,
   type AgenticExecutionPolicy,
   type AgenticFreshnessPolicy,
+  AGENTIC_MISSION_KINDS,
+  type AgenticExceptionIntent,
   type AgenticIntentContract,
+  type AgenticMissionKind,
   type AgenticOutputContract,
   type AgenticProviderBindingSelection,
   type AgenticTrustClass,
 } from "./agenticMissionContract.js";
+import type {
+  ExceptionAcceptanceConstraint,
+  ExceptionField,
+  ExceptionFieldValue,
+} from "./agenticExceptionContract.js";
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
+  AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
   minimumExecutablePlanDurationMs,
   resolveAgenticCapability,
 } from "./agenticCapabilityRegistry.js";
@@ -70,6 +79,16 @@ const FRESHNESS_POLICIES: readonly AgenticFreshnessPolicy[] = [
 
 /** Concurrency below this cannot produce the independent specialist work the plan needs. */
 export const AGENTIC_MINIMUM_PARALLELISM = 2;
+
+/**
+ * Wall-clock an operational-exception plan needs to be executable at all.
+ *
+ * The sum of the five nodes' declared budgets, with the human checkpoint
+ * contributing nothing because a human is not on a compute clock. Stated as a
+ * constant rather than derived, so a submission is refused at compile time with
+ * a number a human can check against the capability registry.
+ */
+export const EXCEPTION_PLAN_MINIMUM_DURATION_MS = 65_000;
 
 const MAX_TEXT = 4000;
 const MAX_LIST = 32;
@@ -320,6 +339,139 @@ function compileOutputContract(raw: unknown): AgenticOutputContract {
   return { format: "markdown", artifactName, requiredSections: sections };
 }
 
+/**
+ * Compiles the declared terminal condition for an operational exception.
+ *
+ * Every refusal here exists because the alternative is an unverifiable mission.
+ * A desired state with no fields states no outcome; one with no acceptance
+ * constraints gives the oracle nothing to judge; a field the connector cannot
+ * write compiles an action that will always be refused at the boundary, after a
+ * human has already approved it.
+ */
+function compileExceptionContract(raw: unknown): AgenticExceptionIntent {
+  const record = jsonObject(raw);
+  if (!record) {
+    refuse("AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS", "exceptionContract must be an object.");
+  }
+  const connectorId = boundedIdentifier(record.connectorId, "exceptionContract.connectorId");
+  const targetId = requiredText(record.targetId, "exceptionContract.targetId", 120);
+
+  const rawFields = record.desiredFields;
+  if (!Array.isArray(rawFields) || rawFields.length === 0 || rawFields.length > 16) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      "exceptionContract.desiredFields must state between 1 and 16 fields.",
+    );
+  }
+  const desiredFields: ExceptionField[] = rawFields.map((entry, index) => {
+    const field = jsonObject(entry);
+    if (!field) {
+      refuse(
+        "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+        `exceptionContract.desiredFields[${index}] must be an object.`,
+      );
+    }
+    return {
+      field: requiredText(field.field, `exceptionContract.desiredFields[${index}].field`, 120),
+      value: exceptionFieldValue(field.value, `exceptionContract.desiredFields[${index}].value`),
+    };
+  });
+  if (new Set(desiredFields.map((entry) => entry.field)).size !== desiredFields.length) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      "exceptionContract.desiredFields names the same field twice.",
+    );
+  }
+
+  const rawConstraints = record.acceptanceConstraints;
+  if (!Array.isArray(rawConstraints) || rawConstraints.length === 0 || rawConstraints.length > 16) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      "exceptionContract.acceptanceConstraints must state between 1 and 16 constraints.",
+    );
+  }
+  const acceptanceConstraints: ExceptionAcceptanceConstraint[] = rawConstraints.map((entry, index) => {
+    const constraint = jsonObject(entry);
+    if (!constraint) {
+      refuse(
+        "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+        `exceptionContract.acceptanceConstraints[${index}] must be an object.`,
+      );
+    }
+    if (constraint.comparison !== "equals") {
+      refuse(
+        "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+        `exceptionContract.acceptanceConstraints[${index}].comparison must be "equals".`,
+      );
+    }
+    return {
+      constraintId: boundedIdentifier(
+        constraint.constraintId,
+        `exceptionContract.acceptanceConstraints[${index}].constraintId`,
+      ),
+      field: requiredText(
+        constraint.field,
+        `exceptionContract.acceptanceConstraints[${index}].field`,
+        120,
+      ),
+      comparison: "equals" as const,
+      value: exceptionFieldValue(
+        constraint.value,
+        `exceptionContract.acceptanceConstraints[${index}].value`,
+      ),
+      statement: requiredText(
+        constraint.statement,
+        `exceptionContract.acceptanceConstraints[${index}].statement`,
+        400,
+      ),
+    };
+  });
+  if (new Set(acceptanceConstraints.map((entry) => entry.constraintId)).size
+    !== acceptanceConstraints.length) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      "exceptionContract.acceptanceConstraints reuses a constraint id.",
+    );
+  }
+
+  // Every constraint must judge a field the mission actually sets. A constraint
+  // over an unstated field could never be satisfied by this action, so the
+  // mission would be unverifiable by construction.
+  const stated = new Set(desiredFields.map((entry) => entry.field));
+  const orphaned = acceptanceConstraints
+    .filter((constraint) => !stated.has(constraint.field))
+    .map((constraint) => constraint.constraintId);
+  if (orphaned.length > 0) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      `exceptionContract.acceptanceConstraints ${orphaned.sort().join(", ")} judge fields the `
+      + "desired state does not state.",
+    );
+  }
+
+  return { connectorId, targetId, desiredFields, acceptanceConstraints };
+}
+
+/** One bounded operational value. Objects and arrays are refused, not coerced. */
+function exceptionFieldValue(raw: unknown, field: string): ExceptionFieldValue {
+  if (raw === null) return null;
+  if (typeof raw === "string") {
+    if (raw.length > 400) refuse("AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS", `${field} is too long.`);
+    return raw;
+  }
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) {
+      refuse("AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS", `${field} must be a finite number.`);
+    }
+    return raw;
+  }
+  if (typeof raw === "boolean") return raw;
+  refuse(
+    "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+    `${field} must be a string, finite number, boolean, or null.`,
+  );
+}
+
 function compileCapabilityList(raw: readonly unknown[], field: string): string[] {
   const capabilities = raw.map((entry, index) => boundedIdentifier(entry, `${field}[${index}]`));
   for (const capabilityId of capabilities) {
@@ -484,7 +636,47 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
     );
   }
 
-  const outputContract = compileOutputContract(body.outputContract);
+  // The kind decides which plan is compiled, so it is resolved before anything
+  // kind-specific is read. Defaulting to `artifact` keeps every existing
+  // submission valid unchanged, and the default is recorded rather than assumed.
+  const rawMissionKind = body.missionKind ?? "artifact";
+  if (typeof rawMissionKind !== "string"
+    || !AGENTIC_MISSION_KINDS.includes(rawMissionKind as AgenticMissionKind)) {
+    refuse(
+      "AGENTIC_INTENT_FIELD_INVALID",
+      `missionKind must be one of: ${AGENTIC_MISSION_KINDS.join(", ")}.`,
+    );
+  }
+  const missionKind = rawMissionKind as AgenticMissionKind;
+  if (body.missionKind === undefined) {
+    defaultsApplied.push({
+      field: "missionKind",
+      value: "artifact",
+      reason: "No mission kind was declared, so the artifact-producing plan was compiled.",
+    });
+  }
+
+  // Exactly one of the two output shapes, never both. A submission carrying an
+  // artifact contract *and* an exception contract has not said what it wants,
+  // and picking one would be the compiler deciding on the human's behalf.
+  const isException = missionKind === "operational_exception";
+  if (isException && body.outputContract !== undefined) {
+    refuse(
+      "AGENTIC_INTENT_OUTPUT_CONTRACT_AMBIGUOUS",
+      "An operational-exception mission writes no artifact, so it must declare no outputContract.",
+      409,
+    );
+  }
+  if (!isException && body.exceptionContract !== undefined) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      "An artifact mission resolves no operational exception, so it must declare no exceptionContract.",
+      409,
+    );
+  }
+  const outputContract = isException ? null : compileOutputContract(body.outputContract);
+  const exceptionContract = isException ? compileExceptionContract(body.exceptionContract) : null;
+
   const allowedCapabilities = compileCapabilityList(
     requiredArray(body.allowedCapabilities, "allowedCapabilities"),
     "allowedCapabilities",
@@ -558,8 +750,13 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
   }
 
   // Capability sufficiency. Never widened silently: a required capability that
-  // was forbidden or simply not allowed is named in the refusal.
-  for (const required of AGENTIC_ARTIFACT_MISSION_CAPABILITIES) {
+  // was forbidden or simply not allowed is named in the refusal. The required
+  // set follows the mission kind, so an exception mission is not asked to
+  // permit artifact capabilities it will never route to.
+  const requiredCapabilities = isException
+    ? AGENTIC_EXCEPTION_MISSION_CAPABILITIES
+    : AGENTIC_ARTIFACT_MISSION_CAPABILITIES;
+  for (const required of requiredCapabilities) {
     if (forbiddenCapabilities.includes(required)) {
       refuse(
         "AGENTIC_INTENT_FORBIDDEN_CAPABILITY_REQUIRED",
@@ -587,7 +784,12 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
   );
 
   const timeBudgetMs = positiveInteger(body.timeBudgetMs, "timeBudgetMs");
-  const minimumDuration = minimumExecutablePlanDurationMs(executionPolicy);
+  // The exception plan is a short linear chain of deterministic nodes, so the
+  // artifact plan's minimum would demand a budget it can never spend. The bound
+  // still exists — it is just the bound of the plan actually being compiled.
+  const minimumDuration = isException
+    ? EXCEPTION_PLAN_MINIMUM_DURATION_MS
+    : minimumExecutablePlanDurationMs(executionPolicy);
   if (timeBudgetMs < minimumDuration) {
     refuse(
       "AGENTIC_INTENT_BUDGET_BELOW_MINIMUM",
@@ -597,16 +799,24 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
     );
   }
   const maxParallelism = positiveInteger(body.maxParallelism, "maxParallelism");
-  if (maxParallelism < AGENTIC_MINIMUM_PARALLELISM) {
+  // An exception plan has no independent siblings — every node depends on the
+  // one before it — so demanding parallelism would be demanding capacity the
+  // plan cannot use. One is the honest floor for a chain.
+  const minimumParallelism = isException ? 1 : AGENTIC_MINIMUM_PARALLELISM;
+  if (maxParallelism < minimumParallelism) {
     refuse(
       "AGENTIC_INTENT_BUDGET_BELOW_MINIMUM",
-      `maxParallelism must be at least ${AGENTIC_MINIMUM_PARALLELISM} for independent specialist work.`,
+      `maxParallelism must be at least ${minimumParallelism} for this mission's plan shape.`,
       409,
     );
   }
 
+  // An exception mission's evidence is the connector's own state, read live by
+  // the observe node, so it may legitimately admit no fixture context at all.
   const contextRequirements = compileContextRequirements(
-    requiredArray(body.contextRequirements, "contextRequirements"),
+    isException
+      ? optionalArray(body.contextRequirements, "contextRequirements")
+      : requiredArray(body.contextRequirements, "contextRequirements"),
   );
 
   const requestedAt = requiredText(body.requestedAt ?? new Date().toISOString(), "requestedAt", 40);
@@ -646,7 +856,9 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
       "modelNodeCostCeilingMicros",
     ),
     contextRequirements,
+    missionKind,
     outputContract,
+    exceptionContract,
     requestedAt,
     humanText: {
       objective,

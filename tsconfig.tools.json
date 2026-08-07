@@ -18,6 +18,7 @@
     "tools/os-assembly",
     "tools/os-billing-reconciliation",
     "tools/os-csi-model-workers",
+    "tools/os-operational-exception",
     "tools/os-platform-recovery",
     "tools/os-recovery",
     "tools/os-unified",

@@ -17,6 +17,7 @@
  * every line here has to trace to an accepted claim or to durable identity.
  */
 import type { JsonValue } from "chanter-agent-runtime";
+import { requireArtifactOutputContract } from "./agenticMissionContract.js";
 import type { AgenticMissionRecord } from "./agenticPlanJournal.js";
 
 function stringList(value: JsonValue | undefined): string[] {
@@ -73,8 +74,9 @@ export function renderAgenticCandidate(
     }
   };
 
+  const outputContract = requireArtifactOutputContract(mission.intent);
   const lines: string[] = [
-    `# ${mission.intent.outputContract.artifactName}`,
+    `# ${outputContract.artifactName}`,
     "",
     `Objective: ${mission.objective}`,
     "",
@@ -87,7 +89,7 @@ export function renderAgenticCandidate(
     `- Plan hash: ${mission.planHash}`,
     "",
   ];
-  for (const section of mission.intent.outputContract.requiredSections) {
+  for (const section of outputContract.requiredSections) {
     lines.push(`## ${section}`, "", bodyFor(section), "");
   }
   lines.push(

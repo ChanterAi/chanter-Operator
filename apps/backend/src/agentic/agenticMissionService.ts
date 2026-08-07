@@ -48,16 +48,52 @@ import { OperatorError } from "../services/operatorService.js";
 import {
   AGENTIC_MISSION_VIEW_SCHEMA_VERSION,
   createAgenticCandidateHash,
+  requireArtifactOutputContract,
+  requireExceptionContract,
   type AgenticAcceptanceCriterion,
+  type AgenticIntentContract,
   type AgenticNodeState,
   type AgenticValueObservation,
 } from "./agenticMissionContract.js";
+import type { AgenticExceptionIntakeState } from "./agenticPlanJournal.js";
+import type { SimulatedConnector } from "./agenticSimulatedConnector.js";
+import {
+  compileActionContract,
+  computeStateDelta,
+  createDesiredStateHash,
+  createObservationHash,
+  exceptionFieldsFrom,
+  OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+  renderActionContractCandidate,
+  type ActionContract,
+  type DesiredState,
+  type ExceptionFieldValue,
+  type ExceptionValueObservation,
+  type ObservedState,
+  type OperationalExceptionTerminalState,
+  type TerminalOutcome,
+} from "./agenticExceptionContract.js";
+
+/** Why a mission is in each terminal state. One sentence, no interpretation. */
+const TERMINAL_OUTCOME_REASONS: Readonly<Record<OperationalExceptionTerminalState, string>> =
+  Object.freeze({
+    completed_verified:
+      "An independent oracle re-observed the source and confirmed it satisfies the desired state.",
+    blocked: "The mission is waiting on an authority decision it cannot make for itself.",
+    failed: "The mission stopped without reaching a verified resolution.",
+    unknown_requires_human:
+      "An outcome is ambiguous and must be reconciled by a human before anything else happens.",
+  });
 import {
   assertAgenticIntentUnchanged,
   compileAgenticIntent,
 } from "./agenticIntentCompiler.js";
 import { compileVerifiedContext, type AgenticContextSourcePort } from "./agenticContextCompiler.js";
-import { compileAgenticPlan } from "./agenticPlanCompiler.js";
+import {
+  authorityCheckpointNodeId,
+  compileAgenticPlan,
+  terminalVerificationNodeId,
+} from "./agenticPlanCompiler.js";
 import { requireAgenticCapability } from "./agenticCapabilityRegistry.js";
 import {
   AgenticPlanJournal,
@@ -74,7 +110,7 @@ import {
 } from "./agenticPlanGovernorPort.js";
 import { createAgenticToolSurface, type AgenticFabricPaths, type AgenticToolSurface } from "./agenticToolSurface.js";
 import { createAgenticContextSourcePort } from "./agenticContextSources.js";
-import { createAgenticWorkerSet } from "./agenticWorkers.js";
+import { createAgenticExceptionWorkerSet, createAgenticWorkerSet } from "./agenticWorkers.js";
 import { createOperatorProviderBindingRegistry, type AgenticProviderConfiguration } from "./agenticProviderRegistry.js";
 import { createAgenticProviderAdapters } from "./agenticProviderAdapters.js";
 import { renderAgenticCandidate } from "./agenticCandidateRenderer.js";
@@ -131,6 +167,14 @@ export interface AgenticFabricDependencies {
    * live account.
    */
   readonly providerAdapters?: GovernedModelInvocationOptions["adapters"];
+  /**
+   * The operational connector this deployment can reach, if any.
+   *
+   * Optional because a deployment may run the artifact lane alone. Without one,
+   * an operational-exception submission is refused at intake rather than
+   * compiled into a plan whose one consequential node could never execute.
+   */
+  readonly connector?: SimulatedConnector;
 }
 
 export interface AgenticMissionView {
@@ -257,6 +301,21 @@ export class AgenticMissionService {
           } satisfies Record<string, JsonValue>)
           : null;
       },
+    }, dependencies.connector === undefined ? undefined : {
+      manifest: () => dependencies.connector!.manifest() as unknown as JsonValue,
+      read: (targetId) => (dependencies.connector!.read(targetId) ?? null) as unknown as JsonValue,
+      readAction: (key) => (dependencies.connector!.readAction(key) ?? null) as unknown as JsonValue,
+      apply: (request) => dependencies.connector!.apply({
+        capability: request.capability,
+        targetId: request.targetId,
+        expectedPreStateHash: request.expectedPreStateHash,
+        writePayload: request.writePayload.map((entry) => ({
+          field: entry.field,
+          value: entry.value as ExceptionFieldValue,
+        })),
+        writePayloadHash: request.writePayloadHash,
+        idempotencyKey: request.idempotencyKey,
+      }) as unknown as JsonValue,
     });
     this.contextPort = createAgenticContextSourcePort(this.tools, this.now);
   }
@@ -286,6 +345,13 @@ export class AgenticMissionService {
 
     const compiledAt = this.now();
     const contextBundle = await compileVerifiedContext(intent, this.contextPort, { compiledAt });
+    // Established before the plan is compiled, because the plan's authority
+    // checkpoint exists to gate an action derived from this delta. A mission
+    // whose source record is missing, whose connector is unregistered, or whose
+    // delta is empty is refused here — before any node exists to approve.
+    const exceptionState = intent.missionKind === "operational_exception"
+      ? this.compileExceptionIntake(intent, compiledAt)
+      : null;
     const compiled = compileAgenticPlan(intent, contextBundle);
     const mission = this.journal.insertMission({
       intent,
@@ -294,6 +360,7 @@ export class AgenticMissionService {
       routing: compiled.routing,
       timestamp: compiledAt,
       idempotencyKeyFor: (nodeId) => `${intent.missionId}:${compiled.plan.planId}:${nodeId}`,
+      exceptionState,
     });
     return { view: this.project(mission), replayed: false };
   }
@@ -435,10 +502,14 @@ export class AgenticMissionService {
     const expiresAt = new Date(
       Date.parse(timestamp) + this.dependencies.configuration.approvalTtlMs,
     ).toISOString();
+    const checkpointNodeId = authorityCheckpointNodeId(mission.intent.missionKind);
+    const consequence = mission.intent.missionKind === "operational_exception"
+      ? "one bounded connector action"
+      : "one bounded local artifact write";
     this.journal.updateMission(missionId, {
       eventType: "candidate_approved",
       actor: approver,
-      reason: "A human authorized one bounded local artifact write for these exact candidate bytes.",
+      reason: `A human authorized ${consequence} for these exact candidate bytes.`,
       timestamp,
       candidateApprovedBy: approver,
       approvedCandidateHash: mission.candidateHash,
@@ -451,15 +522,15 @@ export class AgenticMissionService {
     // shortcut edge would open one for worker nodes too — a node that could
     // reach `completed` without ever being `running` is a node that could be
     // reported done without anything having happened.
-    this.journal.transitionNode(mission.planId, "N6", "running", {
+    this.journal.transitionNode(mission.planId, checkpointNodeId, "running", {
       actor: approver,
       reason: "A human began deciding this authority checkpoint.",
       timestamp,
       startedAt: timestamp,
     });
-    this.journal.transitionNode(mission.planId, "N6", "completed", {
+    this.journal.transitionNode(mission.planId, checkpointNodeId, "completed", {
       actor: approver,
-      reason: "Human authority for the bounded local artifact write was recorded.",
+      reason: `Human authority for ${consequence} was recorded.`,
       timestamp,
       completedAt: timestamp,
       output: { approvedBy: approver, candidateHash: mission.candidateHash },
@@ -578,16 +649,35 @@ export class AgenticMissionService {
   }
 
   private workersFor(mission: AgenticMissionRecord): AgenticNodeWorkerRegistry {
+    const candidate = (): { markdown: string; candidateHash: string } | null => {
+      const current = this.journal.requireMission(mission.missionId);
+      return current.candidateMarkdown && current.candidateHash
+        ? { markdown: current.candidateMarkdown, candidateHash: current.candidateHash }
+        : null;
+    };
+
+    // A mission is built with exactly the workers its own plan can route to.
+    // An exception mission therefore holds no artifact-writing worker at all,
+    // which is a stronger statement than refusing to call one.
+    if (mission.intent.missionKind === "operational_exception") {
+      return createAgenticExceptionWorkerSet({
+        intent: mission.intent,
+        contextBundle: mission.contextBundle,
+        tools: this.tools,
+        candidate,
+        artifactWriteCount: () => 0,
+        exceptionState: () => mission.exceptionState,
+        actionDeadline: () => new Date(
+          Date.parse(mission.requestedAt) + mission.intent.timeBudgetMs,
+        ).toISOString(),
+      });
+    }
+
     return createAgenticWorkerSet({
       intent: mission.intent,
       contextBundle: mission.contextBundle,
       tools: this.tools,
-      candidate: () => {
-        const current = this.journal.requireMission(mission.missionId);
-        return current.candidateMarkdown && current.candidateHash
-          ? { markdown: current.candidateMarkdown, candidateHash: current.candidateHash }
-          : null;
-      },
+      candidate,
       artifactWriteCount: () => this.journal.countArtifactWrites(mission.missionId),
       // The routed plan decides which capabilities became model workers, and
       // against which reviewed binding. Passing the *durable* nodes rather than
@@ -665,6 +755,11 @@ export class AgenticMissionService {
         : {};
     };
 
+    if (mission.intent.missionKind === "operational_exception") {
+      return this.exceptionInputFor(mission, node, outputOf);
+    }
+
+    const outputContract = requireArtifactOutputContract(mission.intent);
     switch (node.nodeId) {
       case "N1":
         return { requirementIds: mission.intent.contextRequirements.map((requirement) => requirement.requirementId) };
@@ -692,7 +787,7 @@ export class AgenticMissionService {
         const verified = outputOf("N4");
         return {
           acceptedClaims: (verified.acceptedClaims as JsonValue) ?? [],
-          requiredSections: [...mission.intent.outputContract.requiredSections],
+          requiredSections: [...outputContract.requiredSections],
           acceptanceCriteria: mission.intent.acceptanceCriteria.map(
             (criterion: AgenticAcceptanceCriterion) => ({ ...criterion }),
           ),
@@ -704,7 +799,7 @@ export class AgenticMissionService {
       }
       case "N7":
         return {
-          artifactName: mission.intent.outputContract.artifactName,
+          artifactName: outputContract.artifactName,
           candidateHash: String(mission.approvedCandidateHash ?? ""),
           approvalId: `${mission.missionId}:N6`,
         };
@@ -713,9 +808,9 @@ export class AgenticMissionService {
         const synthesis = outputOf("N5");
         const rejected = (verified.rejectedClaims as Array<Record<string, JsonValue>> | undefined) ?? [];
         return {
-          artifactName: mission.intent.outputContract.artifactName,
+          artifactName: outputContract.artifactName,
           approvedCandidateHash: String(mission.approvedCandidateHash ?? ""),
-          requiredSections: [...mission.intent.outputContract.requiredSections],
+          requiredSections: [...outputContract.requiredSections],
           rejectedClaimStatements: rejected.map((claim) => String(claim.statement)),
           evidenceIndex: (synthesis.evidenceIndex as string[] | undefined) ?? [],
         };
@@ -933,7 +1028,9 @@ export class AgenticMissionService {
       const current = this.journal.requireMission(mission.missionId);
       this.journal.recordArtifactWrite({
         missionId: mission.missionId,
-        artifactName: String(record.artifactName ?? current.intent.outputContract.artifactName),
+        artifactName: String(
+          record.artifactName ?? requireArtifactOutputContract(current.intent).artifactName,
+        ),
         artifactHash: String(record.artifactHash ?? ""),
         approvedCandidateHash: String(current.approvedCandidateHash ?? ""),
         byteLength: Number(record.bytesWritten ?? 0),
@@ -951,9 +1048,68 @@ export class AgenticMissionService {
       });
     }
 
-    if (node.nodeId === "N8") {
+    // The candidate for an exception mission is the compiled ActionContract
+    // itself, so the human approves the exact write rather than a description
+    // of it. Rendered and hashed here, before anyone sees it, for the same
+    // reason the artifact candidate is: what is approved and what is applied
+    // must be the same bytes by construction.
+    if (node.nodeId === "X2") {
+      const contract = this.exceptionActionContract(mission, record);
+      const candidate = renderActionContractCandidate(contract);
+      const candidateHash = createAgenticCandidateHash(candidate);
+      this.journal.updateMission(mission.missionId, {
+        eventType: "candidate_prepared",
+        actor: mission.actorId,
+        reason:
+          "An action contract was compiled from the approved state delta and bound to an exact hash.",
+        timestamp,
+        candidateHash,
+        candidateMarkdown: candidate,
+        evidenceReferences: [
+          `candidate-sha256:${candidateHash}`,
+          `action-contract:${contract.actionContractHash}`,
+        ],
+      });
+    }
+
+    if (node.nodeId === terminalVerificationNodeId(mission.intent.missionKind)) {
       this.finishMission(mission.missionId, record, timestamp);
     }
+  }
+
+  /**
+   * Rebuilds the ActionContract from durable intake state and X2's own output.
+   *
+   * Recompiled rather than trusted from the node's output: the worker reports
+   * hashes, and this is the one place those hashes are checked against a
+   * contract derived independently from the delta the human is about to see. A
+   * worker that reported a payload it did not compute is caught here.
+   */
+  private exceptionActionContract(
+    mission: AgenticMissionRecord,
+    record: Record<string, JsonValue>,
+  ): ActionContract {
+    const exception = requireExceptionContract(mission.intent);
+    const intake = this.exceptionIntake(mission);
+    const contract = compileActionContract({
+      missionId: mission.missionId,
+      connectorId: exception.connectorId,
+      capability: String(record.capability ?? ""),
+      targetId: exception.targetId,
+      expectedPreStateHash: intake.observed.observationHash,
+      delta: intake.delta,
+      deadline: new Date(
+        Date.parse(mission.requestedAt) + mission.intent.timeBudgetMs,
+      ).toISOString(),
+    });
+    if (contract.actionContractHash !== String(record.actionContractHash ?? "")) {
+      throw new OperatorError(
+        "The compiled action contract does not match the hash the node reported.",
+        409,
+        "AGENTIC_EXCEPTION_ACTION_CONTRACT_MISMATCH",
+      );
+    }
+    return contract;
   }
 
   /**
@@ -987,6 +1143,100 @@ export class AgenticMissionService {
         }),
       evidenceReferences: [`artifact-sha256:${String(outcome.artifactHash ?? "")}`],
     });
+  }
+
+  /**
+   * The mission's terminal answer, projected from durable plan truth.
+   *
+   * A projection, never a stored second opinion. The fabric owns one reviewed
+   * lifecycle with one set of legal transitions, and writing these four states
+   * into their own column would create a second authority over the same fact —
+   * one that could disagree with the plan it claims to summarize.
+   *
+   * `completed_verified` is unreachable except through a passing oracle, and
+   * structurally so: the plan cannot reach `completed` without one.
+   */
+  terminalOutcome(missionId: string): TerminalOutcome {
+    const mission = this.journal.requireMission(missionId);
+    const verificationNodeId = terminalVerificationNodeId(mission.intent.missionKind);
+    const oracle = this.journal.getNode(mission.planId, verificationNodeId);
+    const output = oracle?.output;
+    const verified = output !== null && output !== undefined && typeof output === "object"
+      && !Array.isArray(output)
+      && (output as Record<string, JsonValue>).outcomeVerified === true;
+
+    const state: OperationalExceptionTerminalState = mission.status === "completed"
+      ? "completed_verified"
+      : mission.status === "reconciliation_required"
+        ? "unknown_requires_human"
+        : mission.status === "failed_terminal" || mission.status === "failed_recoverable"
+          ? "failed"
+          : "blocked";
+
+    return {
+      schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+      missionId,
+      state,
+      // Read from the oracle's own durable output, not inferred from the plan
+      // state. The two agree today; if they ever disagreed, the honest report is
+      // the oracle's, and this makes that disagreement visible.
+      verified,
+      reason: TERMINAL_OUTCOME_REASONS[state],
+      verificationReference: oracle?.outputHash === undefined || oracle.outputHash === null
+        ? null
+        : `verification:${oracle.outputHash}`,
+    };
+  }
+
+  /**
+   * Bounded operational measures for one exception mission.
+   *
+   * Every field is counted from a durable row. There is deliberately no
+   * commercial figure: this fixture is an architecture proof, and an ROI number
+   * derived from it would be invented rather than measured.
+   */
+  exceptionValueObservation(missionId: string): ExceptionValueObservation {
+    const mission = this.journal.requireMission(missionId);
+    const nodes = this.journal.listNodes(mission.planId);
+    const events = this.journal.listEvents(missionId);
+    const providerUsage = this.journal.listProviderUsage(missionId);
+    const verifyNode = nodes.find((node) => node.nodeType === "outcome_verify");
+
+    // The connector's own count, not ours. "Exactly one action occurred" is a
+    // fact about the external system, so it is read from the oracle's
+    // independent observation of it rather than from our attempt count.
+    const verifyOutput = verifyNode?.output;
+    const connectorWrites = verifyOutput !== null && verifyOutput !== undefined
+      && typeof verifyOutput === "object" && !Array.isArray(verifyOutput)
+      ? Number((verifyOutput as Record<string, JsonValue>).connectorWriteCount ?? 0)
+      : 0;
+
+    const completedAt = events.find(
+      (event) => event.scope === "plan" && event.newState === "completed",
+    )?.timestamp ?? null;
+
+    return {
+      schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+      missionId,
+      exceptionDetected: mission.exceptionState ? 1 : 0,
+      stateChangingActions: connectorWrites,
+      // Attempts beyond the first that still produced one action. Zero is the
+      // guarantee; a positive number would mean the single-write property broke.
+      duplicateActions: Math.max(0, connectorWrites - 1),
+      humanApprovals: events.filter((event) => event.eventType === "candidate_approved").length,
+      reconciliationCount: nodes.filter((node) => node.reconciliationOutcome !== null).length,
+      verificationCount: verifyNode?.attempts ?? 0,
+      timeToVerifiedResolutionMs: completedAt === null
+        ? null
+        : Date.parse(completedAt) - Date.parse(mission.requestedAt),
+      // Zero, and measured rather than assumed: this plan routes nothing to a
+      // model, so a non-zero figure here would mean something unexpected ran.
+      providerCostMicros: providerUsage.reduce(
+        (total, usage) => total + (usage.monetaryCostMicros ?? 0),
+        0,
+      ),
+      providerCalls: providerUsage.length,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1023,6 +1273,25 @@ export class AgenticMissionService {
         reason: lapsed
           ? "The execution lease lapsed while the node was running, so its outcome is unknown."
           : "The node was left running by an interrupted execution, so its outcome is unknown.",
+        timestamp,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      });
+    } else if (
+      node.state === "failed_recoverable"
+      && node.capabilityId !== null
+      && requireAgenticCapability(node.capabilityId).sideEffectClass !== "none"
+    ) {
+      // A side-effecting node that *failed* is still ambiguous, and belongs in
+      // the state that says so. The throw may have come from the transport
+      // after the external system already acted, so "the worker failed" and
+      // "nothing happened" are different facts — and only the state named for
+      // ambiguity permits the resume that commits downstream truth.
+      node = this.journal.transitionNode(mission.planId, nodeId, "reconciliation_required", {
+        actor: mission.actorId,
+        reason:
+          "A node that can change something outside itself failed without establishing its outcome, "
+          + "so that outcome is unknown until the downstream system is asked.",
         timestamp,
         leaseOwner: null,
         leaseExpiresAt: null,
@@ -1118,15 +1387,206 @@ export class AgenticMissionService {
     return summary;
   }
 
+  // -------------------------------------------------------------------------
+  // Operational exception
+  // -------------------------------------------------------------------------
+
+  /**
+   * Establishes ObservedState, DesiredState, and StateDelta, once, at intake.
+   *
+   * Ordering matters and is deliberate. DesiredState is derived purely from what
+   * the human asked for, *before* the source is read, so it cannot be shaped by
+   * what happens to be there. ObservedState is then read from the connector.
+   * The delta is the difference, and it is a pure function of the two — which is
+   * why re-deriving it later reproduces the same hash or proves the world moved.
+   *
+   * Refuses a mission whose delta is empty: an exception with nothing to change
+   * is not an exception, and compiling a plan whose one write has no payload
+   * would put a meaningless approval in front of a human.
+   */
+  private compileExceptionIntake(
+    intent: AgenticIntentContract,
+    observedAt: string,
+  ): AgenticExceptionIntakeState {
+    const exception = requireExceptionContract(intent);
+    const connector = this.dependencies.connector;
+    if (!connector) {
+      throw new OperatorError(
+        "No operational connector is configured, so an operational-exception mission cannot be admitted.",
+        503,
+        "AGENTIC_CONNECTOR_UNAVAILABLE",
+      );
+    }
+    if (connector.connectorId !== exception.connectorId) {
+      throw new OperatorError(
+        `This deployment registers connector ${connector.connectorId}, not ${exception.connectorId}.`,
+        409,
+        "AGENTIC_CONNECTOR_MISMATCH",
+      );
+    }
+
+    const desiredBase = {
+      missionId: intent.missionId,
+      targetId: exception.targetId,
+      desiredFields: exception.desiredFields,
+      acceptanceConstraints: exception.acceptanceConstraints,
+    };
+    const desired: DesiredState = {
+      schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+      ...desiredBase,
+      desiredStateHash: createDesiredStateHash(desiredBase),
+    };
+
+    const record = connector.read(exception.targetId);
+    if (!record) {
+      throw new OperatorError(
+        `Connector ${connector.connectorId} holds no record ${exception.targetId}.`,
+        409,
+        "AGENTIC_EXCEPTION_TARGET_MISSING",
+      );
+    }
+    const observedBase = {
+      missionId: intent.missionId,
+      sourceSystemId: connector.connectorId,
+      targetId: record.targetId,
+      sourceRevision: record.revision,
+      observedFields: exceptionFieldsFrom(record.fields),
+    };
+    const observed: ObservedState = {
+      schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+      ...observedBase,
+      observationTime: observedAt,
+      observationHash: createObservationHash(observedBase),
+    };
+
+    const delta = computeStateDelta(observed, desired);
+    if (delta.changes.length === 0) {
+      throw new OperatorError(
+        `Record ${exception.targetId} already satisfies the desired state; there is no exception to resolve.`,
+        409,
+        "AGENTIC_EXCEPTION_NO_DELTA",
+      );
+    }
+
+    return { observed, desired, delta, connectorManifest: connector.manifest() };
+  }
+
+  /** The durable intake state, or a typed refusal if the mission carries none. */
+  private exceptionIntake(mission: AgenticMissionRecord): AgenticExceptionIntakeState {
+    if (!mission.exceptionState) {
+      throw new OperatorError(
+        `Mission ${mission.missionId} carries no durable operational-exception state.`,
+        409,
+        "AGENTIC_EXCEPTION_STATE_MISSING",
+      );
+    }
+    return mission.exceptionState;
+  }
+
+  /**
+   * The bounded input for one operational-exception node.
+   *
+   * Each node receives exactly the hashes it must bind to and nothing else. In
+   * particular the apply node is handed the approved candidate hash rather than
+   * the payload: it re-derives the payload from the durable ActionContract and
+   * re-hashes it, so an approval can never be carried onto different bytes.
+   */
+  private exceptionInputFor(
+    mission: AgenticMissionRecord,
+    node: AgenticNodeRecord,
+    outputOf: (nodeId: string) => Record<string, JsonValue>,
+  ): JsonValue {
+    const exception = requireExceptionContract(mission.intent);
+    const intake = this.exceptionIntake(mission);
+
+    switch (node.nodeId) {
+      case "X1":
+        return {
+          connectorId: exception.connectorId,
+          targetId: exception.targetId,
+          // What intake saw. The node re-reads the connector and compares, so a
+          // record that moved since submission is detected rather than assumed.
+          expectedObservationHash: intake.observed.observationHash,
+        };
+      case "X2":
+        return {
+          connectorId: exception.connectorId,
+          targetId: exception.targetId,
+          observationHash: String(outputOf("X1").observationHash ?? ""),
+          deltaHash: intake.delta.deltaHash,
+        };
+      case "X4":
+        return {
+          actionContractHash: String(outputOf("X2").actionContractHash ?? ""),
+          candidateHash: String(mission.approvedCandidateHash ?? ""),
+          approvalId: `${mission.missionId}:X3`,
+        };
+      case "X5":
+        return {
+          connectorId: exception.connectorId,
+          targetId: exception.targetId,
+          desiredStateHash: intake.desired.desiredStateHash,
+          idempotencyKey: String(outputOf("X2").idempotencyKey ?? ""),
+        };
+      /* c8 ignore next 2 -- unreachable: X3 is the checkpoint and runs no worker. */
+      default:
+        return {};
+    }
+  }
+
+  /**
+   * The idempotency key this mission's action was compiled under, if any.
+   *
+   * Read from the durable X2 output rather than recomputed, because
+   * reconciliation must ask about the key the write actually used. Recomputing
+   * it would produce the right answer only while nothing had changed — which is
+   * precisely the assumption reconciliation exists to avoid making.
+   */
+  private exceptionIdempotencyKey(mission: AgenticMissionRecord): string | null {
+    if (mission.intent.missionKind !== "operational_exception") return null;
+    const compiled = this.journal.getNode(mission.planId, "X2");
+    const output = compiled?.output;
+    if (output === null || output === undefined || typeof output !== "object" || Array.isArray(output)) {
+      return null;
+    }
+    const key = (output as Record<string, JsonValue>).idempotencyKey;
+    return typeof key === "string" && key.length > 0 ? key : null;
+  }
+
   /** Reads real durable truth for one node. Never guesses, never executes. */
   private investigate(
     mission: AgenticMissionRecord,
     node: AgenticNodeRecord,
   ): AgenticReconciliationOutcome {
+    if (node.reconciliationMode === "connector_action_lookup_before_retry") {
+      // Ask the system that would have performed the action.
+      //
+      // This is the only authority that can answer. The worker record says
+      // whether *we* committed an outcome; the connector says whether the
+      // action actually landed — and the whole ambiguous window is exactly the
+      // gap where those two disagree. A blind retry here is how one payment
+      // becomes two.
+      const idempotencyKey = this.exceptionIdempotencyKey(mission);
+      if (idempotencyKey === null) {
+        // No action contract was ever compiled, so no write could have been
+        // attempted under one. Absence here is a genuine finding.
+        return this.recordStore.read(node.idempotencyKey) ? "conflict" : "no_worker_result";
+      }
+      const applied = this.dependencies.connector?.readAction(idempotencyKey) ?? null;
+      if (applied) {
+        // The action is on the connector's books. The node may resume from that
+        // fact, and must never re-apply it.
+        return "worker_result_found";
+      }
+      // The connector has no record of it, so nothing was applied and a retry
+      // is safe — unless we durably recorded an outcome the connector cannot
+      // corroborate, which is a real contradiction and escalates.
+      return this.recordStore.read(node.idempotencyKey) ? "conflict" : "no_worker_result";
+    }
     if (node.reconciliationMode === "artifact_lookup_before_retry") {
       const written = this.journal.getArtifactWrite(
         mission.missionId,
-        mission.intent.outputContract.artifactName,
+        requireArtifactOutputContract(mission.intent).artifactName,
       );
       if (written) return "worker_result_found";
       // A worker record without an artifact-write row means the write node ran
@@ -1158,9 +1618,23 @@ export class AgenticMissionService {
     // marked `reconciliation_required`; refusing only the latter would let the
     // more dangerous case through, because that is the one still holding a
     // lease nobody has read.
+    // A third shape, and the one that matters most for a node that can change
+    // something outside itself: a *failed* side-effecting node whose outcome was
+    // never established. "The worker threw" is not the same fact as "nothing
+    // happened" — the throw may have come from the transport after the external
+    // system already acted, which is precisely the ambiguous window. Resuming it
+    // without asking the downstream system is a blind retry of a possible write.
+    //
+    // Pure nodes are exempt: re-running one that changes nothing outside its own
+    // record cannot duplicate anything, and demanding a reconcile for them would
+    // turn ordinary retry into a human interrupt.
+    const hasSideEffect = node.capabilityId !== null
+      && requireAgenticCapability(node.capabilityId).sideEffectClass !== "none";
     if (
       node.state === "running"
       || (node.state === "reconciliation_required" && node.reconciliationOutcome === null)
+      || (hasSideEffect && node.reconciliationOutcome === null
+        && (node.state === "failed_recoverable" || node.state === "failed_terminal"))
     ) {
       throw new OperatorError(
         `Node ${nodeId} has no established outcome; resume is refused until it is reconciled.`,
@@ -1179,7 +1653,47 @@ export class AgenticMissionService {
     }
 
     const timestamp = this.now();
-    if (node.state === "reconciliation_required" && node.reconciliationOutcome === "worker_result_found") {
+    // The connector branch is checked first, because for a connector node the
+    // authoritative record of what happened is the connector's, not ours. Our
+    // worker record may hold only the failure that interrupted it.
+    if (
+      node.reconciliationMode === "connector_action_lookup_before_retry"
+      && node.reconciliationOutcome === "worker_result_found"
+    ) {
+      const idempotencyKey = this.exceptionIdempotencyKey(mission);
+      const action = idempotencyKey === null
+        ? null
+        : this.dependencies.connector?.readAction(idempotencyKey) ?? null;
+      if (!action) {
+        throw new OperatorError(
+          `Node ${nodeId} reconciled to an applied connector action that can no longer be read.`,
+          409,
+          "AGENTIC_NODE_RECONCILIATION_CONFLICT",
+        );
+      }
+      const recovered: Record<string, JsonValue> = {
+        idempotencyKey: action.idempotencyKey,
+        postStateHash: action.postStateHash,
+        // The defining fact of this recovery: the action exists, and this
+        // resume did not create it.
+        performedWrite: false,
+        writeCount: 1,
+      };
+      this.journal.transitionNode(mission.planId, nodeId, "completed", {
+        actor: mission.actorId,
+        reason:
+          "Resume committed the connector's own record of the applied action; no second write occurred.",
+        timestamp,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        output: recovered,
+        outputHash: action.postStateHash,
+        completedAt: timestamp,
+        typedError: null,
+        evidenceReferences: [`connector-action:${action.idempotencyKey}`],
+      });
+      this.deriveAfterRecoveredCompletion(mission, nodeId, recovered, timestamp);
+    } else if (node.state === "reconciliation_required" && node.reconciliationOutcome === "worker_result_found") {
       const recorded = this.recordStore.read(node.idempotencyKey);
       if (!recorded) {
         throw new OperatorError(

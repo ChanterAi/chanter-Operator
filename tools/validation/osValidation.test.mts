@@ -128,14 +128,15 @@ describe("CHANTER OS validation orchestration", () => {
         "os:assembly",
         "os:unified",
         "os:agentic-fabric",
+        "os:operational-exception",
         "os:csi-model-workers",
       ],
     );
   });
 
-  it("keeps both agentic proofs present exactly once, with the model proof terminal", () => {
+  it("keeps every agentic proof present exactly once, with the model proof terminal", () => {
     const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
-    for (const script of ["os:agentic-fabric", "os:csi-model-workers"]) {
+    for (const script of ["os:agentic-fabric", "os:operational-exception", "os:csi-model-workers"]) {
       assert.equal(
         scripts.filter((entry) => entry === script).length,
         1,
@@ -150,6 +151,13 @@ describe("CHANTER OS validation orchestration", () => {
     assert.ok(
       scripts.indexOf("os:agentic-fabric") < scripts.indexOf("os:csi-model-workers"),
       "the deterministic fabric proof must stay ahead of the model-worker proof",
+    );
+    // The operational-exception proof performs no inference at all, so it is a
+    // far cheaper signal and must never sit behind the one stage that spends
+    // minutes on real model calls.
+    assert.ok(
+      scripts.indexOf("os:operational-exception") < scripts.indexOf("os:csi-model-workers"),
+      "the inference-free exception proof must stay ahead of the model-worker proof",
     );
   });
 
@@ -223,6 +231,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.deepEqual(outcome.skipped, [
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS operational exception mission",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -260,9 +269,10 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       false,
       "the terminal model-worker proof must never start",
     );
-    // Every stage after the first in-process recovery proof, which is now nine
-    // rather than eight because the model-worker proof joined the gate.
-    assert.equal(outcome.skipped.length, 9);
+    // Every stage after the first in-process recovery proof. Asserted against
+    // the declared list rather than a literal, so adding a stage cannot make
+    // this test wrong — only a stage that failed to be skipped can.
+    assert.equal(outcome.skipped.length, OS_VALIDATION_STAGES.length - 4);
   });
 
   it("preserves the Platform recovery proof's exact exit code and skips all later stages", async () => {
@@ -288,6 +298,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS operational exception mission",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -321,6 +332,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS end-to-end operational assembly",
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
+      "OS operational exception mission",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -373,6 +385,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     );
     assert.deepEqual(outcome.skipped, [
       "OS governed agentic execution fabric",
+      "OS operational exception mission",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -429,7 +442,10 @@ describe("CHANTER OS validation gate — agentic proof fail-fast", () => {
       false,
       "no inference is spent once the deterministic fabric is already broken",
     );
-    assert.deepEqual(outcome.skipped, ["OS collective synthetic intelligence model workers"]);
+    assert.deepEqual(outcome.skipped, [
+      "OS operational exception mission",
+      "OS collective synthetic intelligence model workers",
+    ]);
   });
 
   it("preserves the terminal model-worker proof's exact exit code", async () => {

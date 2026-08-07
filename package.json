@@ -50,6 +50,7 @@
     "os:unified": "node --import tsx tools/os-unified/run-unified-mission-control.mts",
     "os:agentic-fabric": "node --import tsx tools/os-agentic-fabric/run-agentic-fabric.mts",
     "os:csi-model-workers": "node --import tsx tools/os-csi-model-workers/run-csi-model-workers.mts",
+    "os:operational-exception": "node --import tsx tools/os-operational-exception/run-operational-exception.mts",
     "os:reconcile-charges": "node --import tsx tools/os-billing-reconciliation/reconcile-recorded-charges.mts"
   },
   "engines": {

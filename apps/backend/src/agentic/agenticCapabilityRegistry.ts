@@ -48,10 +48,11 @@ import type { AgenticExecutionPolicy } from "./agenticMissionContract.js";
 /**
  * Every tool any worker in this fabric may reach.
  *
- * All are read-only except `artifact.local.write`, which is the single
- * consequential effect the whole plan is built to gate. There is deliberately no
- * shell tool, no network tool, and no general filesystem tool: a worker cannot
- * be given a capability that was never implemented.
+ * All are read-only except `artifact.local.write` and `connector.state.apply`,
+ * which are the only two consequential effects the plans are built to gate — one
+ * per mission kind, and each reachable from exactly one capability. There is
+ * deliberately no shell tool, no network tool, and no general filesystem tool: a
+ * worker cannot be given a capability that was never implemented.
  */
 export const AGENTIC_TOOLS = [
   "repo.metadata.read",
@@ -61,6 +62,10 @@ export const AGENTIC_TOOLS = [
   "fixture.read",
   "artifact.local.read",
   "artifact.local.write",
+  "connector.manifest.read",
+  "connector.state.read",
+  "connector.action.read",
+  "connector.state.apply",
 ] as const;
 
 export type AgenticToolName = (typeof AGENTIC_TOOLS)[number];
@@ -72,7 +77,16 @@ export type AgenticReconciliationMode =
   /** Re-read the durable worker record; retry only when provably absent. */
   | "worker_record_lookup_before_retry"
   /** Re-read the written artifact and its hash; never rewrite speculatively. */
-  | "artifact_lookup_before_retry";
+  | "artifact_lookup_before_retry"
+  /**
+   * Ask the connector whether this exact idempotency key was already applied.
+   *
+   * Distinct from the artifact mode because the authority is different: an
+   * artifact is re-read from a filesystem this fabric owns, whereas this asks
+   * the system that would have performed the action. Only it knows whether the
+   * action landed during the window where nothing upstream committed.
+   */
+  | "connector_action_lookup_before_retry";
 
 /** Whether a human must authorize this capability before it may execute. */
 export type AgenticAuthorityRequirement =
@@ -570,6 +584,161 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     reconciliationMode: "worker_record_lookup_before_retry" as const,
     evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
   }),
+
+  // -------------------------------------------------------------------------
+  // Operational exception capabilities
+  // -------------------------------------------------------------------------
+
+  capability({
+    capabilityId: "exception.state.observe",
+    owner: "operator" as const,
+    description:
+      "Reads the connector's current record into a typed, hashed, source-identified ObservedState.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        connectorId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 120 },
+        expectedObservationHash: { kind: "string", minLength: 64, maxLength: 64 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        sourceSystemId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 120 },
+        sourceRevision: { kind: "string", minLength: 1, maxLength: 64 },
+        observationHash: { kind: "string", minLength: 64, maxLength: 64 },
+        // The whole reason this node re-observes rather than trusting intake.
+        matchesIntakeObservation: { kind: "boolean" },
+        recordExists: { kind: "boolean" },
+      },
+    },
+    riskClass: "read_only" as const,
+    authorityRequirement: "none" as const,
+    defaultBudget: budget({ maxToolCalls: 4, maxDurationMs: 15_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.manifest.read", "connector.state.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  capability({
+    capabilityId: "exception.action.compile",
+    owner: "operator" as const,
+    description:
+      "Compiles the one ActionContract that resolves the approved StateDelta, and nothing else.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        connectorId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 120 },
+        observationHash: { kind: "string", minLength: 64, maxLength: 64 },
+        deltaHash: { kind: "string", minLength: 64, maxLength: 64 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        actionContractHash: { kind: "string", minLength: 64, maxLength: 64 },
+        writePayloadHash: { kind: "string", minLength: 64, maxLength: 64 },
+        idempotencyKey: { kind: "string", minLength: 1, maxLength: 200 },
+        capability: { kind: "string", minLength: 1, maxLength: 120 },
+        changedFieldCount: { kind: "number", minimum: 1, integer: true },
+      },
+    },
+    riskClass: "read_only" as const,
+    authorityRequirement: "none" as const,
+    defaultBudget: budget({ maxToolCalls: 2, maxDurationMs: 15_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.manifest.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  capability({
+    capabilityId: "connector.state.apply",
+    owner: "operator" as const,
+    description:
+      "Applies exactly one approved ActionContract to the simulated connector, once.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        actionContractHash: { kind: "string", minLength: 64, maxLength: 64 },
+        candidateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        approvalId: { kind: "string", minLength: 1, maxLength: 200 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        idempotencyKey: { kind: "string", minLength: 1, maxLength: 200 },
+        postStateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        // `false` means this execution replayed an action the connector had
+        // already applied — the recovery case, and never a second write.
+        performedWrite: { kind: "boolean" },
+        writeCount: { kind: "number", minimum: 1, maximum: 1, integer: true },
+      },
+    },
+    // Truthfully `local_write`: the connector's entire state is local. The
+    // *simulation* of an external system is carried by `sideEffectClass`, so
+    // `external_write` stays an unsupported risk class rather than being
+    // quietly admitted through this capability.
+    riskClass: "local_write" as const,
+    authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
+    defaultBudget: budget({ maxToolCalls: 3, maxDurationMs: 15_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.state.read", "connector.action.read", "connector.state.apply"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "simulated_external" as const,
+    reconciliationMode: "connector_action_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  capability({
+    capabilityId: "exception.outcome.verify",
+    owner: "operator" as const,
+    description:
+      "Independently re-observes the connector and judges it against DesiredState.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        connectorId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 120 },
+        desiredStateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        idempotencyKey: { kind: "string", minLength: 1, maxLength: 200 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        recordExists: { kind: "boolean" },
+        postObservationHash: { kind: "string", minLength: 64, maxLength: 64 },
+        unsatisfiedConstraintIds: {
+          kind: "array",
+          items: { kind: "string", minLength: 1, maxLength: 120 },
+          maxItems: 32,
+        },
+        connectorWriteCount: { kind: "number", minimum: 0, maximum: 8, integer: true },
+        outcomeVerified: { kind: "boolean" },
+      },
+    },
+    riskClass: "read_only" as const,
+    authorityRequirement: "none" as const,
+    defaultBudget: budget({ maxToolCalls: 4, maxDurationMs: 20_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    // Read-only tools only. An oracle that could write is not an oracle.
+    allowedTools: ["connector.state.read", "connector.action.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
 ]);
 
 /**
@@ -606,6 +775,25 @@ function assertRegistryIsConsistent(): void {
     }
     if (capability.sideEffectClass === "external") {
       throw new Error(`Capability ${capability.capabilityId} declares an external side effect.`);
+    }
+    // Every consequential capability must be gated, and the gate is declared on
+    // the capability rather than inferred from a node name. Checking it here
+    // means a future capability that writes without an authority requirement
+    // fails at module load, not at the moment it writes.
+    if (capability.sideEffectClass !== "none"
+      && capability.authorityRequirement !== "human_approval_bound_to_candidate_hash") {
+      throw new Error(
+        `Capability ${capability.capabilityId} has a side effect but requires no human authority.`,
+      );
+    }
+    // A simulated-external write must be reconcilable against the system that
+    // would have performed it. Any other mode would resolve an ambiguous
+    // outcome by reading something that cannot know the answer.
+    if (capability.sideEffectClass === "simulated_external"
+      && capability.reconciliationMode !== "connector_action_lookup_before_retry") {
+      throw new Error(
+        `Capability ${capability.capabilityId} writes to a connector but does not reconcile against it.`,
+      );
     }
     // A model budget on a capability that can never route to a model would be
     // dead declaration, and worse, one a later edit could accidentally make
@@ -668,6 +856,20 @@ export const AGENTIC_ARTIFACT_MISSION_CAPABILITIES: readonly string[] = Object.f
   "result.synthesize",
   "artifact.local.write",
   "outcome.verify",
+]);
+
+/**
+ * The capabilities an operational-exception mission must be permitted to use.
+ *
+ * Deliberately a different, much smaller set than the artifact mission's. An
+ * exception mission compiles no prose and writes no artifact, so granting it
+ * those capabilities would widen its reach for no reason the plan can use.
+ */
+export const AGENTIC_EXCEPTION_MISSION_CAPABILITIES: readonly string[] = Object.freeze([
+  "exception.state.observe",
+  "exception.action.compile",
+  "connector.state.apply",
+  "exception.outcome.verify",
 ]);
 
 /**

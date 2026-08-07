@@ -879,6 +879,17 @@ export function createApiRouter(
     }
   });
 
+  // Read-only projection of one operational-exception mission: what was
+  // observed, what was wanted, the exact delta, the connector's declared
+  // capabilities, the terminal outcome, and the measured value observation.
+  router.get("/os/missions/:osMissionId/exception", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().exceptionOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get("/os/missions/:osMissionId/evidence", (request, response, next) => {
     try {
       response.json(requireOsMissionControlService().evidenceOf(String(request.params.osMissionId)));

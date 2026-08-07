@@ -323,6 +323,34 @@ export class OsMissionControlService {
     return this.requireAgentic().reconcileBilling(this.requirePlanGovernedId(osMissionIdValue));
   }
 
+  /**
+   * The operational-exception read model: intake state, terminal outcome, and
+   * measured value. All three are projections over durable truth, so this route
+   * is read-only in the strongest sense — there is no write path behind it.
+   */
+  exceptionOf(osMissionIdValue: unknown): Record<string, unknown> {
+    const missionId = this.requirePlanGovernedId(osMissionIdValue);
+    const agentic = this.requireAgentic();
+    const record = agentic.record(missionId);
+    if (record.intent.missionKind !== "operational_exception") {
+      throw new OperatorError(
+        `Mission ${missionId} is a ${record.intent.missionKind} mission and resolves no operational exception.`,
+        409,
+        "AGENTIC_MISSION_KIND_MISMATCH",
+      );
+    }
+    return {
+      missionId,
+      missionKind: record.intent.missionKind,
+      observedState: record.exceptionState?.observed ?? null,
+      desiredState: record.exceptionState?.desired ?? null,
+      stateDelta: record.exceptionState?.delta ?? null,
+      connectorManifest: record.exceptionState?.connectorManifest ?? null,
+      terminalOutcome: agentic.terminalOutcome(missionId),
+      valueObservation: agentic.exceptionValueObservation(missionId),
+    };
+  }
+
   resumeNode(osMissionIdValue: unknown, nodeId: unknown): Promise<AgenticNodeRecord> {
     return this.requireAgentic().resumeNode(
       this.requirePlanGovernedId(osMissionIdValue),

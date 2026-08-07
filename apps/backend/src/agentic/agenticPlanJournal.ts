@@ -51,6 +51,12 @@ import type {
   AgenticPlanState,
   AgenticValueObservation,
 } from "./agenticMissionContract.js";
+import type {
+  DesiredState,
+  ObservedState,
+  StateDelta,
+} from "./agenticExceptionContract.js";
+import type { ConnectorCapabilityManifest } from "./agenticSimulatedConnector.js";
 import type { AgenticRoutingDecision } from "./agenticCapabilityRouter.js";
 
 export interface AgenticTypedError {
@@ -91,6 +97,8 @@ export interface AgenticMissionRecord {
   readonly artifactHash: string | null;
   readonly artifactName: string | null;
   readonly valueObservation: AgenticValueObservation | null;
+  /** Intake state for an operational-exception mission; `null` for every other kind. */
+  readonly exceptionState: AgenticExceptionIntakeState | null;
   readonly typedError: AgenticTypedError | null;
   readonly requestedAt: string;
   readonly createdAt: string;
@@ -269,6 +277,7 @@ interface MissionRow {
   candidate_authority_revision: string | null;
   artifact_hash: string | null;
   artifact_name: string | null;
+  exception_state_json: string | null;
   value_observation_json: string | null;
   typed_error_json: string | null;
   requested_at: string;
@@ -434,6 +443,7 @@ function mapMission(row: MissionRow): AgenticMissionRecord {
     artifactHash: row.artifact_hash,
     artifactName: row.artifact_name,
     valueObservation: parseJson<AgenticValueObservation>(row.value_observation_json),
+    exceptionState: parseJson<AgenticExceptionIntakeState>(row.exception_state_json),
     typedError: parseJson<AgenticTypedError>(row.typed_error_json),
     requestedAt: row.requested_at,
     createdAt: row.created_at,
@@ -510,6 +520,27 @@ export interface AgenticMissionInsertInput {
   readonly timestamp: string;
   /** Deterministic execution identity per node, supplied by the service. */
   readonly idempotencyKeyFor: (nodeId: string) => string;
+  /**
+   * Intake state for an operational-exception mission. Written once, with the
+   * mission, and never updated: what was observed and wanted at submission is
+   * the thing every later hash binds to, so a later edit would silently
+   * invalidate an approval that had already been given.
+   */
+  readonly exceptionState?: AgenticExceptionIntakeState | null;
+}
+
+/**
+ * ObservedState, DesiredState, and StateDelta as established at intake.
+ *
+ * Carried together because they are one derivation: the delta is a pure
+ * function of the other two, and storing them apart would allow a combination
+ * that never actually existed.
+ */
+export interface AgenticExceptionIntakeState {
+  readonly observed: ObservedState;
+  readonly desired: DesiredState;
+  readonly delta: StateDelta;
+  readonly connectorManifest: ConnectorCapabilityManifest;
 }
 
 export interface AgenticEventInput {
@@ -680,9 +711,9 @@ export class AgenticPlanJournal {
         `INSERT INTO operator_agentic_missions (
           mission_id, trace_id, schema_version, workspace_id, actor_id, objective,
           intent_hash, intent_json, context_bundle_id, context_bundle_json,
-          plan_id, plan_hash, plan_json, routing_json, status, approval_required,
+          plan_id, plan_hash, plan_json, routing_json, exception_state_json, status, approval_required,
           requested_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'compiled', 1, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'compiled', 1, ?, ?, ?)`,
       ).run(
         intent.missionId,
         intent.traceId,
@@ -698,6 +729,9 @@ export class AgenticPlanJournal {
         plan.planHash,
         JSON.stringify(plan),
         JSON.stringify(input.routing),
+        input.exceptionState === undefined || input.exceptionState === null
+          ? null
+          : JSON.stringify(input.exceptionState),
         intent.requestedAt,
         input.timestamp,
         input.timestamp,
@@ -991,11 +1025,12 @@ export class AgenticPlanJournal {
         options.reconciliationOutcome !== undefined
         || options.reconciledAt !== undefined
         || options.leaseOwner !== undefined
+        || options.attempts !== undefined
       ) {
         this.database.prepare(
           `UPDATE operator_agentic_plan_nodes
               SET reconciliation_outcome = ?, reconciled_at = ?, lease_owner = ?,
-                  lease_expires_at = ?, updated_at = ?
+                  lease_expires_at = ?, attempts = ?, updated_at = ?
             WHERE plan_id = ? AND node_id = ?`,
         ).run(
           options.reconciliationOutcome === undefined
@@ -1004,6 +1039,11 @@ export class AgenticPlanJournal {
           options.reconciledAt === undefined ? current.reconciledAt : options.reconciledAt,
           options.leaseOwner === undefined ? current.leaseOwner : options.leaseOwner,
           options.leaseExpiresAt === undefined ? current.leaseExpiresAt : options.leaseExpiresAt,
+          // Recording an attempt allowance without a state change. A node
+          // already sitting in `failed_recoverable` cannot transition to itself,
+          // and inventing a round trip through another state purely to carry
+          // this number would journal two transitions that never happened.
+          options.attempts === undefined ? current.attempts : options.attempts,
           options.timestamp,
           planId,
           nodeId,

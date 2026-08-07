@@ -185,7 +185,12 @@ export async function compileVerifiedContext(
 
   const accepted = [...items.values()].sort((left, right) =>
     left.contextItemId.localeCompare(right.contextItemId));
-  if (accepted.length === 0) {
+  // An artifact mission reasons *from* admitted context, so an empty bundle
+  // means its specialists would have nothing to cite and the plan is refused.
+  // An operational-exception mission reasons from the connector's live state,
+  // read by its own observe node under the same bounded tool surface, so
+  // admitting no fixture context is a legitimate shape rather than an empty one.
+  if (accepted.length === 0 && intent.missionKind !== "operational_exception") {
     throw new OperatorError(
       "No context requirement produced an admissible item, so no plan can be compiled.",
       409,

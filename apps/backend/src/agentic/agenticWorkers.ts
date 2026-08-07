@@ -47,6 +47,16 @@ import {
   type AgenticIntentContract,
 } from "./agenticMissionContract.js";
 import type { AgenticToolSurface } from "./agenticToolSurface.js";
+import type { AgenticExceptionIntakeState } from "./agenticPlanJournal.js";
+import {
+  compileActionContract,
+  createObservationHash,
+  evaluateAcceptanceConstraints,
+  exceptionFieldsFrom,
+  OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+  type ActionContract,
+  type ExceptionFieldValue,
+} from "./agenticExceptionContract.js";
 
 /** The approved candidate bytes, read at write time rather than carried around. */
 export interface AgenticCandidateSnapshot {
@@ -74,6 +84,14 @@ export interface AgenticWorkerDependencies {
   /** Capabilities the committed plan routed to a model, with their bounds. */
   readonly modelNodes?: readonly AgenticModelNodeBinding[];
   readonly providerInvocation?: GovernedModelInvocationOptions;
+}
+
+/** What an operational-exception worker needs, and nothing an artifact worker does. */
+export interface AgenticExceptionWorkerDependencies extends AgenticWorkerDependencies {
+  /** Durable ObservedState/DesiredState/StateDelta established at intake. */
+  readonly exceptionState: () => AgenticExceptionIntakeState | null;
+  /** The instant the compiled action must be applied by. */
+  readonly actionDeadline: () => string;
 }
 
 /** Scope labels that mark which fixture a specialist reads. */
@@ -811,6 +829,473 @@ function outcomeVerifyWorker(dependencies: AgenticWorkerDependencies): AgenticNo
 }
 
 // ---------------------------------------------------------------------------
+// X1 — observe the connector's current state
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-reads the source and reports whether it still matches intake.
+ *
+ * The comparison is the point. Intake's observation is what the StateDelta and
+ * the human's approval were built on, and this node exists to establish, before
+ * anything is written, that the source has not moved since. It reports the
+ * mismatch rather than throwing: a moved record is a *finding*, and the plan
+ * fails closed on it one node later when the action's pre-state check refuses.
+ */
+function exceptionObserveWorker(dependencies: AgenticWorkerDependencies): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.exception-observe",
+    capabilityId: "exception.state.observe",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const targetId = String(input.targetId ?? "");
+      const expected = String(input.expectedObservationHash ?? "");
+
+      const response = jsonRecord(
+        await context.tools.invoke("connector.state.read", { targetId }),
+      );
+      const exists = response?.exists === true;
+      const record = jsonRecord(response?.record ?? null);
+      if (!exists || !record) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: `The connector holds no record ${targetId}, so no state can be observed.`,
+          }],
+        };
+      }
+
+      const fields = jsonRecord(record.fields) ?? {};
+      const observationHash = createObservationHash({
+        sourceSystemId: String(input.connectorId ?? ""),
+        targetId: String(record.targetId ?? targetId),
+        sourceRevision: String(record.revision ?? ""),
+        observedFields: exceptionFieldsFrom(fields as Record<string, ExceptionFieldValue>),
+      });
+
+      return {
+        ok: true,
+        structuredOutput: {
+          sourceSystemId: String(input.connectorId ?? ""),
+          targetId: String(record.targetId ?? targetId),
+          sourceRevision: String(record.revision ?? ""),
+          observationHash,
+          matchesIntakeObservation: observationHash === expected,
+          recordExists: true,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `observed ${targetId} at revision ${String(record.revision ?? "")}`,
+          sourceReference: `connector-observation:${observationHash}`,
+          content: { observationHash, matchesIntakeObservation: observationHash === expected },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X2 — compile the one action
+// ---------------------------------------------------------------------------
+
+/**
+ * Compiles the ActionContract, and refuses if the source has moved.
+ *
+ * This is where a stale observation stops the mission. The delta, the payload,
+ * and the idempotency key are all derived from the observation the *human's*
+ * approval will bind to, so compiling an action against a source that has since
+ * changed would produce a contract that can never be applied — and would put an
+ * unusable approval in front of a person.
+ */
+function exceptionActionCompileWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.exception-action-compile",
+    capabilityId: "exception.action.compile",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const observationHash = String(input.observationHash ?? "");
+      const intake = dependencies.exceptionState();
+      if (!intake) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "This mission carries no durable operational-exception state.",
+          }],
+        };
+      }
+
+      if (observationHash !== intake.observed.observationHash) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "The source record changed after this mission's state delta was established; "
+              + "the action is refused rather than compiled against a stale observation.",
+          }],
+        };
+      }
+
+      const manifest = jsonRecord(await context.tools.invoke("connector.manifest.read", {}));
+      const capabilities = Array.isArray(manifest?.capabilities)
+        ? manifest.capabilities.map((entry) => String(entry))
+        : [];
+      const writable = Array.isArray(manifest?.writableFields)
+        ? manifest.writableFields.map((entry) => String(entry))
+        : [];
+      const capability = capabilities[0] ?? "";
+      if (capabilities.length !== 1) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              `Connector declares ${capabilities.length} state-changing capabilities; this plan binds `
+              + "exactly one.",
+          }],
+        };
+      }
+      // Checked before a human is asked, not at the write. An action whose
+      // fields the connector cannot write is unapplyable, and discovering that
+      // after approval would waste the one decision that matters.
+      const unwritable = intake.delta.changes
+        .map((change) => change.field)
+        .filter((field) => !writable.includes(field));
+      if (unwritable.length > 0) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: `Connector capability ${capability} cannot write ${unwritable.sort().join(", ")}.`,
+          }],
+        };
+      }
+
+      const contract = compileActionContract({
+        missionId: dependencies.intent.missionId,
+        connectorId: String(input.connectorId ?? ""),
+        capability,
+        targetId: String(input.targetId ?? ""),
+        expectedPreStateHash: observationHash,
+        delta: intake.delta,
+        deadline: dependencies.actionDeadline(),
+      });
+
+      return {
+        ok: true,
+        structuredOutput: {
+          actionContractHash: contract.actionContractHash,
+          writePayloadHash: contract.writePayloadHash,
+          idempotencyKey: contract.idempotencyKey,
+          capability,
+          changedFieldCount: contract.writePayload.length,
+        },
+        evidence: [{
+          kind: "derived_claim",
+          label: `compiled one ${capability} action over ${contract.writePayload.length} field(s)`,
+          sourceReference: `state-delta:${intake.delta.deltaHash}`,
+          content: {
+            actionContractHash: contract.actionContractHash,
+            idempotencyKey: contract.idempotencyKey,
+          },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X4 — the one simulated external side effect
+// ---------------------------------------------------------------------------
+
+/**
+ * Applies exactly one approved action, or replays the one already applied.
+ *
+ * Three independent checks stand between arriving here and changing anything,
+ * and each catches a different confusion:
+ *
+ *   - the contract is **recompiled** and re-hashed, so the bytes about to be
+ *     written are derived here rather than accepted from the previous node;
+ *   - that hash is checked against the **approved candidate**, so an approval
+ *     cannot be carried onto a different action;
+ *   - the connector is asked whether this **idempotency key** already landed,
+ *     so a restart in the ambiguous window replays rather than re-applies.
+ *
+ * The pre-state check is deliberately *not* here. It belongs to the connector,
+ * because only the connector knows its own state at the instant of the write —
+ * a check performed here would be a check performed slightly too early.
+ */
+function connectorApplyWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.connector-apply",
+    capabilityId: "connector.state.apply",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const approvedHash = String(input.candidateHash ?? "");
+      const candidate = dependencies.candidate();
+      const intake = dependencies.exceptionState();
+      if (!candidate || !intake) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "No durable approved action contract exists to apply.",
+          }],
+        };
+      }
+      const derived = createAgenticCandidateHash(candidate.markdown);
+      if (derived !== approvedHash) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "The action contract bytes do not hash to the approved candidate hash; the write is refused.",
+          }],
+        };
+      }
+
+      const contract = parseActionContractCandidate(candidate.markdown);
+      if (!contract) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "The approved candidate is not a readable action contract.",
+          }],
+        };
+      }
+      if (contract.actionContractHash !== String(input.actionContractHash ?? "")) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "The approved action contract is not the one this node was asked to apply.",
+          }],
+        };
+      }
+
+      // Reconcile before acting. A restart inside the ambiguous window arrives
+      // here with the action already on the connector's books, and re-applying
+      // it would be the duplicate this whole plan exists to prevent.
+      const existing = jsonRecord(
+        await context.tools.invoke("connector.action.read", {
+          idempotencyKey: contract.idempotencyKey,
+        }),
+      );
+      if (existing?.applied === true) {
+        const action = jsonRecord(existing.action) ?? {};
+        return {
+          ok: true,
+          structuredOutput: {
+            idempotencyKey: contract.idempotencyKey,
+            postStateHash: String(action.postStateHash ?? ""),
+            performedWrite: false,
+            writeCount: 1,
+          },
+          evidence: [{
+            kind: "tool_output",
+            label: "replayed an action the connector had already applied",
+            sourceReference: `connector-action:${contract.idempotencyKey}`,
+            content: { performedWrite: false, postStateHash: String(action.postStateHash ?? "") },
+          }],
+        };
+      }
+
+      const applied = jsonRecord(
+        await context.tools.invoke("connector.state.apply", {
+          capability: contract.capability,
+          targetId: contract.targetId,
+          expectedPreStateHash: contract.expectedPreStateHash,
+          writePayload: contract.writePayload.map((entry) => ({
+            field: entry.field,
+            value: entry.value,
+          })),
+          writePayloadHash: contract.writePayloadHash,
+          idempotencyKey: contract.idempotencyKey,
+        }),
+      );
+      const action = jsonRecord(applied?.action) ?? {};
+
+      return {
+        ok: true,
+        structuredOutput: {
+          idempotencyKey: contract.idempotencyKey,
+          postStateHash: String(action.postStateHash ?? ""),
+          performedWrite: applied?.performedWrite === true,
+          writeCount: 1,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `applied ${contract.capability} to ${contract.targetId}`,
+          sourceReference: `connector-action:${contract.idempotencyKey}`,
+          content: {
+            performedWrite: applied?.performedWrite === true,
+            postStateHash: String(action.postStateHash ?? ""),
+          },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X5 — the independent verification oracle
+// ---------------------------------------------------------------------------
+
+/**
+ * Judges the connector's own state against DesiredState.
+ *
+ * Independent of every claim made before it. It does not read the apply node's
+ * report, the action contract's expectations, or any worker's opinion — it
+ * re-reads the source and evaluates the acceptance constraints the human
+ * approved. If the write had lied, been partial, or been applied to the wrong
+ * record, this is what would fail.
+ *
+ * It also counts the connector's applications of this idempotency key, so
+ * "exactly one action occurred" is verified from the connector's books rather
+ * than inferred from the absence of a second attempt.
+ */
+function exceptionVerifyWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.exception-verify",
+    capabilityId: "exception.outcome.verify",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const targetId = String(input.targetId ?? "");
+      const intake = dependencies.exceptionState();
+      if (!intake) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "This mission carries no durable desired state to verify against.",
+          }],
+        };
+      }
+
+      const response = jsonRecord(
+        await context.tools.invoke("connector.state.read", { targetId }),
+      );
+      const exists = response?.exists === true;
+      const record = jsonRecord(response?.record ?? null);
+      const fields = exists && record
+        ? exceptionFieldsFrom((jsonRecord(record.fields) ?? {}) as Record<string, ExceptionFieldValue>)
+        : [];
+      const postObservationHash = exists && record
+        ? createObservationHash({
+          sourceSystemId: String(input.connectorId ?? ""),
+          targetId: String(record.targetId ?? targetId),
+          sourceRevision: String(record.revision ?? ""),
+          observedFields: fields,
+        })
+        : "";
+
+      const evaluation = evaluateAcceptanceConstraints(
+        fields,
+        intake.desired.acceptanceConstraints,
+      );
+
+      // The connector's own count of applications under this key. One is the
+      // only acceptable answer; zero means nothing happened, and more than one
+      // would mean the duplicate guarantee failed.
+      const actionResponse = jsonRecord(
+        await context.tools.invoke("connector.action.read", {
+          idempotencyKey: String(input.idempotencyKey ?? ""),
+        }),
+      );
+      const connectorWriteCount = actionResponse?.applied === true ? 1 : 0;
+
+      const outcomeVerified = exists
+        && evaluation.satisfied
+        && connectorWriteCount === 1
+        && intake.desired.desiredStateHash === String(input.desiredStateHash ?? "");
+
+      return {
+        ok: true,
+        structuredOutput: {
+          recordExists: exists,
+          postObservationHash: postObservationHash || "0".repeat(64),
+          unsatisfiedConstraintIds: [...evaluation.unsatisfied],
+          connectorWriteCount,
+          outcomeVerified,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `independently verified ${targetId} against the approved desired state`,
+          sourceReference: `connector-observation:${postObservationHash}`,
+          content: {
+            outcomeVerified,
+            connectorWriteCount,
+            unsatisfiedConstraintIds: [...evaluation.unsatisfied],
+          },
+        }],
+      };
+    },
+  };
+}
+
+/**
+ * Reads back an approved action contract from its canonical candidate bytes.
+ *
+ * Returns `null` rather than throwing on anything unexpected: the caller is a
+ * worker whose job is to refuse cleanly, and an exception thrown here would
+ * become an execution failure instead of a typed denial.
+ */
+function parseActionContractCandidate(candidate: string): ActionContract | null {
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+    const record = jsonRecord(parsed);
+    if (!record) return null;
+    const payload = Array.isArray(record.writePayload) ? record.writePayload : null;
+    if (!payload) return null;
+    return {
+      schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
+      missionId: String(record.missionId ?? ""),
+      connectorId: String(record.connectorId ?? ""),
+      capability: String(record.capability ?? ""),
+      targetId: String(record.targetId ?? ""),
+      expectedPreStateHash: String(record.expectedPreStateHash ?? ""),
+      stateDeltaHash: String(record.stateDeltaHash ?? ""),
+      writePayload: payload.map((entry) => {
+        const field = jsonRecord(entry) ?? {};
+        return {
+          field: String(field.field ?? ""),
+          value: (field.value ?? null) as ExceptionFieldValue,
+        };
+      }),
+      writePayloadHash: String(record.writePayloadHash ?? ""),
+      idempotencyKey: String(record.idempotencyKey ?? ""),
+      deadline: String(record.deadline ?? ""),
+      actionContractHash: String(record.actionContractHash ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -843,6 +1328,25 @@ function specialistFor(
       fixtureScope: options.fixtureScope,
     })
     : specialistWorker(dependencies, options);
+}
+
+/**
+ * The workers for one operational-exception mission.
+ *
+ * A separate set, not an addition to the artifact set. A mission is built with
+ * exactly the workers its own plan can route to, so an exception mission holds
+ * no artifact-writing worker at all — the strongest form of "it cannot write an
+ * artifact" is that no such worker was ever constructed for it.
+ */
+export function createAgenticExceptionWorkerSet(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorkerRegistry {
+  return createAgenticWorkerRegistry([
+    exceptionObserveWorker(dependencies),
+    exceptionActionCompileWorker(dependencies),
+    connectorApplyWorker(dependencies),
+    exceptionVerifyWorker(dependencies),
+  ]);
 }
 
 export function createAgenticWorkerSet(

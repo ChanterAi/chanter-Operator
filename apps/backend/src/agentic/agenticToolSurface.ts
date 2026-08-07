@@ -1,11 +1,16 @@
 /**
  * CHANTER OS — the fabric's entire tool surface.
  *
- * Six tools, all bounded to explicitly configured roots, and no seventh. There
- * is no shell, no network, no process spawn, and no general filesystem access,
- * because a worker cannot be granted a capability that was never built: the
- * strongest possible statement of "workers cannot reach outside their bounds" is
- * that the reaching mechanism does not exist.
+ * A closed set of named tools, all bounded to explicitly configured roots, and
+ * nothing beyond it. There is no shell, no network, no process spawn, and no
+ * general filesystem access, because a worker cannot be granted a capability
+ * that was never built: the strongest possible statement of "workers cannot
+ * reach outside their bounds" is that the reaching mechanism does not exist.
+ *
+ * The four `connector.*` tools reach an operational connector that stands in for
+ * an external system while owning only local state. They are individually named
+ * operations rather than one dispatcher, so a worker cannot compose a connector
+ * action the ActionContract did not bind.
  *
  * The Runtime enforces *which* of these a given node may call, from its
  * capability's allowlist. This module enforces *what each one can touch*:
@@ -38,6 +43,32 @@ export interface AgenticFabricPaths {
 /** Reads one durable Operator mission state. Supplied by the fabric service. */
 export interface AgenticMissionStateReader {
   read(missionId: string): JsonValue | null;
+}
+
+/**
+ * The connector seam.
+ *
+ * Three named operations, not a generic dispatcher. A worker cannot ask this
+ * surface to "run capability X with payload Y" of its own choosing: `apply`
+ * takes exactly the fields an ActionContract binds, and the connector itself
+ * re-checks the capability, the target, the pre-state, and the idempotency key
+ * before changing anything.
+ *
+ * Supplied by the fabric service rather than constructed here, because the
+ * connector owns durable state and this module owns none.
+ */
+export interface AgenticConnectorPort {
+  manifest(): JsonValue;
+  read(targetId: string): JsonValue | null;
+  readAction(idempotencyKey: string): JsonValue | null;
+  apply(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedPreStateHash: string;
+    readonly writePayload: readonly { readonly field: string; readonly value: JsonValue }[];
+    readonly writePayloadHash: string;
+    readonly idempotencyKey: string;
+  }): JsonValue;
 }
 
 /** Largest source a single read may return. Bigger sources are refused, not truncated. */
@@ -111,8 +142,23 @@ export interface AgenticToolSurface extends AgenticNodeToolInvoker {
 export function createAgenticToolSurface(
   paths: AgenticFabricPaths,
   missionState: AgenticMissionStateReader,
+  connector?: AgenticConnectorPort,
 ): AgenticToolSurface {
   let served = 0;
+
+  function requireConnector(): AgenticConnectorPort {
+    if (!connector) {
+      // A deployment without a connector cannot reach one, and says so. The
+      // alternative — a stub that returns empty state — would let an
+      // operational-exception mission "verify" against a system that was never
+      // there.
+      refuse(
+        "AGENTIC_TOOL_CONNECTOR_UNAVAILABLE",
+        "No operational connector is registered for this fabric.",
+      );
+    }
+    return connector;
+  }
 
   function repositoryRoot(name: string): string {
     const root = paths.repositories[name];
@@ -206,6 +252,51 @@ export function createAgenticToolSurface(
             path: target,
             byteLength: Buffer.byteLength(contents, "utf8"),
           };
+        }
+        case "connector.manifest.read": {
+          return requireConnector().manifest();
+        }
+        case "connector.state.read": {
+          const targetId = requireString(request.targetId, "targetId");
+          const record = requireConnector().read(targetId);
+          // Absence is an answer, not an error: an observation must be able to
+          // report that the record it was told about is not there.
+          return record === null ? { targetId, exists: false } : { targetId, exists: true, record };
+        }
+        case "connector.action.read": {
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const action = requireConnector().readAction(idempotencyKey);
+          // The reconciliation read. `applied: false` is the finding that
+          // permits a retry; it is never inferred from a missing response.
+          return action === null
+            ? { idempotencyKey, applied: false }
+            : { idempotencyKey, applied: true, action };
+        }
+        case "connector.state.apply": {
+          const capability = requireString(request.capability, "capability");
+          const targetId = requireString(request.targetId, "targetId");
+          const expectedPreStateHash = requireString(request.expectedPreStateHash, "expectedPreStateHash");
+          const writePayloadHash = requireString(request.writePayloadHash, "writePayloadHash");
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const rawPayload = request.writePayload;
+          if (!Array.isArray(rawPayload) || rawPayload.length === 0) {
+            refuse("AGENTIC_TOOL_REQUEST_INVALID", "writePayload must be a non-empty array of fields.");
+          }
+          const writePayload = rawPayload.map((entry) => {
+            const field = jsonObject(entry as JsonValue);
+            return {
+              field: requireString(field.field, "writePayload[].field"),
+              value: (field.value ?? null) as JsonValue,
+            };
+          });
+          return requireConnector().apply({
+            capability,
+            targetId,
+            expectedPreStateHash,
+            writePayload,
+            writePayloadHash,
+            idempotencyKey,
+          });
         }
         default:
           refuse("AGENTIC_TOOL_UNREGISTERED", `Tool "${tool}" is not part of this fabric's tool surface.`);

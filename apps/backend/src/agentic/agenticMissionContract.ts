@@ -26,6 +26,10 @@ import type {
 } from "chanter-agent-runtime";
 import { canonicalizeAgenticJson } from "chanter-agent-runtime";
 import { createHash } from "node:crypto";
+import type {
+  ExceptionAcceptanceConstraint,
+  ExceptionField,
+} from "./agenticExceptionContract.js";
 
 export const AGENTIC_WORK_SCHEMA_VERSION = "chanter.agentic-work.v1" as const;
 export const AGENTIC_PLAN_SCHEMA_VERSION = "chanter.agentic-plan.v1" as const;
@@ -195,6 +199,69 @@ export interface AgenticOutputContract {
   readonly requiredSections: readonly string[];
 }
 
+/**
+ * What kind of thing this mission resolves.
+ *
+ * The discriminator the plan compiler selects a DAG from. It participates in the
+ * intent hash, so the same mission id resubmitted as a different kind is a typed
+ * conflict rather than a silently re-planned mission — which matters because the
+ * two kinds have different consequential capabilities.
+ */
+export const AGENTIC_MISSION_KINDS = ["artifact", "operational_exception"] as const;
+
+export type AgenticMissionKind = (typeof AGENTIC_MISSION_KINDS)[number];
+
+/**
+ * The declared terminal condition for one operational exception.
+ *
+ * This is the *submission* form of DesiredState: what a human asked for, before
+ * anything was observed. The compiled `DesiredState` and its hash are derived
+ * from it at intake — see `agenticExceptionContract` — and the derivation is
+ * deterministic, so the same submission always yields the same desired-state
+ * hash on any machine.
+ *
+ * ObservedState is deliberately *not* here. It comes from the connector, not
+ * from the human, and a submission that could assert what the source system
+ * currently holds would make "stale observation" unprovable.
+ */
+export interface AgenticExceptionIntent {
+  readonly connectorId: string;
+  readonly targetId: string;
+  readonly desiredFields: readonly ExceptionField[];
+  readonly acceptanceConstraints: readonly ExceptionAcceptanceConstraint[];
+}
+
+/**
+ * The artifact output contract, or a refusal.
+ *
+ * Reaching an artifact-only path on a mission that writes no artifact is a
+ * defect in the plan compiler or the router, not bad input — so this throws
+ * rather than substituting a default. A synthesized `artifactName` would let a
+ * mission of the wrong kind quietly write a file nobody asked for.
+ */
+export function requireArtifactOutputContract(
+  intent: Pick<AgenticIntentContract, "missionKind" | "outputContract" | "missionId">,
+): AgenticOutputContract {
+  if (intent.outputContract === null) {
+    throw new Error(
+      `Mission ${intent.missionId} is a ${intent.missionKind} mission and declares no artifact output contract.`,
+    );
+  }
+  return intent.outputContract;
+}
+
+/** The exception contract, or a refusal, for the same reason as above. */
+export function requireExceptionContract(
+  intent: Pick<AgenticIntentContract, "missionKind" | "exceptionContract" | "missionId">,
+): AgenticExceptionIntent {
+  if (intent.exceptionContract === null) {
+    throw new Error(
+      `Mission ${intent.missionId} is a ${intent.missionKind} mission and declares no exception contract.`,
+    );
+  }
+  return intent.exceptionContract;
+}
+
 // ---------------------------------------------------------------------------
 // The intent contract
 // ---------------------------------------------------------------------------
@@ -250,7 +317,11 @@ export interface AgenticIntentContract {
    */
   readonly modelNodeCostCeilingMicros: number | null;
   readonly contextRequirements: readonly AgenticContextRequirement[];
-  readonly outputContract: AgenticOutputContract;
+  readonly missionKind: AgenticMissionKind;
+  /** Present for an artifact mission; `null` when the mission writes no artifact. */
+  readonly outputContract: AgenticOutputContract | null;
+  /** Present for an operational-exception mission; `null` otherwise. */
+  readonly exceptionContract: AgenticExceptionIntent | null;
   readonly requestedAt: string;
   readonly humanText: AgenticHumanText;
   readonly defaultsApplied: readonly AgenticAppliedDefault[];
@@ -294,10 +365,21 @@ export function createAgenticIntentHash(
     providerBindings: contract.providerBindings.map((selection) => ({ ...selection })),
     modelNodeCostCeilingMicros: contract.modelNodeCostCeilingMicros,
     contextRequirements: contract.contextRequirements.map((requirement) => ({ ...requirement })),
-    outputContract: {
+    missionKind: contract.missionKind,
+    outputContract: contract.outputContract === null ? null : {
       format: contract.outputContract.format,
       artifactName: contract.outputContract.artifactName,
       requiredSections: [...contract.outputContract.requiredSections],
+    },
+    // The desired terminal condition is part of what was asked, so it binds the
+    // intent. A resubmission wanting a different reconciled amount is a
+    // different mission, not an update to this one.
+    exceptionContract: contract.exceptionContract === null ? null : {
+      connectorId: contract.exceptionContract.connectorId,
+      targetId: contract.exceptionContract.targetId,
+      desiredFields: contract.exceptionContract.desiredFields.map((entry) => ({ ...entry })),
+      acceptanceConstraints: contract.exceptionContract.acceptanceConstraints
+        .map((constraint) => ({ ...constraint })),
     },
     humanText: {
       objective: contract.humanText.objective,
@@ -373,6 +455,13 @@ export const AGENTIC_NODE_TYPES = [
   "authority_checkpoint",
   "artifact_write",
   "outcome_verify",
+  // Operational-exception shapes. `authority_checkpoint` and `outcome_verify`
+  // are shared with the artifact plan on purpose: the human gate and the
+  // independent oracle are the same structural roles, and giving them different
+  // names per mission kind would invite two implementations of one guarantee.
+  "state_observe",
+  "action_compile",
+  "connector_apply",
 ] as const;
 
 export type AgenticNodeType = (typeof AGENTIC_NODE_TYPES)[number];

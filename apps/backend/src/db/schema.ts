@@ -922,6 +922,12 @@ CREATE TABLE IF NOT EXISTS operator_agentic_missions (
   candidate_authority_revision TEXT,
   artifact_hash TEXT,
   artifact_name TEXT,
+  -- ObservedState, DesiredState, and StateDelta for an operational-exception
+  -- mission, established once at intake. A column on the mission row rather
+  -- than a table of its own: these are properties *of this mission*, and a
+  -- separate store would be a second place the same fact could be edited.
+  -- NULL for every mission kind that resolves no operational exception.
+  exception_state_json TEXT,
   value_observation_json TEXT,
   typed_error_json TEXT,
   requested_at TEXT NOT NULL,
@@ -938,7 +944,10 @@ CREATE TABLE IF NOT EXISTS operator_agentic_plan_nodes (
   mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
   node_type TEXT NOT NULL CHECK (node_type IN (
     'context_collect', 'specialist', 'verifier', 'synthesis',
-    'authority_checkpoint', 'artifact_write', 'outcome_verify'
+    'authority_checkpoint', 'artifact_write', 'outcome_verify',
+    -- Operational-exception shapes. The checkpoint and the oracle are shared
+    -- with the artifact plan rather than duplicated under new names.
+    'state_observe', 'action_compile', 'connector_apply'
   )),
   capability_id TEXT,
   worker_kind TEXT,

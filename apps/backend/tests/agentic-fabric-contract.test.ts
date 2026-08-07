@@ -21,6 +21,7 @@ import {
 } from "../src/agentic/agenticIntentCompiler.js";
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
+  AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_TOOLS,
   listAgenticCapabilities,
   minimumExecutablePlanDurationMs,
@@ -248,20 +249,46 @@ describe("agentic capability registry", () => {
     }
   });
 
-  it("carries an authority requirement only on the one consequential capability", () => {
-    const gated = listAgenticCapabilities()
-      .filter((capability) => capability.authorityRequirement !== "none")
-      .map((capability) => capability.capabilityId);
-
-    expect(gated).toEqual(["artifact.local.write"]);
-  });
-
-  it("declares exactly one capability with a side effect outside its own record", () => {
+  /**
+   * The property is "every consequential capability is gated", not "there is
+   * exactly one of them". The registry now serves two mission kinds, each with
+   * its own single side effect — an artifact write and a connector action — and
+   * pinning the *set* would turn adding a reviewed capability into a test
+   * failure rather than the invariant check it deserves.
+   */
+  it("gates every capability that has a side effect, and gates nothing else", () => {
     const effectful = listAgenticCapabilities()
       .filter((capability) => capability.sideEffectClass !== "none")
-      .map((capability) => capability.capabilityId);
+      .map((capability) => capability.capabilityId)
+      .sort();
+    const gated = listAgenticCapabilities()
+      .filter((capability) => capability.authorityRequirement !== "none")
+      .map((capability) => capability.capabilityId)
+      .sort();
 
-    expect(effectful).toEqual(["artifact.local.write"]);
+    expect(effectful).toEqual(["artifact.local.write", "connector.state.apply"]);
+    // Exactly the same set: nothing consequential is ungated, and nothing
+    // harmless demands a human decision it does not need.
+    expect(gated).toEqual(effectful);
+  });
+
+  it("gives each mission kind exactly one consequential capability", () => {
+    const consequentialFor = (capabilities: readonly string[]): string[] => capabilities
+      .filter((capabilityId) => requireAgenticCapability(capabilityId).sideEffectClass !== "none")
+      .sort();
+
+    expect(consequentialFor(AGENTIC_ARTIFACT_MISSION_CAPABILITIES)).toEqual(["artifact.local.write"]);
+    expect(consequentialFor(AGENTIC_EXCEPTION_MISSION_CAPABILITIES)).toEqual(["connector.state.apply"]);
+  });
+
+  it("never registers a real external side effect", () => {
+    // `simulated_external` is a connector-owned local store standing in for an
+    // external system. `external` means a real third party changed, and no
+    // capability may declare it — the registry refuses at module load.
+    const external = listAgenticCapabilities()
+      .filter((capability) => capability.sideEffectClass === "external");
+
+    expect(external).toEqual([]);
   });
 });
 

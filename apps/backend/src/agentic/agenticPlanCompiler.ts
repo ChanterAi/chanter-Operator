@@ -44,6 +44,7 @@ import {
   type AgenticCompiledPlan,
   type AgenticContextBundle,
   type AgenticIntentContract,
+  type AgenticMissionKind,
   type AgenticNodeType,
   type AgenticPlanEdge,
   type AgenticPlanNode,
@@ -138,6 +139,105 @@ const PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
   }),
 ]);
 
+/**
+ * The operational-exception DAG.
+ *
+ *     X1 observe        exception.state.observe    re-reads the connector
+ *      └─ X2 compile    exception.action.compile   one ActionContract
+ *          └─ X3 authority.approve_connector_write (no worker)
+ *              └─ X4 apply   connector.state.apply  ONE simulated write
+ *                  └─ X5 verify  exception.outcome.verify
+ *
+ * Strictly linear, and that is the shape of the guarantee rather than a
+ * simplification: each node's whole purpose is to constrain the next one. The
+ * observation bounds the action, the action is what a human approves, the
+ * approval is what permits the write, and the write is what the oracle judges.
+ * A parallel edge anywhere in this chain would mean something ran before the
+ * thing that was supposed to bound it.
+ *
+ * X1 re-observes rather than trusting intake. Intake's observation is what the
+ * delta and the approval were built on; X1 exists to prove the source has not
+ * moved since — which is the only way a stale approval becomes detectable
+ * before the write instead of after it.
+ */
+const EXCEPTION_PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
+  Object.freeze({
+    nodeId: "X1",
+    nodeType: "state_observe" as const,
+    capabilityId: "exception.state.observe",
+    dependencyIds: [] as readonly string[],
+    inputRefs: [] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X2",
+    nodeType: "action_compile" as const,
+    capabilityId: "exception.action.compile",
+    dependencyIds: ["X1"] as readonly string[],
+    inputRefs: ["X1"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X3",
+    nodeType: "authority_checkpoint" as const,
+    capabilityId: null,
+    dependencyIds: ["X2"] as readonly string[],
+    inputRefs: ["X2"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X4",
+    nodeType: "connector_apply" as const,
+    capabilityId: "connector.state.apply",
+    dependencyIds: ["X3"] as readonly string[],
+    inputRefs: ["X2", "X3"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X5",
+    nodeType: "outcome_verify" as const,
+    capabilityId: "exception.outcome.verify",
+    dependencyIds: ["X4"] as readonly string[],
+    inputRefs: ["X2", "X4"] as readonly string[],
+  }),
+]);
+
+/** The blueprint for one mission kind. The only place the two plans diverge. */
+function blueprintFor(missionKind: AgenticMissionKind): readonly NodeBlueprint[] {
+  return missionKind === "operational_exception" ? EXCEPTION_PLAN_BLUEPRINT : PLAN_BLUEPRINT;
+}
+
+/**
+ * The node whose verdict may complete a mission of this kind.
+ *
+ * Exactly one per plan, and always an `outcome_verify` node. Naming it here
+ * rather than hardcoding `"N8"` downstream is what keeps "only an independent
+ * oracle completes a mission" true for both plans instead of true for one.
+ */
+export function terminalVerificationNodeId(missionKind: AgenticMissionKind): string {
+  return soleNodeOfType(missionKind, "outcome_verify");
+}
+
+/**
+ * The one node a human decision lands on for this mission kind.
+ *
+ * Derived from the blueprint for the same reason as the terminal node: a
+ * hardcoded id downstream would silently approve the wrong plan's checkpoint
+ * the moment a second plan shape existed.
+ */
+export function authorityCheckpointNodeId(missionKind: AgenticMissionKind): string {
+  return soleNodeOfType(missionKind, "authority_checkpoint");
+}
+
+function soleNodeOfType(missionKind: AgenticMissionKind, nodeType: AgenticNodeType): string {
+  const matching = blueprintFor(missionKind).filter((blueprint) => blueprint.nodeType === nodeType);
+  /* c8 ignore next 7 -- unreachable: both blueprints declare exactly one of each. */
+  if (matching.length !== 1) {
+    throw new OperatorError(
+      `A plan must declare exactly one ${nodeType} node; ${missionKind} declares ${matching.length}.`,
+      500,
+      "AGENTIC_PLAN_MALFORMED",
+    );
+  }
+  return matching[0]!.nodeId;
+}
+
 export interface AgenticCompiledPlanResult {
   readonly plan: AgenticCompiledPlan;
   /** The routing decision behind every worker node, for the durable read model. */
@@ -160,7 +260,7 @@ export function compileAgenticPlan(
   const routing: AgenticRoutingDecision[] = [];
   const offsetByNode = new Map<string, number>();
 
-  for (const blueprint of PLAN_BLUEPRINT) {
+  for (const blueprint of blueprintFor(intent.missionKind)) {
     const dependencyOffset = blueprint.dependencyIds.reduce(
       (deepest, dependencyId) => Math.max(deepest, offsetByNode.get(dependencyId) ?? 0),
       0,
@@ -224,9 +324,12 @@ export function compileAgenticPlan(
       authorityRequirement: decision.authorityRequirement,
       budget: nodeBudget,
       deadlineOffsetMs: offset,
-      attemptLimit: capability.sideEffectClass === "local_artifact"
-        ? WRITE_NODE_ATTEMPT_LIMIT
-        : PURE_NODE_ATTEMPT_LIMIT,
+      // Any side effect gets the single-attempt treatment, not just an artifact
+      // write. A second automatic try at a connector action whose outcome is
+      // unknown is exactly how one reconciliation becomes two.
+      attemptLimit: capability.sideEffectClass === "none"
+        ? PURE_NODE_ATTEMPT_LIMIT
+        : WRITE_NODE_ATTEMPT_LIMIT,
       reconciliationMode: capability.reconciliationMode,
       evidencePolicy: { ...capability.evidencePolicy },
     };
@@ -329,4 +432,8 @@ function assertPlanIsWellFormed(
 /** The exact node ids this fabric compiles, for callers that assert on shape. */
 export const AGENTIC_PLAN_NODE_IDS: readonly string[] = Object.freeze(
   PLAN_BLUEPRINT.map((blueprint) => blueprint.nodeId),
+);
+
+export const AGENTIC_EXCEPTION_PLAN_NODE_IDS: readonly string[] = Object.freeze(
+  EXCEPTION_PLAN_BLUEPRINT.map((blueprint) => blueprint.nodeId),
 );
