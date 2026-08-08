@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "chanter.plan-governance.v1",
+  "operation": "govern",
+  "planId": "plan-conformance-1",
+  "now": "2030-01-01T00:00:00Z",
+  "maxParallelism": 2,
+  "planDeadlineAt": "2030-01-01T00:10:00Z",
+  "costBudgetMicros": 5000,
+  "costSpentMicros": 1000,
+  "cancellationRequested": false,
+  "nodes": [
+    {
+      "nodeId": "N1",
+      "state": "completed",
+      "dependsOn": [],
+      "attempts": 1,
+      "attemptLimit": 1,
+      "leaseOwner": "",
+      "leaseExpiresAt": "",
+      "deadlineAt": ""
+    },
+    {
+      "nodeId": "N2",
+      "state": "ready",
+      "dependsOn": [
+        "N1"
+      ],
+      "attempts": 0,
+      "attemptLimit": 2,
+      "leaseOwner": "",
+      "leaseExpiresAt": "",
+      "deadlineAt": ""
+    },
+    {
+      "nodeId": "N3",
+      "state": "ready",
+      "dependsOn": [
+        "N1"
+      ],
+      "attempts": 0,
+      "attemptLimit": 2,
+      "leaseOwner": "",
+      "leaseExpiresAt": "",
+      "deadlineAt": ""
+    }
+  ]
+}

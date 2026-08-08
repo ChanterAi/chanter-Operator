@@ -16,6 +16,7 @@
     "typecheck:tools": "tsc -p tsconfig.tools.json",
     "validate:os": "node --import tsx tools/validation/run-os-validation.mts",
     "test:os-validation": "node --import tsx --test tools/validation/osValidation.test.mts",
+    "test:plan-governance:conformance": "node --import tsx --test tools/validation/plan-governance-conformance.integration.test.mts",
     "release:scan": "node tools/release-operator/release-operator.mjs scan",
     "release:report": "node tools/release-operator/release-operator.mjs report",
     "release:gates": "node tools/release-operator/release-operator.mjs gates",
