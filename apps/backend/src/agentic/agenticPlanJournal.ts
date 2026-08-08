@@ -1293,15 +1293,16 @@ export class AgenticPlanJournal {
         const row = database
           .prepare("SELECT * FROM operator_agentic_worker_records WHERE idempotency_key = ?")
           .get(idempotencyKey) as WorkerRecordRow | undefined;
+        if (row && row.execution_hash !== executionHash) return "binding_mismatch";
         if (row?.recorded_at) return "already_recorded";
         if (row?.claim_owner) return "in_flight";
         const now = clock();
         if (row) {
           database.prepare(
             `UPDATE operator_agentic_worker_records
-                SET claim_owner = ?, claimed_at = ?, execution_hash = ?
+                SET claim_owner = ?, claimed_at = ?
               WHERE idempotency_key = ? AND claim_owner IS NULL`,
-          ).run(idempotencyKey, now, executionHash, idempotencyKey);
+          ).run(idempotencyKey, now, idempotencyKey);
           return "claimed";
         }
         database.prepare(
