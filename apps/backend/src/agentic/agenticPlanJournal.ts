@@ -41,6 +41,7 @@ import {
   AGENTIC_MODEL_PROVIDER_CONTRACT_VERSION,
   AGENTIC_RECONCILIATION_NOT_ATTEMPTED,
 } from "chanter-agent-runtime";
+import { withTransaction } from "../db/database.js";
 import { OperatorError } from "../services/operatorService.js";
 import type {
   AgenticCompiledPlan,
@@ -365,6 +366,34 @@ interface WorkerRecordRow {
   latency_ms: number | null;
   typed_error_json: string | null;
   recorded_at: string | null;
+}
+
+/** Exact durable identity of one active, unrecorded worker authority. */
+export interface AgenticWorkerClaimIdentity {
+  readonly idempotencyKey: string;
+  readonly executionHash: string;
+  readonly claimOwner: string;
+  readonly claimedAt: string;
+}
+
+/** Current durable worker-row identity after a compare-and-release loses. */
+export interface AgenticWorkerAuthoritySnapshot {
+  readonly idempotencyKey: string;
+  readonly executionHash: string;
+  readonly claimOwner: string | null;
+  readonly claimedAt: string | null;
+  readonly recordedAt: string | null;
+}
+
+export interface AgenticOrphanClaimRetirement {
+  readonly retired: boolean;
+  readonly current: AgenticWorkerAuthoritySnapshot | null;
+}
+
+/** Runtime's store plus Operator-only inspection and exact orphan retirement. */
+export interface OperatorAgenticNodeRecordStore extends AgenticNodeRecordStore {
+  inspectActiveClaim(idempotencyKey: string): AgenticWorkerClaimIdentity | null;
+  retireOrphanClaim(expected: AgenticWorkerClaimIdentity): AgenticOrphanClaimRetirement;
 }
 
 interface ProviderUsageRow {
@@ -1286,39 +1315,141 @@ export class AgenticPlanJournal {
    * reconcile needs in order to distinguish "the worker never ran" from "the
    * worker ran and we lost the answer".
    */
-  createWorkerRecordStore(clock: () => string): AgenticNodeRecordStore {
+  createWorkerRecordStore(
+    clock: () => string,
+    claimIdFactory: () => string = randomUUID,
+  ): OperatorAgenticNodeRecordStore {
     const database = this.database;
+    // A second Operator process waits for the millisecond-scale claim
+    // transaction to commit rather than surfacing an expected SQLITE_BUSY.
+    // The wait is bounded; lock failures beyond it remain real database errors.
+    database.exec("PRAGMA busy_timeout = 5000;");
+
+    // Runtime's interface intentionally returns only the canonical claim
+    // outcome. Operator retains the exact acquisition token privately so the
+    // same store instance can bind outcome recording and deadline release to
+    // the authority it actually acquired.
+    const locallyHeldClaims = new Map<string, AgenticWorkerClaimIdentity>();
+
+    const readAuthority = (idempotencyKey: string): WorkerRecordRow | undefined =>
+      database
+        .prepare("SELECT * FROM operator_agentic_worker_records WHERE idempotency_key = ?")
+        .get(idempotencyKey) as WorkerRecordRow | undefined;
+
+    const snapshot = (row: WorkerRecordRow | undefined): AgenticWorkerAuthoritySnapshot | null =>
+      row
+        ? {
+          idempotencyKey: row.idempotency_key,
+          executionHash: row.execution_hash,
+          claimOwner: row.claim_owner,
+          claimedAt: row.claimed_at,
+          recordedAt: row.recorded_at,
+        }
+        : null;
+
+    const classify = (
+      row: WorkerRecordRow,
+      executionHash: string,
+    ): AgenticNodeClaimOutcome | "released" => {
+      if (row.execution_hash !== executionHash) return "binding_mismatch";
+      if (row.recorded_at) return "already_recorded";
+      if (row.claim_owner) return "in_flight";
+      return "released";
+    };
+
+    const classifyLosingWrite = (
+      idempotencyKey: string,
+      executionHash: string,
+    ): AgenticNodeClaimOutcome => {
+      const current = readAuthority(idempotencyKey);
+      if (current) {
+        const outcome = classify(current, executionHash);
+        if (outcome !== "released") return outcome;
+      }
+      // A zero-row write that still observes no committed winner is not claim
+      // authority. It is an impossible state under BEGIN IMMEDIATE, so surface
+      // it as a typed durable-state conflict rather than lying with `claimed`.
+      throw new OperatorError(
+        "The durable worker claim did not acquire authority and no committed winner could be classified.",
+        409,
+        "AGENTIC_WORKER_CLAIM_NOT_ACQUIRED",
+        { idempotencyKey },
+      );
+    };
+
     return {
       claim(idempotencyKey: string, executionHash: string): AgenticNodeClaimOutcome {
-        const row = database
-          .prepare("SELECT * FROM operator_agentic_worker_records WHERE idempotency_key = ?")
-          .get(idempotencyKey) as WorkerRecordRow | undefined;
-        if (row && row.execution_hash !== executionHash) return "binding_mismatch";
-        if (row?.recorded_at) return "already_recorded";
-        if (row?.claim_owner) return "in_flight";
-        const now = clock();
-        if (row) {
-          database.prepare(
-            `UPDATE operator_agentic_worker_records
-                SET claim_owner = ?, claimed_at = ?
-              WHERE idempotency_key = ? AND claim_owner IS NULL`,
-          ).run(idempotencyKey, now, idempotencyKey);
+        return withTransaction(database, () => {
+          const row = readAuthority(idempotencyKey);
+          if (row) {
+            const existing = classify(row, executionHash);
+            if (existing !== "released") return existing;
+          }
+
+          const claim: AgenticWorkerClaimIdentity = {
+            idempotencyKey,
+            executionHash,
+            claimOwner: claimIdFactory(),
+            claimedAt: clock(),
+          };
+
+          if (row) {
+            const write = database.prepare(
+              `UPDATE operator_agentic_worker_records
+                  SET claim_owner = ?, claimed_at = ?
+                WHERE idempotency_key = ?
+                  AND execution_hash = ?
+                  AND claim_owner IS NULL
+                  AND recorded_at IS NULL`,
+            ).run(
+              claim.claimOwner,
+              claim.claimedAt,
+              idempotencyKey,
+              executionHash,
+            );
+            if (write.changes !== 1) return classifyLosingWrite(idempotencyKey, executionHash);
+          } else {
+            // The conflict target is deliberately only the durable identity
+            // key. Expected first-claim contention is translated to a zero-row
+            // result; every unrelated SQLite failure still throws.
+            const write = database.prepare(
+              `INSERT INTO operator_agentic_worker_records (
+                idempotency_key, execution_hash, capability_id, claim_owner, claimed_at
+              ) VALUES (?, ?, '', ?, ?)
+              ON CONFLICT(idempotency_key) DO NOTHING`,
+            ).run(
+              idempotencyKey,
+              executionHash,
+              claim.claimOwner,
+              claim.claimedAt,
+            );
+            if (write.changes !== 1) return classifyLosingWrite(idempotencyKey, executionHash);
+          }
+
+          locallyHeldClaims.set(idempotencyKey, claim);
           return "claimed";
-        }
-        database.prepare(
-          `INSERT INTO operator_agentic_worker_records (
-            idempotency_key, execution_hash, capability_id, claim_owner, claimed_at
-          ) VALUES (?, ?, '', ?, ?)`,
-        ).run(idempotencyKey, executionHash, idempotencyKey, now);
-        return "claimed";
+        });
       },
       recordWorkerOutcome(record: AgenticNodeWorkerRecord): void {
-        database.prepare(
+        const held = locallyHeldClaims.get(record.idempotencyKey);
+        if (!held || held.executionHash !== record.executionHash) {
+          throw new OperatorError(
+            "This worker store does not hold the exact durable authority required to record the outcome.",
+            409,
+            "AGENTIC_WORKER_RECORD_AUTHORITY_MISSING",
+            { idempotencyKey: record.idempotencyKey },
+          );
+        }
+        const write = database.prepare(
           `UPDATE operator_agentic_worker_records
               SET capability_id = ?, status = ?, structured_output_json = ?, output_hash = ?,
                   evidence_json = ?, tool_calls_json = ?, cost_json = ?, latency_ms = ?,
                   typed_error_json = ?, recorded_at = ?, claim_owner = NULL
-            WHERE idempotency_key = ?`,
+            WHERE idempotency_key = ?
+              AND execution_hash = ?
+              AND claim_owner = ?
+              AND claimed_at = ?
+              AND recorded_at IS NULL`,
         ).run(
           record.capabilityId,
           record.status,
@@ -1331,7 +1462,20 @@ export class AgenticPlanJournal {
           record.typedError === null ? null : JSON.stringify(record.typedError),
           record.recordedAt,
           record.idempotencyKey,
+          record.executionHash,
+          held.claimOwner,
+          held.claimedAt,
         );
+        if (write.changes !== 1) {
+          readAuthority(record.idempotencyKey);
+          throw new OperatorError(
+            "Durable worker authority changed before the outcome could be recorded.",
+            409,
+            "AGENTIC_WORKER_RECORD_AUTHORITY_LOST",
+            { idempotencyKey: record.idempotencyKey },
+          );
+        }
+        locallyHeldClaims.delete(record.idempotencyKey);
       },
       read(idempotencyKey: string): AgenticNodeWorkerRecord | null {
         const row = database
@@ -1356,10 +1500,58 @@ export class AgenticPlanJournal {
         };
       },
       releaseClaim(idempotencyKey: string): void {
-        database.prepare(
-          `UPDATE operator_agentic_worker_records SET claim_owner = NULL
-            WHERE idempotency_key = ? AND recorded_at IS NULL`,
-        ).run(idempotencyKey);
+        const held = locallyHeldClaims.get(idempotencyKey);
+        if (!held) return;
+        const write = database.prepare(
+          `UPDATE operator_agentic_worker_records
+              SET claim_owner = NULL, claimed_at = NULL
+            WHERE idempotency_key = ?
+              AND execution_hash = ?
+              AND claim_owner = ?
+              AND claimed_at = ?
+              AND recorded_at IS NULL`,
+        ).run(
+          held.idempotencyKey,
+          held.executionHash,
+          held.claimOwner,
+          held.claimedAt,
+        );
+        if (write.changes === 0) readAuthority(idempotencyKey);
+        locallyHeldClaims.delete(idempotencyKey);
+      },
+      inspectActiveClaim(idempotencyKey: string): AgenticWorkerClaimIdentity | null {
+        const row = readAuthority(idempotencyKey);
+        if (!row || row.recorded_at || !row.claim_owner || !row.claimed_at) return null;
+        return {
+          idempotencyKey: row.idempotency_key,
+          executionHash: row.execution_hash,
+          claimOwner: row.claim_owner,
+          claimedAt: row.claimed_at,
+        };
+      },
+      retireOrphanClaim(expected: AgenticWorkerClaimIdentity): AgenticOrphanClaimRetirement {
+        const write = database.prepare(
+          `UPDATE operator_agentic_worker_records
+              SET claim_owner = NULL, claimed_at = NULL
+            WHERE idempotency_key = ?
+              AND execution_hash = ?
+              AND claim_owner = ?
+              AND claimed_at = ?
+              AND recorded_at IS NULL`,
+        ).run(
+          expected.idempotencyKey,
+          expected.executionHash,
+          expected.claimOwner,
+          expected.claimedAt,
+        );
+        if (write.changes === 1) {
+          const held = locallyHeldClaims.get(expected.idempotencyKey);
+          if (held?.claimOwner === expected.claimOwner) {
+            locallyHeldClaims.delete(expected.idempotencyKey);
+          }
+          return { retired: true, current: snapshot(readAuthority(expected.idempotencyKey)) };
+        }
+        return { retired: false, current: snapshot(readAuthority(expected.idempotencyKey)) };
       },
     };
   }

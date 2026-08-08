@@ -143,14 +143,14 @@ describe("Operator durable AgenticNodeRecordStore execution-hash binding", () =>
   });
 
   it("returns binding_mismatch for an active claim with a changed hash without replacing it", () => {
-    const store = journal.createWorkerRecordStore(() => NOW);
+    const store = journal.createWorkerRecordStore(() => NOW, () => "active-claim-token");
     expect(store.claim(IDEMPOTENCY_KEY, ORIGINAL_HASH)).toBe("claimed");
     const before = readRow();
 
     expect(store.claim(IDEMPOTENCY_KEY, CHANGED_HASH)).toBe("binding_mismatch");
     expect(readRow()).toEqual(before);
     expect(readRow().execution_hash).toBe(ORIGINAL_HASH);
-    expect(readRow().claim_owner).toBe(IDEMPOTENCY_KEY);
+    expect(readRow().claim_owner).toBe("active-claim-token");
   });
 
   it("does not rebind a released claim to a changed execution hash", () => {
@@ -166,7 +166,7 @@ describe("Operator durable AgenticNodeRecordStore execution-hash binding", () =>
   });
 
   it("makes Runtime reject a changed request against the Operator-backed active claim", async () => {
-    const store = journal.createWorkerRecordStore(() => NOW);
+    const store = journal.createWorkerRecordStore(() => NOW, () => "runtime-claim-token");
     const original = request();
     expect(store.claim(IDEMPOTENCY_KEY, createAgenticExecutionHash(original))).toBe("claimed");
     const before = readRow();
@@ -202,6 +202,6 @@ describe("Operator durable AgenticNodeRecordStore execution-hash binding", () =>
     expect(workerExecutions).toBe(0);
     expect(externalSideEffects).toBe(0);
     expect(readRow()).toEqual(before);
-    expect(readRow().claim_owner).toBe(IDEMPOTENCY_KEY);
+    expect(readRow().claim_owner).toBe("runtime-claim-token");
   });
 });

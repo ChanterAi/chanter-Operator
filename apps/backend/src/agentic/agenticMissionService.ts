@@ -37,7 +37,6 @@ import {
   executeAgenticNode,
   reconcileRecordedCharges,
   type AgenticBillingReconciliationSummary,
-  type AgenticNodeRecordStore,
   type GovernedModelInvocationOptions,
   type AgenticNodeRequest,
   type AgenticNodeResult,
@@ -127,6 +126,7 @@ import {
   type AgenticMissionRecord,
   type AgenticNodeRecord,
   type AgenticReconciliationOutcome,
+  type OperatorAgenticNodeRecordStore,
 } from "./agenticPlanJournal.js";
 import {
   createAgenticPlanGovernorPort,
@@ -168,7 +168,11 @@ export interface AgenticFabricDependencies {
    * point, leaving whatever durable state exists on either side.
    */
   readonly failureInjector?: (
-    boundary: "after_worker_record_before_node_commit" | "before_node_lease",
+    boundary:
+      | "after_node_claim_before_worker"
+      | "after_node_worker_before_record"
+      | "after_worker_record_before_node_commit"
+      | "before_node_lease",
     context: { readonly missionId: string; readonly nodeId: string },
   ) => void;
   /**
@@ -286,7 +290,7 @@ export function observedParallelism(events: readonly AgenticEventRecord[]): numb
 export class AgenticMissionService {
   private readonly journal: AgenticPlanJournal;
   private readonly governor: AgenticPlanGovernorPort;
-  private readonly recordStore: AgenticNodeRecordStore;
+  private readonly recordStore: OperatorAgenticNodeRecordStore;
   private readonly tools: AgenticToolSurface;
   private readonly contextPort: AgenticContextSourcePort;
   private readonly now: () => string;
@@ -816,6 +820,23 @@ export class AgenticMissionService {
       workers,
       recordStore: this.recordStore,
       tools: this.tools,
+      ...(this.dependencies.failureInjector
+        ? {
+          failureInjector: (boundary: "after_claim_before_worker" | "after_worker_before_record" | "after_record_before_return") => {
+            const mapped = boundary === "after_claim_before_worker"
+              ? "after_node_claim_before_worker"
+              : boundary === "after_worker_before_record"
+                ? "after_node_worker_before_record"
+                : null;
+            if (mapped) {
+              this.dependencies.failureInjector?.(mapped, {
+                missionId: mission.missionId,
+                nodeId: node.nodeId,
+              });
+            }
+          },
+        }
+        : {}),
     });
   }
 
@@ -1532,10 +1553,61 @@ export class AgenticMissionService {
       );
     }
 
-    const outcome = this.investigate(mission, node);
+    const investigatedClaim = this.recordStore.inspectActiveClaim(node.idempotencyKey);
+    let outcome = this.investigate(mission, node);
+    let retirementReason = "";
+    if (outcome === "no_worker_result" && investigatedClaim) {
+      const capability = node.capabilityId === null
+        ? null
+        : requireAgenticCapability(node.capabilityId);
+      const providerCallExists = this.journal.countProviderCallsForNode(node.idempotencyKey) > 0;
+      const connectorProvedNoAction = node.reconciliationMode === "connector_action_lookup_before_retry"
+        && typeof this.dependencies.connector?.readAction === "function";
+      const claimWindowExpired = Date.parse(investigatedClaim.claimedAt)
+        + node.budget.maxDurationMs
+        + LEASE_GRACE_MS <= Date.parse(timestamp);
+      // A process is not proven gone merely because another process started a
+      // reconciliation. Retirement waits past the Runtime's bounded execution
+      // window, when a still-live worker can no longer issue a tool call. Model
+      // workers stay excluded even when their capability is otherwise pure: a
+      // provider dispatch can be billed yet remain absent from the usage store
+      // if interruption lands before its result is recorded.
+      const provenLocalNoEffect = capability?.sideEffectClass === "none"
+        && node.workerKind !== "model_worker";
+      const noUncertainEffect = claimWindowExpired
+        && !providerCallExists
+        && (provenLocalNoEffect || connectorProvedNoAction);
+
+      if (noUncertainEffect) {
+        const retirement = this.recordStore.retireOrphanClaim(investigatedClaim);
+        if (retirement.retired) {
+          retirementReason = " The exact claimed-but-unrecorded authority was retired by compare-and-release.";
+        } else {
+          const recorded = this.recordStore.read(node.idempotencyKey);
+          if (recorded) {
+            outcome = "worker_result_found";
+            retirementReason = " Durable truth advanced to a recorded worker result before retirement.";
+          } else if (retirement.current?.claimOwner) {
+            outcome = "conflict";
+            retirementReason = " Claim identity changed before retirement, so the newer authority was preserved.";
+          } else {
+            retirementReason = " The investigated claim was already absent or released; no newer authority was cleared.";
+          }
+        }
+      } else {
+        // Absence of a Runtime worker record cannot erase evidence that a model
+        // provider or side-effecting worker may already have acted. The active
+        // claim stays in place and the existing closed outcome vocabulary uses
+        // `conflict` to prevent resume from turning ambiguity into retry.
+        outcome = "conflict";
+        retirementReason = claimWindowExpired
+          ? " No authoritative proof excludes an uncertain effect, so the active claim was preserved."
+          : " The claim's bounded execution window has not expired, so the possibly live authority was preserved.";
+      }
+    }
     return this.journal.appendNodeAuditEvent(mission.planId, nodeId, "node_reconciled", {
       actor: mission.actorId,
-      reason: `Reconciliation read durable downstream truth and found: ${outcome}.`,
+      reason: `Reconciliation read durable downstream truth and found: ${outcome}.${retirementReason}`,
       timestamp,
       reconciliationOutcome: outcome,
       reconciledAt: timestamp,
