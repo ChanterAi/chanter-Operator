@@ -25,18 +25,85 @@
  * backwards, which destroys whatever arrived in between.
  *
  * A force-overwrite is not a rollback. It is a second, larger write.
+ *
+ * ## Why the pre-state is a union rather than a revision string
+ *
+ * v1 asked every candidate for a revision value, which quietly assumed every
+ * write mutates something that already exists. A *create* has no prior revision:
+ * its exact pre-state is that the object is **absent**. v1 could only express
+ * that as `null`, which the gate — correctly — read as "no exact pre-state".
+ *
+ * The two dishonest ways out are to invent a revision string for a thing that
+ * does not exist, or to let `null` silently mean absence. Both make the record
+ * say something untrue about the world. So the pre-state became a typed union:
+ * absence is now a first-class condition that is explicit, hash-bound, and
+ * reviewable, and Firestore enforces it server-side with `currentDocument.exists
+ * =false`. A create binds to absence exactly as strictly as an update binds to a
+ * revision.
  */
 import { canonicalizeAgenticJson } from "chanter-agent-runtime";
 import { createHash } from "node:crypto";
 
-export const REAL_WRITE_READINESS_SCHEMA_VERSION = "chanter.real-write-readiness.v1" as const;
+/**
+ * v2: the pre-state condition became a typed union and the record gained an
+ * unknown-outcome policy. The version is bumped rather than reused because every
+ * hash in this module changes shape — an approval compiled against v1 must not
+ * appear to survive the migration.
+ */
+export const REAL_WRITE_READINESS_SCHEMA_VERSION = "chanter.real-write-readiness.v2" as const;
 
-const ELIGIBILITY_HASH_DOMAIN = "chanter.real-write-readiness.eligibility.v1";
-const COMPENSATION_PLAN_HASH_DOMAIN = "chanter.real-write-readiness.compensation-plan.v1";
-const APPROVAL_CANDIDATE_HASH_DOMAIN = "chanter.real-write-readiness.approval-candidate.v1";
+const ELIGIBILITY_HASH_DOMAIN = "chanter.real-write-readiness.eligibility.v2";
+const COMPENSATION_PLAN_HASH_DOMAIN = "chanter.real-write-readiness.compensation-plan.v2";
+const APPROVAL_CANDIDATE_HASH_DOMAIN = "chanter.real-write-readiness.approval-candidate.v2";
+const OBJECT_IDENTITY_HASH_DOMAIN = "chanter.real-write-readiness.object-identity.v1";
 
 function digest(domain: string, payload: string): string {
   return createHash("sha256").update(domain).update(" ").update(payload).digest("hex");
+}
+
+/**
+ * The hashed form of a pre-state condition.
+ *
+ * The two variants carry different keys, so a revision condition and an absence
+ * condition can never canonicalize to the same bytes — which is what makes
+ * "the approval was for a different pre-state" a detectable change rather than
+ * an indistinguishable one.
+ */
+function canonicalPreState(condition: PreStateCondition): Record<string, string | boolean> {
+  return condition.kind === "revision"
+    ? {
+      kind: "revision",
+      revisionType: condition.revisionType,
+      revisionValue: condition.revisionValue,
+    }
+    : {
+      kind: "exists",
+      expected: false,
+      enforcedBy: condition.enforcedBy,
+    };
+}
+
+/**
+ * A stable, collision-safe object id derived from the identity of the work that
+ * would create it.
+ *
+ * Firestore offers no request-level idempotency key, so the only thing standing
+ * between a retry and a second object is the id itself. Deriving it from
+ * mission and action identity means a replay of the same action addresses the
+ * same document — and combined with an absence precondition, the second attempt
+ * is a typed conflict rather than a duplicate.
+ *
+ * Uses the NUL domain separator convention the runtime's durable paths already
+ * use, so `a|b` and `ab|` cannot collide.
+ */
+export function deriveDeterministicObjectId(input: {
+  readonly missionId: string;
+  readonly actionId: string;
+}): string {
+  return digest(
+    OBJECT_IDENTITY_HASH_DOMAIN,
+    `${input.missionId}\0${input.actionId}`,
+  ).slice(0, 32);
 }
 
 /**
@@ -67,6 +134,74 @@ export const PRECONDITION_REVISION_TYPES = [
 ] as const;
 
 export type PreconditionRevisionType = (typeof PRECONDITION_REVISION_TYPES)[number];
+
+export const PRE_STATE_CONDITION_KINDS = ["revision", "exists"] as const;
+
+export type PreStateConditionKind = (typeof PRE_STATE_CONDITION_KINDS)[number];
+
+/** The object already exists, and the write is conditional on this exact version. */
+export interface RevisionPreStateCondition {
+  readonly kind: "revision";
+  readonly revisionType: PreconditionRevisionType;
+  readonly revisionValue: string;
+}
+
+/**
+ * The object does not exist, and the write is conditional on it staying absent
+ * until the moment it lands.
+ *
+ * `expected` is typed as the literal `false` rather than `boolean` on purpose.
+ * A "must already exist" precondition is a different thing entirely — it is a
+ * revision condition wearing an existence check's clothes, and it would let a
+ * caller bind an approval to "something is there" without saying *which*
+ * version of it. The literal makes that unrepresentable.
+ *
+ * `enforcedBy` names the server-side mechanism. Absence checked by the client
+ * before calling is not a precondition, it is a race.
+ */
+export interface AbsentPreStateCondition {
+  readonly kind: "exists";
+  readonly expected: false;
+  readonly enforcedBy: string;
+}
+
+export type PreStateCondition = RevisionPreStateCondition | AbsentPreStateCondition;
+
+/**
+ * How a lost response is resolved.
+ *
+ * Only the first member is honest. The other three are named so a record can
+ * *declare* them and be rejected by name, which is more useful than leaving the
+ * field free-text and hoping nobody writes "retry".
+ */
+export const UNKNOWN_OUTCOME_RESOLUTIONS = [
+  "independent_read_of_exact_object",
+  "blind_retry",
+  "assume_applied",
+  "assume_not_applied",
+] as const;
+
+export type UnknownOutcomeResolution = (typeof UNKNOWN_OUTCOME_RESOLUTIONS)[number];
+
+/**
+ * What to do when the write's response never arrives.
+ *
+ * "Unknown" is not "failed". A create whose response was lost may well have
+ * landed, and the only way to find out is to ask the system — which is why
+ * every branch below is a consequence of an independent read rather than an
+ * assumption about what probably happened.
+ */
+export interface UnknownOutcomePolicy {
+  readonly resolution: UnknownOutcomeResolution;
+  /** Read says absent: the write was not observed to land. */
+  readonly onAbsent: string;
+  /** Read says present with the expected payload: already applied, do not repeat. */
+  readonly onPresentMatchingPayload: string;
+  /** Read says present with something else: a human decides. */
+  readonly onPresentDifferentPayload: string;
+  /** The read itself failed: still unknown. Never a licence to retry. */
+  readonly onReadUnavailable: string;
+}
 
 export const IDEMPOTENCY_SUPPORTS = [
   /** The API accepts a caller-supplied key and collapses repeats itself. */
@@ -128,8 +263,10 @@ export interface RealWriteEligibilityRecord {
   readonly writeCapability: string;
   /** Field names the write would set, and nothing wider. */
   readonly writePayloadSchema: readonly string[];
-  readonly preconditionRevisionType: PreconditionRevisionType;
-  readonly preconditionRevisionValue: string | null;
+  /** The exact state the write is conditional on: a revision, or absence. */
+  readonly preStateCondition: PreStateCondition;
+  /** How a lost response for this write is resolved. */
+  readonly unknownOutcomePolicy: UnknownOutcomePolicy;
   readonly idempotencySupport: IdempotencySupport;
   readonly idempotencyKeyStrategy: string;
   readonly compensationMode: CompensationMode;
@@ -158,6 +295,7 @@ export const REAL_WRITE_REJECTION_REASONS = [
   "blast_radius_unbounded",
   "no_write_authority",
   "reconciliation_unsafe_mutation",
+  "unknown_outcome_not_reconcilable",
 ] as const;
 
 export type RealWriteRejectionReason = (typeof REAL_WRITE_REJECTION_REASONS)[number];
@@ -201,12 +339,18 @@ export function evaluateRealWriteEligibility(
     // A mode without a named operation is a claim without a mechanism.
     rejections.push("no_compensation");
   }
+  const preState = record.preStateCondition;
   if (record.compensationMode === "reconciliation_safe_mutation") {
     // §7-D qualifies only under all four conditions. Any weakness in revision
     // or idempotency turns "safe to repeat" into "safe to repeat, probably".
-    const exactRevision = record.preconditionRevisionType === "content_hash"
-      || record.preconditionRevisionType === "etag"
-      || record.preconditionRevisionType === "version";
+    //
+    // An absence condition can never satisfy this: "safe to repeat" is a claim
+    // about re-applying a mutation to an object that exists, and absence is by
+    // definition not that.
+    const exactRevision = preState.kind === "revision"
+      && (preState.revisionType === "content_hash"
+        || preState.revisionType === "etag"
+        || preState.revisionType === "version");
     const idempotent = record.idempotencySupport !== "none";
     if (!exactRevision || !idempotent || !record.verificationOracle.independentOfWriteResponse) {
       rejections.push("reconciliation_unsafe_mutation");
@@ -215,8 +359,29 @@ export function evaluateRealWriteEligibility(
 
   // §9 — a write with no exact pre-state cannot be made conditional, so an
   // approval given at one moment could land on a state nobody approved.
-  if (record.preconditionRevisionType === "none" || record.preconditionRevisionValue === null) {
+  //
+  // Absence is an exact pre-state, but only when something enforces it. A
+  // client-side existence check before calling is a race, not a precondition,
+  // so the mechanism has to be named.
+  if (preState.kind === "revision") {
+    if (preState.revisionType === "none" || preState.revisionValue.trim() === "") {
+      rejections.push("weak_revision_semantics");
+    }
+  } else if (preState.enforcedBy.trim() === "") {
     rejections.push("weak_revision_semantics");
+  }
+
+  // §9 of the create-if-absent task — a lost response is not a failure, and
+  // resolving it by assumption is how one logical write becomes two.
+  const policy = record.unknownOutcomePolicy;
+  const everyBranchAnswered = [
+    policy.onAbsent,
+    policy.onPresentMatchingPayload,
+    policy.onPresentDifferentPayload,
+    policy.onReadUnavailable,
+  ].every((branch) => branch.trim() !== "");
+  if (policy.resolution !== "independent_read_of_exact_object" || !everyBranchAnswered) {
+    rejections.push("unknown_outcome_not_reconcilable");
   }
 
   // §11 — the write's own report is not evidence about the write.
@@ -253,8 +418,14 @@ export function createEligibilityHash(record: RealWriteEligibilityRecord): strin
     externalObjectId: record.externalObjectId,
     writeCapability: record.writeCapability,
     writePayloadSchema: [...record.writePayloadSchema].sort(),
-    preconditionRevisionType: record.preconditionRevisionType,
-    preconditionRevisionValue: record.preconditionRevisionValue,
+    preStateCondition: canonicalPreState(record.preStateCondition),
+    unknownOutcomePolicy: {
+      resolution: record.unknownOutcomePolicy.resolution,
+      onAbsent: record.unknownOutcomePolicy.onAbsent,
+      onPresentMatchingPayload: record.unknownOutcomePolicy.onPresentMatchingPayload,
+      onPresentDifferentPayload: record.unknownOutcomePolicy.onPresentDifferentPayload,
+      onReadUnavailable: record.unknownOutcomePolicy.onReadUnavailable,
+    },
     idempotencySupport: record.idempotencySupport,
     idempotencyKeyStrategy: record.idempotencyKeyStrategy,
     compensationMode: record.compensationMode,
@@ -281,10 +452,42 @@ export function createEligibilityHash(record: RealWriteEligibilityRecord): strin
  * recovery story. A compensation plan invented after an incident is not a plan;
  * it is an improvisation with a deadline.
  */
+/**
+ * The exact object the compensation acts on.
+ *
+ * Spelled out to this depth because "delete the document" is not a plan — a
+ * plan has to say *which* document, in which database, in which project. A
+ * compensation that names its target loosely is one incident away from being
+ * pointed at the wrong system.
+ */
+export interface CompensationTarget {
+  readonly connectorId: string;
+  /** The external system: a project, account, or host. */
+  readonly system: string;
+  /** The container within it: a database, bucket, or repository. */
+  readonly container: string;
+  /** The exact object path. */
+  readonly objectPath: string;
+}
+
 export interface CompensationPlan {
   readonly schemaVersion: typeof REAL_WRITE_READINESS_SCHEMA_VERSION;
   readonly mode: CompensationMode;
   readonly capability: string | null;
+  readonly target: CompensationTarget;
+  /** The payload whose effect this plan undoes. */
+  readonly writePayloadHash: string;
+  /**
+   * How the revision that the delete will be conditional on is obtained.
+   *
+   * The distinction that matters: it must come from an independent re-read, not
+   * from the create's own response. Deleting under a revision the write itself
+   * reported means trusting the component with an interest in the answer.
+   */
+  readonly revisionAcquisition: string;
+  /** The exact conditional-delete semantics, including what happens on mismatch. */
+  readonly conditionalDelete: string;
+  readonly verificationOracleId: string;
   /** Ordered operations that undo the write. */
   readonly steps: readonly string[];
   /** How restoration is confirmed, independently of the compensating call. */
@@ -297,6 +500,11 @@ export interface CompensationPlan {
 export function compileCompensationPlan(input: {
   readonly mode: CompensationMode;
   readonly capability: string | null;
+  readonly target: CompensationTarget;
+  readonly writePayloadHash: string;
+  readonly revisionAcquisition: string;
+  readonly conditionalDelete: string;
+  readonly verificationOracleId: string;
   readonly steps: readonly string[];
   readonly verification: string;
   readonly residualEffect: string;
@@ -304,6 +512,16 @@ export function compileCompensationPlan(input: {
   const base = {
     mode: input.mode,
     capability: input.capability,
+    target: {
+      connectorId: input.target.connectorId,
+      system: input.target.system,
+      container: input.target.container,
+      objectPath: input.target.objectPath,
+    },
+    writePayloadHash: input.writePayloadHash,
+    revisionAcquisition: input.revisionAcquisition,
+    conditionalDelete: input.conditionalDelete,
+    verificationOracleId: input.verificationOracleId,
     steps: [...input.steps],
     verification: input.verification,
     residualEffect: input.residualEffect,
@@ -327,7 +545,14 @@ export interface RealWriteApprovalCandidate {
   readonly schemaVersion: typeof REAL_WRITE_READINESS_SCHEMA_VERSION;
   readonly connectorId: string;
   readonly externalObjectId: string;
-  readonly preStateRevision: string;
+  /**
+   * The exact pre-state being approved.
+   *
+   * Changing `exists(false)` to any other condition changes the candidate hash,
+   * so an approval given for "create this if it is not there" cannot be carried
+   * onto "overwrite whatever is there now".
+   */
+  readonly preStateCondition: PreStateCondition;
   readonly writeCapability: string;
   readonly writePayloadHash: string;
   readonly idempotencyKey: string;
@@ -348,9 +573,9 @@ export function compileRealWriteApprovalCandidate(input: {
   const base = {
     connectorId: input.record.connectorId,
     externalObjectId: input.record.externalObjectId,
-    // A candidate compiled against no revision is refused rather than hashed:
-    // an approval that cannot name the state it applies to is not bindable.
-    preStateRevision: input.record.preconditionRevisionValue ?? "",
+    // Every pre-state is now nameable — a revision, or absence — so there is no
+    // longer a case where an approval cannot say what state it applies to.
+    preStateCondition: canonicalPreState(input.record.preStateCondition),
     writeCapability: input.record.writeCapability,
     writePayloadHash: input.writePayloadHash,
     idempotencyKey: input.idempotencyKey,
@@ -367,6 +592,9 @@ export function compileRealWriteApprovalCandidate(input: {
   return {
     schemaVersion: REAL_WRITE_READINESS_SCHEMA_VERSION,
     ...base,
+    // The hash is taken over the canonical form; the candidate carries the typed
+    // condition so a reviewer reads the real thing, not its hashed projection.
+    preStateCondition: input.record.preStateCondition,
     approvalCandidateHash: digest(APPROVAL_CANDIDATE_HASH_DOMAIN, canonicalizeAgenticJson(base)),
   };
 }
@@ -392,7 +620,10 @@ export function decideRealWriteVerdict(
     || everyRejection.has("compensation_requires_force_overwrite")
     || everyRejection.has("reconciliation_unsafe_mutation")
     || everyRejection.has("blast_radius_unbounded")
-    || everyRejection.has("no_write_authority");
+    || everyRejection.has("no_write_authority")
+    // A write that cannot resolve its own unknown outcome cannot be compensated
+    // either: you cannot undo what you are not sure happened.
+    || everyRejection.has("unknown_outcome_not_reconcilable");
   if (compensationBlocked) return "BLOCKED_NO_COMPENSABLE_TARGET";
   if (everyRejection.has("weak_revision_semantics")) {
     return "BLOCKED_INSUFFICIENT_REVISION_SEMANTICS";
