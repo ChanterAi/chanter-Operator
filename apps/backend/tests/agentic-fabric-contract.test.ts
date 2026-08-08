@@ -21,6 +21,7 @@ import {
 } from "../src/agentic/agenticIntentCompiler.js";
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
+  AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_TOOLS,
@@ -236,9 +237,34 @@ describe("agentic intent compiler", () => {
 
 describe("agentic capability registry", () => {
   it("registers no capability this fabric may not execute", () => {
+    // `external_write` was refused outright until P0-C, when a target finally
+    // existed that was safe to write to. `irreversible` is still refused, and
+    // that is now the bound that matters: an effect that cannot be removed
+    // cannot be registered at all, no matter who approves it.
     for (const capability of listAgenticCapabilities()) {
-      expect(["read_only", "local_write"]).toContain(capability.riskClass);
-      expect(capability.sideEffectClass).not.toBe("external");
+      expect(["read_only", "local_write", "external_write"]).toContain(capability.riskClass);
+      expect(capability.riskClass).not.toBe("irreversible");
+    }
+  });
+
+  it("keeps risk class and side effect class telling the same story", () => {
+    // A capability claiming a real external effect at `local_write` risk — or
+    // the reverse — is a record that contradicts itself. Either half alone
+    // could be a plausible mistake; disagreeing is what makes it detectable.
+    for (const capability of listAgenticCapabilities()) {
+      expect(capability.sideEffectClass === "external")
+        .toBe(capability.riskClass === "external_write");
+    }
+  });
+
+  it("makes every real external write reconcilable against the connector", () => {
+    // Guessing whether a real write landed is how one write becomes two in
+    // someone else's system. The rule existed for simulated writes; it matters
+    // incomparably more here.
+    for (const capability of listAgenticCapabilities()) {
+      if (capability.sideEffectClass !== "external") continue;
+      expect(capability.reconciliationMode).toBe("connector_action_lookup_before_retry");
+      expect(capability.authorityRequirement).toBe("human_approval_bound_to_candidate_hash");
     }
   });
 
@@ -266,7 +292,12 @@ describe("agentic capability registry", () => {
       .filter((capability) => capability.authorityRequirement !== "none")
       .map((capability) => capability.capabilityId));
 
-    expect(effectful).toEqual(["artifact.local.write", "connector.state.apply"]);
+    expect(effectful).toEqual([
+      "artifact.local.write",
+      "connector.state.apply",
+      "connector.state.apply_external",
+      "connector.state.compensate",
+    ]);
     // Every effectful capability is gated. The converse is deliberately *not*
     // asserted: `exception.shadow.authorize` has no side effect and is gated
     // anyway, because a shadow action a human never approved would prove
@@ -294,14 +325,44 @@ describe("agentic capability registry", () => {
     expect(consequentialFor(AGENTIC_EXCEPTION_MISSION_CAPABILITIES)).toEqual(["connector.state.apply"]);
   });
 
-  it("never registers a real external side effect", () => {
+  it("registers a real external side effect only for the two reviewed capabilities", () => {
     // `simulated_external` is a connector-owned local store standing in for an
-    // external system. `external` means a real third party changed, and no
-    // capability may declare it — the registry refuses at module load.
+    // external system. `external` means a real third party changed. This was
+    // `toEqual([])` until P0-C; it is now an exact allowlist rather than a
+    // prohibition, because "no real writes exist" stopped being true and the
+    // useful question became "which ones, and are they still only these".
+    //
+    // A third entry appearing here is a review event, not a passing test.
     const external = listAgenticCapabilities()
-      .filter((capability) => capability.sideEffectClass === "external");
+      .filter((capability) => capability.sideEffectClass === "external")
+      .map((capability) => capability.capabilityId)
+      .sort();
 
-    expect(external).toEqual([]);
+    expect(external).toEqual(["connector.state.apply_external", "connector.state.compensate"]);
+  });
+
+  it("keeps the simulated write path unable to reach a real system", () => {
+    // The two live modes cannot borrow each other's write capability. A
+    // simulated mission is structurally incapable of a real write, which is what
+    // keeps every predecessor proof's "realExternalWrites = 0" true rather than
+    // merely still passing.
+    expect(AGENTIC_EXCEPTION_MISSION_CAPABILITIES)
+      .not.toContain("connector.state.apply_external");
+    expect(AGENTIC_EXCEPTION_MISSION_CAPABILITIES)
+      .not.toContain("connector.state.compensate");
+    expect(AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES)
+      .not.toContain("connector.state.apply");
+  });
+
+  it("gives a compensated mission the power to undo exactly what it wrote", () => {
+    // Compensation is granted only where something real was changed, and the
+    // absence oracle is read-only so it cannot manufacture the absence it
+    // reports.
+    expect(AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES)
+      .toContain("connector.state.compensate");
+    expect(requireAgenticCapability("exception.absence.verify").sideEffectClass).toBe("none");
+    expect(requireAgenticCapability("exception.absence.verify").allowedTools)
+      .toEqual(["connector.state.read"]);
   });
 });
 

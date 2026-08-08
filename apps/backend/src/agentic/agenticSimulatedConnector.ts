@@ -76,8 +76,15 @@ export interface ConnectorCapabilityManifest {
    * system and cannot change it. The distinction is declared rather than
    * inferred because everything downstream — whether a write plan may compile
    * at all — depends on it.
+   *
+   * `real_sandbox` is the third and newest: a genuine external system that
+   * CHANTER OS owns outright and that holds nothing anyone would miss. It is
+   * kept distinct from a hypothetical `real_production` rather than collapsed
+   * into one "real" member, because the whole readiness argument turns on the
+   * difference and a single flag would let a production binding inherit a
+   * sandbox's permissions by looking equally real.
    */
-  readonly environment: "simulated" | "real_read_only";
+  readonly environment: "simulated" | "real_read_only" | "real_sandbox";
   readonly capabilities: readonly string[];
   readonly readOperations: readonly string[];
   /**
@@ -105,11 +112,33 @@ export interface ConnectorCapabilityManifest {
   readonly idempotencySemantics: string;
   readonly reconciliationSupport: string;
   readonly verificationSupport: string;
-  readonly compensationSupport: "none";
+  /**
+   * How an applied write can be undone.
+   *
+   * Was the literal `"none"` while no connector in this fabric could undo
+   * anything. `idempotent_create_delete` is added — and only that — because it
+   * is the one mode the readiness gate accepts for a first real write: the undo
+   * is a delete of the exact object created, which destroys nothing that was
+   * there before. A force-overwrite mode is deliberately still unrepresentable.
+   */
+  readonly compensationSupport: "none" | "idempotent_create_delete";
   /** Fields the one write capability is permitted to change, and no others. */
   readonly writableFields: readonly string[];
-  /** Stated so a reader never has to infer it from the implementation. */
-  readonly realExternalWrites: false;
+  /**
+   * Whether this connector's writes land in a real external system.
+   *
+   * This was the literal `false`, which made a real-write connector a compile
+   * error — the guard the predecessor slice installed on purpose while no target
+   * was safe to write to. P0-C opens it to `boolean` because a target now is,
+   * and the guard would otherwise have to be evaded rather than lifted.
+   *
+   * What replaces it is not weaker, it is elsewhere and narrower: a connector
+   * may set this `true` only alongside `environment: "real_sandbox"`, and the
+   * mission service refuses a live binding whose connector cannot compensate.
+   * A type that forbids everything stops being a safety property the moment the
+   * thing it forbids becomes necessary; a checked invariant survives.
+   */
+  readonly realExternalWrites: boolean;
 }
 
 export const SIMULATED_CONNECTOR_MANIFEST: ConnectorCapabilityManifest = Object.freeze({
@@ -180,18 +209,46 @@ export interface SimulatedConnectorOptions {
 }
 
 /**
+ * The undo of exactly one applied action.
+ *
+ * Carries the revision it deleted under, so the evidence records what the
+ * compensation was conditional on rather than merely that it succeeded.
+ */
+export interface ConnectorCompensationResult {
+  readonly compensated: true;
+  /** True when this call performed the delete; false when it replayed one. */
+  readonly performedWrite: boolean;
+  readonly targetId: string;
+  /** The exact revision the delete was made conditional on. */
+  readonly expectedRevision: string;
+  readonly compensatedAt: string;
+}
+
+/**
  * What every operational connector must provide, and no more.
  *
- * Reading is the whole mandatory surface. `readAction` and `apply` are optional
- * because a read-only connector has neither — and their *absence* is the
- * guarantee, not a flag set to false. A connector that cannot write is one with
- * no write method to call, which no configuration can change.
+ * Reading is the whole mandatory surface. `readAction`, `apply`, and
+ * `compensate` are optional because a read-only connector has none of them —
+ * and their *absence* is the guarantee, not a flag set to false. A connector
+ * that cannot write is one with no write method to call, which no configuration
+ * can change.
  */
 export interface OperationalConnector {
   readonly connectorId: string;
   manifest(): ConnectorCapabilityManifest;
   read(targetId: string): ConnectorRecord | null;
-  readAction?(idempotencyKey: string): ConnectorAppliedAction | null;
+  /**
+   * Did this exact action land?
+   *
+   * `targetId` is passed because the well-formed question is "did action K land
+   * on object T", not "did action K land". A connector whose keys are opaque to
+   * it — one addressing a system that offers no key/target index — cannot answer
+   * the second at all, and encoding the target inside the key to compensate
+   * would make the key a lookup table pretending to be an identifier.
+   *
+   * Optional so a connector that does not need it may ignore it.
+   */
+  readAction?(idempotencyKey: string, targetId?: string): ConnectorAppliedAction | null;
   apply?(request: {
     readonly capability: string;
     readonly targetId: string;
@@ -200,6 +257,20 @@ export interface OperationalConnector {
     readonly writePayloadHash: string;
     readonly idempotencyKey: string;
   }): ConnectorApplyResult;
+  /**
+   * Undoes exactly one applied action, conditional on an exact revision.
+   *
+   * `expectedRevision` is required and has no default. A compensation that
+   * would proceed without one is a force-delete wearing a rollback's name: it
+   * would remove whatever is at that path now, including something a different
+   * writer put there after the create.
+   */
+  compensate?(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedRevision: string;
+    readonly idempotencyKey: string;
+  }): ConnectorCompensationResult;
 }
 
 export interface SimulatedConnector extends OperationalConnector {

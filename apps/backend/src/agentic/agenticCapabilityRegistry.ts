@@ -66,6 +66,15 @@ export const AGENTIC_TOOLS = [
   "connector.state.read",
   "connector.action.read",
   "connector.state.apply",
+  /**
+   * The compensating delete, as its own tool.
+   *
+   * Separate from `connector.state.apply` so a capability can be granted the
+   * power to undo without being granted the power to write, and vice versa. A
+   * single "mutate" tool would make the compensation node as dangerous as the
+   * action node it exists to reverse.
+   */
+  "connector.state.compensate",
 ] as const;
 
 export type AgenticToolName = (typeof AGENTIC_TOOLS)[number];
@@ -682,6 +691,7 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
         // already applied — the recovery case, and never a second write.
         performedWrite: { kind: "boolean" },
         writeCount: { kind: "number", minimum: 1, maximum: 1, integer: true },
+        connectorReconciliationReads: { kind: "number", minimum: 0, maximum: 8, integer: true },
       },
     },
     // Truthfully `local_write`: the connector's entire state is local. The
@@ -697,6 +707,142 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     allowedWorkerKinds: ["deterministic_tool"] as const,
     sideEffectClass: "simulated_external" as const,
     reconciliationMode: "connector_action_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  /**
+   * The real external create — the only capability in this fabric that changes
+   * a system CHANTER does not own.
+   *
+   * Deliberately *not* a mode of `connector.state.apply`. That capability is
+   * honestly classed `local_write`/`simulated_external`, and widening it to
+   * cover real writes would have made every existing simulated proof read as
+   * though it might have touched the world. Two capabilities, two honest
+   * classifications, and a plan names exactly one of them.
+   *
+   * `writeCount` is bounded `1..1` by the output schema, so §5's budget of
+   * exactly one primary mutation is enforced by the contract rather than by the
+   * worker remembering to stop.
+   */
+  capability({
+    capabilityId: "connector.state.apply_external",
+    owner: "operator" as const,
+    description:
+      "Applies exactly one approved ActionContract to a real external system, once, under a "
+      + "create-if-absent precondition.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        actionContractHash: { kind: "string", minLength: 64, maxLength: 64 },
+        candidateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        approvalId: { kind: "string", minLength: 1, maxLength: 200 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        idempotencyKey: { kind: "string", minLength: 1, maxLength: 400 },
+        postStateHash: { kind: "string", minLength: 1, maxLength: 120 },
+        performedWrite: { kind: "boolean" },
+        writeCount: { kind: "number", minimum: 1, maximum: 1, integer: true },
+        connectorReconciliationReads: { kind: "number", minimum: 0, maximum: 8, integer: true },
+      },
+    },
+    // The honest classification, and the reason the module-load denylist had to
+    // give up `external_write` rather than this capability giving up the truth.
+    riskClass: "external_write" as const,
+    authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
+    defaultBudget: budget({ maxToolCalls: 4, maxDurationMs: 60_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.state.read", "connector.action.read", "connector.state.apply"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "external" as const,
+    reconciliationMode: "connector_action_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  /**
+   * The pre-approved undo, and nothing else.
+   *
+   * It carries `human_approval_bound_to_candidate_hash` for the same reason the
+   * action does: the compensation plan is part of what the human approved, so a
+   * different undo is a different decision. It cannot reach
+   * `connector.state.apply`, so this node can remove the object its mission
+   * created and cannot create anything.
+   */
+  capability({
+    capabilityId: "connector.state.compensate",
+    owner: "operator" as const,
+    description:
+      "Deletes exactly the object this mission created, conditional on its exact post-create "
+      + "revision, and nothing else.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        actionContractHash: { kind: "string", minLength: 64, maxLength: 64 },
+        candidateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        approvalId: { kind: "string", minLength: 1, maxLength: 200 },
+        verifiedRevision: { kind: "string", minLength: 1, maxLength: 120 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        compensated: { kind: "boolean" },
+        performedWrite: { kind: "boolean" },
+        expectedRevision: { kind: "string", minLength: 1, maxLength: 120 },
+        connectorCompensationCount: { kind: "number", minimum: 0, maximum: 1, integer: true },
+      },
+    },
+    riskClass: "external_write" as const,
+    authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
+    defaultBudget: budget({ maxToolCalls: 3, maxDurationMs: 60_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.state.read", "connector.state.compensate"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "external" as const,
+    reconciliationMode: "connector_action_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  /**
+   * The oracle for the compensated end state.
+   *
+   * Separate from `exception.outcome.verify` because it judges the opposite
+   * proposition. That oracle asks "is the desired state present"; this one asks
+   * "is the object gone" — and an oracle that could answer both by flipping a
+   * boolean would be one edit away from reporting absence as success.
+   */
+  capability({
+    capabilityId: "exception.absence.verify",
+    owner: "operator" as const,
+    description:
+      "Independently re-reads the exact object and confirms it is absent after compensation.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        connectorId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 400 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        recordAbsent: { kind: "boolean" },
+        absenceVerified: { kind: "boolean" },
+        residualObjectCount: { kind: "number", minimum: 0, maximum: 1, integer: true },
+      },
+    },
+    riskClass: "read_only" as const,
+    authorityRequirement: "none" as const,
+    defaultBudget: budget({ maxToolCalls: 3, maxDurationMs: 30_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    // Read-only tools only. An oracle that could delete could manufacture the
+    // absence it is supposed to be observing.
+    allowedTools: ["connector.state.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
     evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
   }),
   capability({
@@ -803,6 +949,10 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
         },
         connectorWriteCount: { kind: "number", minimum: 0, maximum: 8, integer: true },
         outcomeVerified: { kind: "boolean" },
+        // Empty when the record was absent: an oracle that found nothing has no
+        // revision to report, and inventing one would hand the compensation a
+        // precondition nothing stands behind.
+        verifiedRevision: { kind: "string", minLength: 0, maxLength: 120 },
       },
     },
     riskClass: "read_only" as const,
@@ -827,7 +977,22 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
  * to reach along today's code path.
  */
 const UNSUPPORTED_RISK_CLASSES: ReadonlySet<AgenticRiskClass> = new Set<AgenticRiskClass>([
-  "external_write",
+  // `external_write` was here until P0-C, and the predecessor slice went out of
+  // its way not to slip past it: `connector.state.apply` is classed
+  // `local_write` with `sideEffectClass: "simulated_external"`, because its
+  // store really is local and pretending otherwise would have been the easy lie.
+  //
+  // It is removed now because a capability that genuinely writes to a real
+  // external system must be able to say so. Registering such a capability under
+  // `local_write` to satisfy this denylist would defeat the point of having it:
+  // the guard exists to make real writes *visible*, not to make them
+  // unnameable.
+  //
+  // What did not move: `irreversible` is still refused, and that is the bound
+  // that matters now. The one capability admitted under `external_write` creates
+  // an object whose undo is deleting exactly that object — compensable by
+  // construction. A capability whose effect could not be removed still cannot be
+  // registered at all.
   "irreversible",
 ]);
 
@@ -851,8 +1016,24 @@ function assertRegistryIsConsistent(): void {
     if (capability.allowedWorkerKinds.length === 0) {
       throw new Error(`Capability ${capability.capabilityId} declares no worker kind.`);
     }
-    if (capability.sideEffectClass === "external") {
-      throw new Error(`Capability ${capability.capabilityId} declares an external side effect.`);
+    // `external` was refused outright until P0-C. It is now permitted, but only
+    // for a capability that also declares the risk honestly — the two fields
+    // must agree. A capability claiming a real external effect at
+    // `local_write` risk, or the reverse, is a record that contradicts itself,
+    // and a contradiction at module load is better than one at write time.
+    if (capability.sideEffectClass === "external"
+      && capability.riskClass !== "external_write") {
+      throw new Error(
+        `Capability ${capability.capabilityId} declares an external side effect but risk class `
+        + `${capability.riskClass}.`,
+      );
+    }
+    if (capability.riskClass === "external_write"
+      && capability.sideEffectClass !== "external") {
+      throw new Error(
+        `Capability ${capability.capabilityId} declares external_write risk but side effect `
+        + `${capability.sideEffectClass}.`,
+      );
     }
     // Every consequential capability must be gated, and the gate is declared on
     // the capability rather than inferred from a node name. Checking it here
@@ -864,10 +1045,15 @@ function assertRegistryIsConsistent(): void {
         `Capability ${capability.capabilityId} has a side effect but requires no human authority.`,
       );
     }
-    // A simulated-external write must be reconcilable against the system that
-    // would have performed it. Any other mode would resolve an ambiguous
-    // outcome by reading something that cannot know the answer.
-    if (capability.sideEffectClass === "simulated_external"
+    // A connector write must be reconcilable against the system that would have
+    // performed it. Any other mode would resolve an ambiguous outcome by reading
+    // something that cannot know the answer.
+    //
+    // Extended to cover `external` alongside `simulated_external`: the rule was
+    // written for the simulated case, and it matters incomparably more for the
+    // real one, where guessing wrong means a duplicate in someone else's system.
+    if ((capability.sideEffectClass === "simulated_external"
+      || capability.sideEffectClass === "external")
       && capability.reconciliationMode !== "connector_action_lookup_before_retry") {
       throw new Error(
         `Capability ${capability.capabilityId} writes to a connector but does not reconcile against it.`,
@@ -948,6 +1134,27 @@ export const AGENTIC_EXCEPTION_MISSION_CAPABILITIES: readonly string[] = Object.
   "exception.action.compile",
   "connector.state.apply",
   "exception.outcome.verify",
+]);
+
+/**
+ * The capabilities a real-external, compensated exception mission may use.
+ *
+ * `connector.state.apply` is deliberately **absent**, and so is
+ * `connector.state.apply_external` from the simulated set above. The two live
+ * modes cannot reach each other's write capability, so a simulated mission is
+ * structurally incapable of a real write and a real one cannot quietly fall
+ * back to writing locally and calling it done.
+ *
+ * Compensation is granted here and nowhere else, because it is only meaningful
+ * where something real was changed.
+ */
+export const AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES: readonly string[] = Object.freeze([
+  "exception.state.observe",
+  "exception.action.compile",
+  "connector.state.apply_external",
+  "exception.outcome.verify",
+  "connector.state.compensate",
+  "exception.absence.verify",
 ]);
 
 /**

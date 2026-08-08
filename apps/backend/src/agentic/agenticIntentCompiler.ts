@@ -58,6 +58,7 @@ import {
 } from "./agenticExceptionContract.js";
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
+  AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES,
   minimumExecutablePlanDurationMs,
@@ -66,7 +67,22 @@ import {
 import { assertBindingSelectable } from "./agenticProviderRegistry.js";
 import type { AgenticRiskClass, AgenticVerifiabilityClass } from "chanter-agent-runtime";
 
-const SUPPORTED_RISK_CLASSES: readonly AgenticRiskClass[] = ["read_only", "local_write"];
+/**
+ * Risk classes a mission may be submitted under.
+ *
+ * `external_write` joins the list in P0-C, once a target existed that was safe
+ * to write to and a plan shape existed that puts back what it changed. It is
+ * admitted here and constrained elsewhere: such a mission must bind a connector
+ * that declares `real_sandbox` and can compensate, or intake refuses it.
+ *
+ * `irreversible` is still absent, and that is now the bound that matters. An
+ * effect that cannot be removed is not made acceptable by approving it.
+ */
+const SUPPORTED_RISK_CLASSES: readonly AgenticRiskClass[] = [
+  "read_only",
+  "local_write",
+  "external_write",
+];
 
 const SUPPORTED_VERIFIABILITY_CLASSES: readonly AgenticVerifiabilityClass[] = [
   "deterministic",
@@ -781,7 +797,13 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
     ? AGENTIC_ARTIFACT_MISSION_CAPABILITIES
     : exceptionContract?.executionMode === "shadow"
       ? AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES
-      : AGENTIC_EXCEPTION_MISSION_CAPABILITIES;
+      // A compensated mission routes to the real-external write and an undo,
+      // and must not be asked to permit the simulated write capability its plan
+      // never reaches — the two live modes are kept disjoint here as well as in
+      // the worker set.
+      : exceptionContract?.executionMode === "live_compensated"
+        ? AGENTIC_COMPENSATED_EXCEPTION_MISSION_CAPABILITIES
+        : AGENTIC_EXCEPTION_MISSION_CAPABILITIES;
   for (const required of requiredCapabilities) {
     if (forbiddenCapabilities.includes(required)) {
       refuse(

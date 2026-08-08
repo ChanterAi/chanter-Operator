@@ -68,13 +68,28 @@ export interface AgenticConnectorPort {
    * connector that has none — there is no method to call, rather than a method
    * that declines.
    */
-  readAction?(idempotencyKey: string): JsonValue | null;
+  readAction?(idempotencyKey: string, targetId?: string): JsonValue | null;
   apply?(request: {
     readonly capability: string;
     readonly targetId: string;
     readonly expectedPreStateHash: string;
     readonly writePayload: readonly { readonly field: string; readonly value: JsonValue }[];
     readonly writePayloadHash: string;
+    readonly idempotencyKey: string;
+  }): JsonValue;
+  /**
+   * The undo, separately optional from `apply`.
+   *
+   * A connector that can write is not automatically one that can undo, and the
+   * readiness gate refuses the first without the second. Keeping them as two
+   * optional methods means "this connector can change the world but cannot put
+   * it back" is a representable — and therefore rejectable — state, rather than
+   * an assumption nobody checked.
+   */
+  compensate?(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedRevision: string;
     readonly idempotencyKey: string;
   }): JsonValue;
 }
@@ -280,7 +295,12 @@ export function createAgenticToolSurface(
               "This connector performs no actions, so it has none to look up.",
             );
           }
-          const action = connectorPort.readAction(idempotencyKey);
+          // Optional: a connector that indexes its own actions ignores it, and
+          // one that cannot needs it to know which object is being asked about.
+          const reconcileTarget = typeof request.targetId === "string" && request.targetId.trim()
+            ? request.targetId
+            : undefined;
+          const action = connectorPort.readAction(idempotencyKey, reconcileTarget);
           // The reconciliation read. `applied: false` is the finding that
           // permits a retry; it is never inferred from a missing response.
           return action === null
@@ -322,6 +342,28 @@ export function createAgenticToolSurface(
             expectedPreStateHash,
             writePayload,
             writePayloadHash,
+            idempotencyKey,
+          });
+        }
+        case "connector.state.compensate": {
+          const capability = requireString(request.capability, "capability");
+          const targetId = requireString(request.targetId, "targetId");
+          // Required, and required *here* as well as in the connector. A
+          // compensation that reached the transport without a revision would be
+          // a force-delete one layer from the wire.
+          const expectedRevision = requireString(request.expectedRevision, "expectedRevision");
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const compensatePort = requireConnector();
+          if (typeof compensatePort.compensate !== "function") {
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_NOT_COMPENSABLE",
+              "This connector exposes no compensation method; the undo is refused at the transport.",
+            );
+          }
+          return compensatePort.compensate({
+            capability,
+            targetId,
+            expectedRevision,
             idempotencyKey,
           });
         }

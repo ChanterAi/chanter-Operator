@@ -212,6 +212,88 @@ const EXCEPTION_PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
 ]);
 
 /**
+ * The compensated real-external plan.
+ *
+ *   X1 observe  exception.state.observe          real read
+ *    └─ X2 compile  exception.action.compile
+ *        └─ X3 authority.approve_connector_write (no worker)
+ *            └─ X4 apply    connector.state.apply_external   ONE real write
+ *                └─ X5 verify   exception.outcome.verify     independent read
+ *                    └─ X6 undo     connector.state.compensate  ONE real delete
+ *                        └─ X7 verify   exception.absence.verify  independent read
+ *
+ * Two things about this shape are load-bearing.
+ *
+ * **X6 depends on X5, not on X4.** The compensating delete is conditional on a
+ * revision, and that revision has to come from the independent verification
+ * read rather than from the create's own response. Wiring X6 to X4 would let
+ * the undo trust the write's account of itself, which is the exact thing the
+ * verification node exists to stop.
+ *
+ * **X7 is a separate node from X5.** One verify node with a mode flag would be
+ * an oracle that reports either "it is there" or "it is gone" depending on a
+ * boolean, and a boolean is one edit away from reporting the wrong one as
+ * success. Two nodes, two propositions, two ways to fail.
+ *
+ * The plan stays strictly linear. Nothing here runs in parallel, because every
+ * step is evidence for the next one's precondition.
+ */
+const COMPENSATED_EXCEPTION_PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
+  Object.freeze({
+    nodeId: "X1",
+    nodeType: "state_observe" as const,
+    capabilityId: "exception.state.observe",
+    dependencyIds: [] as readonly string[],
+    inputRefs: [] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X2",
+    nodeType: "action_compile" as const,
+    capabilityId: "exception.action.compile",
+    dependencyIds: ["X1"] as readonly string[],
+    inputRefs: ["X1"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X3",
+    nodeType: "authority_checkpoint" as const,
+    capabilityId: null,
+    dependencyIds: ["X2"] as readonly string[],
+    inputRefs: ["X2"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X4",
+    nodeType: "connector_apply" as const,
+    capabilityId: "connector.state.apply_external",
+    dependencyIds: ["X3"] as readonly string[],
+    inputRefs: ["X2", "X3"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X5",
+    nodeType: "outcome_verify" as const,
+    capabilityId: "exception.outcome.verify",
+    dependencyIds: ["X4"] as readonly string[],
+    inputRefs: ["X2", "X4"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X6",
+    // A compensating delete genuinely is a connector write, so it carries the
+    // write node type. "This plan contains no write node" therefore remains
+    // answerable from node types alone, which is what that type is for.
+    nodeType: "connector_apply" as const,
+    capabilityId: "connector.state.compensate",
+    dependencyIds: ["X5"] as readonly string[],
+    inputRefs: ["X2", "X5"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X7",
+    nodeType: "outcome_verify" as const,
+    capabilityId: "exception.absence.verify",
+    dependencyIds: ["X6"] as readonly string[],
+    inputRefs: ["X6"] as readonly string[],
+  }),
+]);
+
+/**
  * The shadow DAG: identical up to authority, and then it does not write.
  *
  *     X1 observe        exception.state.observe
@@ -274,21 +356,42 @@ function blueprintFor(
   executionMode: OperationalExceptionExecutionMode,
 ): readonly NodeBlueprint[] {
   if (missionKind !== "operational_exception") return PLAN_BLUEPRINT;
-  return executionMode === "shadow" ? SHADOW_EXCEPTION_PLAN_BLUEPRINT : EXCEPTION_PLAN_BLUEPRINT;
+  if (executionMode === "shadow") return SHADOW_EXCEPTION_PLAN_BLUEPRINT;
+  if (executionMode === "live_compensated") return COMPENSATED_EXCEPTION_PLAN_BLUEPRINT;
+  return EXCEPTION_PLAN_BLUEPRINT;
 }
 
 /**
  * The node whose verdict may complete a mission of this kind.
  *
- * Exactly one per plan, and always an `outcome_verify` node. Naming it here
- * rather than hardcoding `"N8"` downstream is what keeps "only an independent
- * oracle completes a mission" true for both plans instead of true for one.
+ * Always an `outcome_verify` node, and defined as the one **nothing depends
+ * on** rather than the only one. The compensated plan has two oracles — one
+ * confirming the write landed, one confirming it was removed — and the mission
+ * completes on the second. "The sole verify node" stopped being a usable
+ * definition the moment a plan needed to verify twice; "the last one" is what
+ * was always meant.
+ *
+ * Naming it here rather than hardcoding an id downstream is what keeps "only an
+ * independent oracle completes a mission" true across every plan shape.
  */
 export function terminalVerificationNodeId(
   missionKind: AgenticMissionKind,
   executionMode: OperationalExceptionExecutionMode,
 ): string {
-  return soleNodeOfType(missionKind, executionMode, "outcome_verify");
+  const blueprint = blueprintFor(missionKind, executionMode);
+  const dependedOn = new Set(blueprint.flatMap((node) => [...node.dependencyIds]));
+  const terminal = blueprint.filter(
+    (node) => node.nodeType === "outcome_verify" && !dependedOn.has(node.nodeId),
+  );
+  if (terminal.length !== 1) {
+    throw new OperatorError(
+      `A plan must end in exactly one outcome_verify node; ${missionKind} ends in `
+      + `${terminal.length}.`,
+      500,
+      "AGENTIC_PLAN_MALFORMED",
+    );
+  }
+  return terminal[0]!.nodeId;
 }
 
 /**

@@ -43,6 +43,16 @@ import { createHash } from "node:crypto";
 
 export const OPERATIONAL_EXCEPTION_SCHEMA_VERSION = "chanter.operational-exception.v1" as const;
 
+/**
+ * The revision an absent object reports.
+ *
+ * A named marker rather than an empty string, so "the object is not there" and
+ * "nobody recorded a revision" cannot compare equal. A create's pre-state *is*
+ * absence, and absence has to be as nameable as any other state or the contract
+ * has nothing to bind an approval to.
+ */
+export const ABSENT_SOURCE_REVISION = "chanter.absent.v1" as const;
+
 const OBSERVED_STATE_HASH_DOMAIN = "chanter.operational-exception.observed-state.v1";
 const DESIRED_STATE_HASH_DOMAIN = "chanter.operational-exception.desired-state.v1";
 const STATE_DELTA_HASH_DOMAIN = "chanter.operational-exception.state-delta.v1";
@@ -377,13 +387,40 @@ export function renderActionContractCandidate(contract: ActionContract): string 
  * because the two modes compile *different plans*: a shadow plan contains no
  * node with a side effect at all.
  */
-export const OPERATIONAL_EXCEPTION_EXECUTION_MODES = ["live", "shadow"] as const;
+export const OPERATIONAL_EXCEPTION_EXECUTION_MODES = [
+  "live",
+  "shadow",
+  /**
+   * A real external write that is undone before the mission ends.
+   *
+   * A third mode rather than a flag on `live`, for the same reason `shadow` is
+   * a mode: the three compile *different plans*. A `live` plan has no
+   * compensation node at all, so "this mission will put back what it changed"
+   * is answerable by reading the compiled plan rather than by trusting that
+   * some later step will run.
+   *
+   * It is also part of the intent hash, so a mission resubmitted as plain
+   * `live` is a different mission rather than the same one quietly stripped of
+   * its undo.
+   */
+  "live_compensated",
+] as const;
 
 export type OperationalExceptionExecutionMode =
   (typeof OPERATIONAL_EXCEPTION_EXECUTION_MODES)[number];
 
 export const OPERATIONAL_EXCEPTION_TERMINAL_STATES = [
   "completed_verified",
+  /**
+   * The world was changed, independently verified, put back, and the absence
+   * independently verified too.
+   *
+   * Distinct from `completed_verified` rather than a flag beside it: a mission
+   * that wrote and left the write standing, and one that wrote and removed it,
+   * end in genuinely different places, and a reader must not have to check a
+   * second field to tell which happened.
+   */
+  "completed_verified_compensated",
   "blocked",
   "failed",
   "unknown_requires_human",
@@ -458,10 +495,35 @@ export interface ExceptionValueObservation {
   /**
    * Writes performed against the real external system.
    *
-   * Typed as the literal `0`, so a non-zero value is a compile error rather
-   * than a number someone has to notice.
+   * Typed as the literal `0` until P0-C, so that a non-zero value was a compile
+   * error rather than a number someone had to notice. That guard did its job:
+   * it held for every slice in which no target was safe to write to, and it is
+   * being lifted deliberately rather than worked around.
+   *
+   * It is now a plain count, and the bound moved to where it can still bite —
+   * the mission's own budget, which authorizes exactly one primary mutation and
+   * refuses a second. A count is the honest shape now that the true value is
+   * sometimes one; what must not drift is the *authorization*, not the integer.
    */
-  readonly realExternalWrites: 0;
+  readonly realExternalWrites: number;
+  /**
+   * Compensating writes performed against the real external system.
+   *
+   * Counted separately from `realExternalWrites` rather than folded into it,
+   * because "we changed the world once and put it back" and "we changed the
+   * world twice" are different sentences, and a single total cannot tell them
+   * apart.
+   */
+  readonly compensationWrites: number;
+  /** Reads issued to resolve an ambiguous outcome. */
+  readonly reconciliationReads: number;
+  /**
+   * Retries issued without first reading the exact object.
+   *
+   * Present so the proof can assert it is zero. A measure nobody records is a
+   * property nobody keeps.
+   */
+  readonly blindRetries: number;
 }
 
 // ---------------------------------------------------------------------------

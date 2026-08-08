@@ -49,6 +49,7 @@ import {
 import type { AgenticToolSurface } from "./agenticToolSurface.js";
 import type { AgenticExceptionIntakeState } from "./agenticPlanJournal.js";
 import {
+  ABSENT_SOURCE_REVISION,
   compileActionContract,
   createObservationHash,
   evaluateAcceptanceConstraints,
@@ -95,6 +96,15 @@ export interface AgenticExceptionWorkerDependencies extends AgenticWorkerDepende
   readonly actionDeadline: () => string;
   /** Whether this mission may change the source, or only observe and compile. */
   readonly executionMode: OperationalExceptionExecutionMode;
+  /**
+   * The connector capability the compensating delete runs under.
+   *
+   * Supplied rather than inferred from the action's capability: an undo is a
+   * different operation from the thing it undoes, and deriving `document.delete`
+   * from `document.create` by string surgery would be a guess that happens to
+   * work on today's names.
+   */
+  readonly compensationCapability?: string;
 }
 
 /** Scope labels that mark which fixture a specialist reads. */
@@ -844,7 +854,9 @@ function outcomeVerifyWorker(dependencies: AgenticWorkerDependencies): AgenticNo
  * mismatch rather than throwing: a moved record is a *finding*, and the plan
  * fails closed on it one node later when the action's pre-state check refuses.
  */
-function exceptionObserveWorker(dependencies: AgenticWorkerDependencies): AgenticNodeWorker {
+function exceptionObserveWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
   return {
     workerId: "operator.agentic.exception-observe",
     capabilityId: "exception.state.observe",
@@ -859,7 +871,12 @@ function exceptionObserveWorker(dependencies: AgenticWorkerDependencies): Agenti
       );
       const exists = response?.exists === true;
       const record = jsonRecord(response?.record ?? null);
-      if (!exists || !record) {
+      // A create's pre-state is absence, so for a compensated mission "not
+      // there" is the observation rather than the failure to make one. Every
+      // other mode still fails: a mission that means to change an existing
+      // record and cannot find it has observed nothing it can act on.
+      const absenceIsTheObservation = dependencies.executionMode === "live_compensated";
+      if ((!exists || !record) && !absenceIsTheObservation) {
         return {
           ok: false,
           status: "failed",
@@ -870,27 +887,32 @@ function exceptionObserveWorker(dependencies: AgenticWorkerDependencies): Agenti
         };
       }
 
-      const fields = jsonRecord(record.fields) ?? {};
+      const fields = record ? jsonRecord(record.fields) ?? {} : {};
+      const sourceRevision = exists && record
+        ? String(record.revision ?? "")
+        : ABSENT_SOURCE_REVISION;
       const observationHash = createObservationHash({
         sourceSystemId: String(input.connectorId ?? ""),
-        targetId: String(record.targetId ?? targetId),
-        sourceRevision: String(record.revision ?? ""),
-        observedFields: exceptionFieldsFrom(fields as Record<string, ExceptionFieldValue>),
+        targetId: exists && record ? String(record.targetId ?? targetId) : targetId,
+        sourceRevision,
+        observedFields: exists && record
+          ? exceptionFieldsFrom(fields as Record<string, ExceptionFieldValue>)
+          : [],
       });
 
       return {
         ok: true,
         structuredOutput: {
           sourceSystemId: String(input.connectorId ?? ""),
-          targetId: String(record.targetId ?? targetId),
-          sourceRevision: String(record.revision ?? ""),
+          targetId: exists && record ? String(record.targetId ?? targetId) : targetId,
+          sourceRevision,
           observationHash,
           matchesIntakeObservation: observationHash === expected,
-          recordExists: true,
+          recordExists: exists,
         },
         evidence: [{
           kind: "tool_output",
-          label: `observed ${targetId} at revision ${String(record.revision ?? "")}`,
+          label: `observed ${targetId} at revision ${sourceRevision}`,
           sourceReference: `connector-observation:${observationHash}`,
           content: { observationHash, matchesIntakeObservation: observationHash === expected },
         }],
@@ -1049,10 +1071,18 @@ function exceptionActionCompileWorker(
  */
 function connectorApplyWorker(
   dependencies: AgenticExceptionWorkerDependencies,
+  options: { readonly capabilityId: string; readonly workerId: string } = {
+    capabilityId: "connector.state.apply",
+    workerId: "operator.agentic.connector-apply",
+  },
 ): AgenticNodeWorker {
   return {
-    workerId: "operator.agentic.connector-apply",
-    capabilityId: "connector.state.apply",
+    workerId: options.workerId,
+    // Parameterized rather than duplicated. The simulated and real writes run
+    // the same three checks — recompile, re-hash against the approval, ask the
+    // connector whether this key already landed — and a second copy of that
+    // logic would be a second place for the guarantee to drift.
+    capabilityId: options.capabilityId,
     kind: "deterministic_tool",
     async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
       const input = jsonRecord(context.input) ?? {};
@@ -1110,6 +1140,7 @@ function connectorApplyWorker(
       const existing = jsonRecord(
         await context.tools.invoke("connector.action.read", {
           idempotencyKey: contract.idempotencyKey,
+          targetId: contract.targetId,
         }),
       );
       if (existing?.applied === true) {
@@ -1121,6 +1152,9 @@ function connectorApplyWorker(
             postStateHash: String(action.postStateHash ?? ""),
             performedWrite: false,
             writeCount: 1,
+            // The reconciliation read that produced this replay. Reported so
+            // "we asked before acting" is measured rather than asserted.
+            connectorReconciliationReads: 1,
           },
           evidence: [{
             kind: "tool_output",
@@ -1153,6 +1187,7 @@ function connectorApplyWorker(
           postStateHash: String(action.postStateHash ?? ""),
           performedWrite: applied?.performedWrite === true,
           writeCount: 1,
+          connectorReconciliationReads: 1,
         },
         evidence: [{
           kind: "tool_output",
@@ -1433,6 +1468,7 @@ function exceptionVerifyWorker(
       const actionResponse = jsonRecord(
         await context.tools.invoke("connector.action.read", {
           idempotencyKey: String(input.idempotencyKey ?? ""),
+          targetId,
         }),
       );
       const connectorWriteCount = actionResponse?.applied === true ? 1 : 0;
@@ -1450,6 +1486,13 @@ function exceptionVerifyWorker(
           unsatisfiedConstraintIds: [...evaluation.unsatisfied],
           connectorWriteCount,
           outcomeVerified,
+          // The revision this oracle read with its own eyes.
+          //
+          // Reported here so the compensating delete can be made conditional on
+          // it. This is the only revision in the mission that did not come from
+          // the write's own account of itself, which is precisely why it is the
+          // one the undo must use.
+          verifiedRevision: exists && record ? String(record.revision ?? "") : "",
         },
         evidence: [{
           kind: "tool_output",
@@ -1460,6 +1503,170 @@ function exceptionVerifyWorker(
             connectorWriteCount,
             unsatisfiedConstraintIds: [...evaluation.unsatisfied],
           },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X6 — the pre-approved undo
+// ---------------------------------------------------------------------------
+
+/**
+ * Deletes exactly the object this mission created, and nothing else.
+ *
+ * It re-derives the target from the approved contract rather than accepting one
+ * from the previous node, for the same reason the apply worker recompiles: the
+ * undo must be aimed by the approval, not by whatever the last step happened to
+ * report.
+ *
+ * The revision it deletes under comes from **X5's independent verification
+ * read**, never from the create's own response. That is why X6 depends on X5
+ * rather than X4: deleting under a revision the write reported about itself
+ * would trust the component with an interest in the answer, which is the exact
+ * failure the verification node exists to prevent.
+ *
+ * A revision mismatch is a refusal, not a retry. Something changed the document
+ * after this mission created it, and forcing past that would delete whatever
+ * the other writer put there — a second write wearing a rollback's name.
+ */
+function connectorCompensateWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.connector-compensate",
+    capabilityId: "connector.state.compensate",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const approvedHash = String(input.candidateHash ?? "");
+      const candidate = dependencies.candidate();
+      if (!candidate) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "No durable approved action contract exists to compensate.",
+          }],
+        };
+      }
+      const derived = createAgenticCandidateHash(candidate.markdown);
+      if (derived !== approvedHash) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "The action contract bytes do not hash to the approved candidate hash; the "
+              + "compensation is refused.",
+          }],
+        };
+      }
+      const contract = parseActionContractCandidate(candidate.markdown);
+      if (!contract) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "The approved candidate is not a readable action contract.",
+          }],
+        };
+      }
+
+      // The revision X5 observed with its own read. Absent means verification
+      // never established one, and a delete without an exact revision is a
+      // force-delete — so this refuses rather than proceeding unconditionally.
+      const verifiedRevision = String(input.verifiedRevision ?? "");
+      if (verifiedRevision.trim() === "") {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "No independently verified post-create revision is available, so the compensating "
+              + "delete has no exact precondition and is refused.",
+          }],
+        };
+      }
+
+      const compensated = jsonRecord(
+        await context.tools.invoke("connector.state.compensate", {
+          capability: dependencies.compensationCapability ?? "document.delete",
+          targetId: contract.targetId,
+          expectedRevision: verifiedRevision,
+          idempotencyKey: contract.idempotencyKey,
+        }),
+      );
+
+      const performedWrite = compensated?.performedWrite === true;
+      return {
+        ok: true,
+        structuredOutput: {
+          compensated: compensated?.compensated === true,
+          performedWrite,
+          expectedRevision: verifiedRevision,
+          connectorCompensationCount: performedWrite ? 1 : 0,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `compensated ${contract.targetId} under revision ${verifiedRevision}`,
+          sourceReference: `connector-compensation:${contract.idempotencyKey}`,
+          content: { performedWrite, expectedRevision: verifiedRevision },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X7 — the absence oracle
+// ---------------------------------------------------------------------------
+
+/**
+ * Confirms the object is gone, by reading rather than by inference.
+ *
+ * A separate worker from `exceptionVerifyWorker` because it judges the opposite
+ * proposition. One oracle with a polarity flag would be a single edit away from
+ * reporting presence as a successful compensation, and this is the node the
+ * terminal state depends on.
+ *
+ * It holds only `connector.state.read`. An oracle that could delete could
+ * manufacture the absence it is supposed to be observing.
+ */
+function exceptionAbsenceVerifyWorker(): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.exception-absence-verify",
+    capabilityId: "exception.absence.verify",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const targetId = String(input.targetId ?? "");
+
+      const response = jsonRecord(
+        await context.tools.invoke("connector.state.read", { targetId }),
+      );
+      // `exists: false` is a positive finding from a completed read, not the
+      // absence of an answer. A read that failed throws before reaching here,
+      // which is what keeps "the network was down" from reading as "it's gone".
+      const absent = response?.exists === false;
+
+      return {
+        ok: true,
+        structuredOutput: {
+          recordAbsent: absent,
+          absenceVerified: absent,
+          residualObjectCount: absent ? 0 : 1,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `independently verified ${targetId} is absent after compensation`,
+          sourceReference: `connector-absence:${targetId}`,
+          content: { recordAbsent: absent, residualObjectCount: absent ? 0 : 1 },
         }],
       };
     },
@@ -1561,6 +1768,24 @@ export function createAgenticExceptionWorkerSet(
       exceptionActionCompileWorker(dependencies),
       shadowAuthorizeWorker(dependencies),
       shadowVerifyWorker(dependencies),
+    ]);
+  }
+  // A compensated mission is built with the real-external applying worker and
+  // an undo, and a plain live mission is built with neither. The two live modes
+  // cannot reach each other's write worker, so a simulated mission has nothing
+  // constructed that could perform a real write, and a real one has no local
+  // write to quietly fall back to.
+  if (dependencies.executionMode === "live_compensated") {
+    return createAgenticWorkerRegistry([
+      exceptionObserveWorker(dependencies),
+      exceptionActionCompileWorker(dependencies),
+      connectorApplyWorker(dependencies, {
+        capabilityId: "connector.state.apply_external",
+        workerId: "operator.agentic.connector-apply-external",
+      }),
+      exceptionVerifyWorker(dependencies),
+      connectorCompensateWorker(dependencies),
+      exceptionAbsenceVerifyWorker(),
     ]);
   }
   return createAgenticWorkerRegistry([

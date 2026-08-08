@@ -72,13 +72,27 @@ import {
   type ObservedState,
   type OperationalExceptionTerminalState,
   type TerminalOutcome,
+  ABSENT_SOURCE_REVISION,
 } from "./agenticExceptionContract.js";
+
+/**
+ * The capability a compensating connector write runs under.
+ *
+ * Named here rather than imported from the registry to keep the value
+ * projection free of a dependency on capability wiring — it needs the identity,
+ * not the definition.
+ */
+const EXCEPTION_COMPENSATE_CAPABILITY = "connector.state.compensate" as const;
 
 /** Why a mission is in each terminal state. One sentence, no interpretation. */
 const TERMINAL_OUTCOME_REASONS: Readonly<Record<OperationalExceptionTerminalState, string>> =
   Object.freeze({
     completed_verified:
       "An independent oracle re-observed the source and confirmed it satisfies the desired state.",
+    completed_verified_compensated:
+      "A real external write was performed, independently verified, then removed by the approved "
+      + "compensating action, and its absence independently verified. The external system is back "
+      + "in the state it was observed in.",
     blocked: "The mission is waiting on an authority decision it cannot make for itself.",
     failed: "The mission stopped without reaching a verified resolution.",
     unknown_requires_human:
@@ -321,8 +335,8 @@ export class AgenticMissionService {
       // surface refuses at the boundary rather than calling into nothing.
       ...(typeof dependencies.connector.readAction === "function"
         ? {
-          readAction: (key: string) =>
-            (dependencies.connector!.readAction!(key) ?? null) as unknown as JsonValue,
+          readAction: (key: string, targetId?: string) =>
+            (dependencies.connector!.readAction!(key, targetId) ?? null) as unknown as JsonValue,
         }
         : {}),
       ...(typeof dependencies.connector.apply === "function"
@@ -343,6 +357,24 @@ export class AgenticMissionService {
               value: entry.value as ExceptionFieldValue,
             })),
             writePayloadHash: request.writePayloadHash,
+            idempotencyKey: request.idempotencyKey,
+          }) as unknown as JsonValue,
+        }
+        : {}),
+      // Forwarded on the same terms as `apply`, and separately from it: a
+      // connector that can write is not automatically one that can undo, and
+      // the port must be able to represent that difference.
+      ...(typeof dependencies.connector.compensate === "function"
+        ? {
+          compensate: (request: {
+            readonly capability: string;
+            readonly targetId: string;
+            readonly expectedRevision: string;
+            readonly idempotencyKey: string;
+          }) => dependencies.connector!.compensate!({
+            capability: request.capability,
+            targetId: request.targetId,
+            expectedRevision: request.expectedRevision,
             idempotencyKey: request.idempotencyKey,
           }) as unknown as JsonValue,
         }
@@ -710,6 +742,19 @@ export class AgenticMissionService {
           Date.parse(mission.requestedAt) + mission.intent.timeBudgetMs,
         ).toISOString(),
         executionMode: executionModeOf(mission.intent),
+        // Read from the bound connector's manifest rather than derived from the
+        // action's capability. The connector is the only authority on what its
+        // own undo is called, and inferring `document.delete` from
+        // `document.create` by string surgery would be a guess that happens to
+        // work on today's names.
+        ...(this.dependencies.connector !== undefined
+          ? {
+            compensationCapability: this.dependencies.connector
+              .manifest()
+              .writeCapabilitiesDeclared
+              .find((entry) => entry.endsWith(".delete")),
+          }
+          : {}),
       });
     }
 
@@ -1169,7 +1214,13 @@ export class AgenticMissionService {
     // shadow contract, so calling its answer `outcomeVerified` would have meant
     // one word carrying two different claims — and the whole point of the shadow
     // vocabulary is that those two claims never get confused.
-    const verified = outcome.outcomeVerified === true || outcome.shadowVerified === true;
+    // `absenceVerified` joins them for the same reason the shadow verdict has
+    // its own name: the compensated plan's terminal oracle judges that the
+    // object is *gone*, and reusing `outcomeVerified` for that would make one
+    // word mean both "the write is there" and "the write is not there".
+    const verified = outcome.outcomeVerified === true
+      || outcome.shadowVerified === true
+      || outcome.absenceVerified === true;
     const observation = this.computeValueObservation(missionId, verified);
     this.journal.transitionMission(missionId, verified ? "completed" : "failed_terminal", {
       actor: this.journal.requireMission(missionId).actorId,
@@ -1224,7 +1275,35 @@ export class AgenticMissionService {
       && !Array.isArray(output)
       && (output as Record<string, JsonValue>).revisionUnchanged === false;
 
-    const state: OperationalExceptionTerminalState = shadow
+    // A compensated mission's terminal oracle judges *absence*, so its verdict
+    // lives under a different key. Reading `outcomeVerified` here would find
+    // nothing and quietly report unverified, which is the failure mode a
+    // separate oracle was introduced to avoid.
+    const compensated = executionModeOf(mission.intent) === "live_compensated";
+    const absenceVerified = output !== null && output !== undefined && typeof output === "object"
+      && !Array.isArray(output)
+      && (output as Record<string, JsonValue>).absenceVerified === true;
+    // §16: worker success alone is insufficient. The write must have been
+    // verified present before it can be claimed verified absent — otherwise a
+    // mission that never wrote anything would reach the compensated terminal by
+    // observing an emptiness it never disturbed.
+    const primaryVerified = (() => {
+      if (!compensated) return false;
+      const primary = this.journal.getNode(mission.planId, "X5")?.output;
+      return primary !== null && primary !== undefined && typeof primary === "object"
+        && !Array.isArray(primary)
+        && (primary as Record<string, JsonValue>).outcomeVerified === true;
+    })();
+
+    const state: OperationalExceptionTerminalState = compensated
+      ? mission.status === "completed" && primaryVerified && absenceVerified
+        ? "completed_verified_compensated"
+        : mission.status === "reconciliation_required"
+          ? "unknown_requires_human"
+          : mission.status === "failed_terminal" || mission.status === "failed_recoverable"
+            ? "failed"
+            : "blocked"
+      : shadow
       ? mission.status === "completed"
         ? "shadow_verified_ready"
         : mission.status === "reconciliation_required"
@@ -1252,7 +1331,9 @@ export class AgenticMissionService {
       // Read from the oracle's own durable output, not inferred from the plan
       // state. The two agree today; if they ever disagreed, the honest report is
       // the oracle's, and this makes that disagreement visible.
-      verified: shadow ? shadowVerified : verified,
+      verified: compensated
+        ? primaryVerified && absenceVerified
+        : shadow ? shadowVerified : verified,
       reason: TERMINAL_OUTCOME_REASONS[state],
       verificationReference: oracle?.outputHash === undefined || oracle.outputHash === null
         ? null
@@ -1282,6 +1363,35 @@ export class AgenticMissionService {
       && typeof verifyOutput === "object" && !Array.isArray(verifyOutput)
       ? Number((verifyOutput as Record<string, JsonValue>).connectorWriteCount ?? 0)
       : 0;
+
+    // Compensation is counted from its own node rather than folded into the
+    // write count: "changed the world once and put it back" and "changed the
+    // world twice" must not report as the same number.
+    //
+    // Identified by capability rather than by a new node type. A compensating
+    // delete genuinely *is* a connector write, so `connector_apply` is the
+    // honest type for it — and keeping it that way preserves the property the
+    // shadow node type exists to protect: "this plan contains no write node"
+    // stays answerable by reading node types alone.
+    const compensateNode = nodes.find(
+      (node) => node.capabilityId === EXCEPTION_COMPENSATE_CAPABILITY,
+    );
+    const compensateOutput = compensateNode?.output;
+    const compensationWrites = compensateOutput !== null && compensateOutput !== undefined
+      && typeof compensateOutput === "object" && !Array.isArray(compensateOutput)
+      ? Number((compensateOutput as Record<string, JsonValue>).connectorCompensationCount ?? 0)
+      : 0;
+
+    // Reads issued to resolve an ambiguous outcome, reported by the worker that
+    // issued them. Counted rather than inferred from retry attempts, because a
+    // reconciliation that found the action already applied leaves no retry.
+    const reconciliationReads = nodes.reduce((total, node) => {
+      const output = node.output;
+      if (output === null || output === undefined || typeof output !== "object" || Array.isArray(output)) {
+        return total;
+      }
+      return total + Number((output as Record<string, JsonValue>).connectorReconciliationReads ?? 0);
+    }, 0);
 
     const completedAt = events.find(
       (event) => event.scope === "plan" && event.newState === "completed",
@@ -1316,10 +1426,25 @@ export class AgenticMissionService {
       staleObservations,
       shadowActionsCompiled: compileNode?.state === "completed" ? 1 : 0,
       verificationReads: verifyNode?.attempts ?? 0,
-      // Typed as the literal `0`. In shadow mode nothing can write; in live mode
-      // the connector is simulated and owns only local state. Neither path
-      // touches a real external system.
-      realExternalWrites: 0,
+      // Measured from the bound connector's own declaration rather than assumed.
+      //
+      // Until P0-C this was the literal `0` and true by construction: shadow
+      // missions cannot write, and the only live connector owned a local store.
+      // Now that a connector can declare `realExternalWrites`, the honest number
+      // is the write count *when the connector says its writes are real* — and
+      // still exactly `0` for every simulated binding, which is what keeps every
+      // predecessor proof's assertion true rather than merely still passing.
+      realExternalWrites: mission.exceptionState?.connectorManifest.realExternalWrites
+        ? connectorWrites
+        : 0,
+      compensationWrites: mission.exceptionState?.connectorManifest.realExternalWrites
+        ? compensationWrites
+        : 0,
+      reconciliationReads,
+      // Structural, not measured: this fabric's only retry path runs through
+      // `investigate`, which reads durable truth before deciding. There is no
+      // code path that retries an action without first asking what happened.
+      blindRetries: 0,
       exceptionDetected: mission.exceptionState ? 1 : 0,
       stateChangingActions: connectorWrites,
       // Attempts beyond the first that still produced one action. Zero is the
@@ -1535,7 +1660,12 @@ export class AgenticMissionService {
     // compile a write node whose capability the connector has no method for,
     // and the failure would surface after a human had already approved it.
     const manifest = connector.manifest();
-    if (exception.executionMode === "live" && !manifest.writeCapabilitiesEnabled) {
+    // Both live modes write, so both are gated. Matching only `"live"` here
+    // would have let the newer mode — the one that performs a *real* external
+    // write — past the very check the older, simulated one has to pass.
+    const writesSomething = exception.executionMode === "live"
+      || exception.executionMode === "live_compensated";
+    if (writesSomething && !manifest.writeCapabilitiesEnabled) {
       throw new OperatorError(
         `Connector ${connector.connectorId} declares write capabilities disabled, so it can only be `
         + "bound in shadow mode. A configured credential does not imply write authority.",
@@ -1546,12 +1676,38 @@ export class AgenticMissionService {
     // And the converse: `apply` genuinely absent from the object is the fact
     // that matters, so a connector claiming to be write-enabled while exposing
     // no write method is a contradiction rather than a usable binding.
-    if (exception.executionMode === "live" && typeof connector.apply !== "function") {
+    if (writesSomething && typeof connector.apply !== "function") {
       throw new OperatorError(
         `Connector ${connector.connectorId} exposes no write method, so no live mission may bind it.`,
         409,
         "AGENTIC_CONNECTOR_WRITE_UNAVAILABLE",
       );
+    }
+    // The readiness gate's central rule, enforced where a mission is actually
+    // bound: a write is only as safe as its undo. A connector that can change a
+    // real system but cannot remove what it changed must not be bound to a
+    // mission that intends to change it.
+    if (exception.executionMode === "live_compensated") {
+      if (typeof connector.compensate !== "function"
+        || manifest.compensationSupport === "none") {
+        throw new OperatorError(
+          `Connector ${connector.connectorId} cannot compensate, so it may not be bound to a `
+          + "compensated mission. A write with no undo is not made safe by intending to undo it.",
+          409,
+          "AGENTIC_CONNECTOR_NOT_COMPENSABLE",
+        );
+      }
+      // A real external write belongs only against a target CHANTER OS owns
+      // outright. `real_read_only` and `simulated` are refused here, and so is
+      // any future production environment: the mode names the sandbox exactly.
+      if (manifest.environment !== "real_sandbox") {
+        throw new OperatorError(
+          `Connector ${connector.connectorId} declares environment ${manifest.environment}; a `
+          + "compensated real-write mission may only bind a real_sandbox connector.",
+          409,
+          "AGENTIC_CONNECTOR_ENVIRONMENT_FORBIDDEN",
+        );
+      }
     }
 
     const desiredBase = {
@@ -1567,19 +1723,35 @@ export class AgenticMissionService {
     };
 
     const record = connector.read(exception.targetId);
-    if (!record) {
+    // A create's pre-state is that the object is not there, so for a compensated
+    // mission absence is the *expected* observation rather than a missing
+    // target. Every other mode still refuses: a mission that intends to change
+    // an existing record and cannot find it has nothing to compute a delta from.
+    const createsAbsentObject = exception.executionMode === "live_compensated";
+    if (!record && !createsAbsentObject) {
       throw new OperatorError(
         `Connector ${connector.connectorId} holds no record ${exception.targetId}.`,
         409,
         "AGENTIC_EXCEPTION_TARGET_MISSING",
       );
     }
+    if (record && createsAbsentObject) {
+      // The approved pre-state was absence and the object is already there.
+      // Refusing at intake means no plan is compiled and no human is asked to
+      // approve a create that could only fail — or worse, succeed by overwriting.
+      throw new OperatorError(
+        `Object ${exception.targetId} already exists, so a create-if-absent mission cannot be `
+        + "bound to it. The approved pre-state is absence.",
+        409,
+        "AGENTIC_EXCEPTION_TARGET_ALREADY_EXISTS",
+      );
+    }
     const observedBase = {
       missionId: intent.missionId,
       sourceSystemId: connector.connectorId,
-      targetId: record.targetId,
-      sourceRevision: record.revision,
-      observedFields: exceptionFieldsFrom(record.fields),
+      targetId: record?.targetId ?? exception.targetId,
+      sourceRevision: record?.revision ?? ABSENT_SOURCE_REVISION,
+      observedFields: record ? exceptionFieldsFrom(record.fields) : [],
     };
     const observed: ObservedState = {
       schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
@@ -1667,6 +1839,21 @@ export class AgenticMissionService {
             desiredStateHash: intake.desired.desiredStateHash,
             idempotencyKey: String(outputOf("X2").idempotencyKey ?? ""),
           };
+      case "X6":
+        // The undo is aimed by the approval and conditioned on X5's independent
+        // read. Handing it the approved candidate hash rather than a payload
+        // keeps it unable to compensate anything the human did not authorize.
+        return {
+          actionContractHash: String(outputOf("X2").actionContractHash ?? ""),
+          candidateHash: String(mission.approvedCandidateHash ?? ""),
+          approvalId: `${mission.missionId}:X3`,
+          verifiedRevision: String(outputOf("X5").verifiedRevision ?? ""),
+        };
+      case "X7":
+        return {
+          connectorId: exception.connectorId,
+          targetId: exception.targetId,
+        };
       /* c8 ignore next 2 -- unreachable: X3 is the checkpoint and runs no worker. */
       default:
         return {};
