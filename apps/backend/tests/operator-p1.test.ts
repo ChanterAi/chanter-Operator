@@ -183,8 +183,15 @@ describe("P1.0 Read-only Local Runner", () => {
     // But we test that the runner can handle the timeout parameter.
     const runner = new RealReadonlyRunner(runnerWorkspace);
 
-    // Run a command that will be very quick - it should complete well before timeout
-    const result = await runner.run("git status --short", 100);
+    // Run a command that will be very quick - it should complete well before timeout.
+    //
+    // The budget is generous on purpose. This test is about the runner accepting
+    // and honouring a timeout parameter, not about how fast `git status` is —
+    // and `git status` is a real subprocess over a large working tree, so a tight
+    // literal here silently asserts a machine speed instead. At 100ms it had
+    // roughly 2x headroom unloaded and failed whenever the full suite ran in
+    // parallel, which made a real property look flaky.
+    const result = await runner.run("git status --short", 15_000);
 
     // Should still complete - git status returns quickly
     expect(result.verdict).toBe("allowed_readonly");

@@ -29,6 +29,11 @@ import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissi
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
 import { OperatorError, OperatorService } from "../src/services/operatorService.js";
 import { ensureWorkspace } from "../src/workspace/pathGuard.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const NOW = "2099-07-26T09:00:00.000Z";
 const SCHEDULED_AT = "2099-07-27T12:00:00+03:00";
@@ -240,18 +245,22 @@ interface Harness {
 const harnesses = new Set<Harness>();
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const harness of [...harnesses]) harness.close();
 });
 
 function createHarness(boundary: FakeBoundary): Harness {
   const root = mkdtempSync(path.join(os.tmpdir(), "chanter-platform-command-"));
-  const database = createDatabase(path.join(root, "operator.sqlite"));
+  const databasePath = path.join(root, "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
+  const database = createDatabase(databasePath);
   const ledger = new AgentRunLedgerService(database, []);
   const executor = createAutoPosterRuntimeMissionExecutor({
     baseUrl: "https://autoposter.platform.test",
     serviceToken: RUNTIME_TOKEN,
     userId: "owner",
     timeoutValid: true,
+      approvalAuthority,
   }, { port: boundary.port });
   const autoPoster = new AutoPosterMissionService(database, executor, {
     agentRunLedgerService: ledger,
@@ -260,7 +269,7 @@ function createHarness(boundary: FakeBoundary): Harness {
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
       { port: loopPort() },
     ),
     { agentRunLedgerService: ledger, now: () => new Date(NOW) },

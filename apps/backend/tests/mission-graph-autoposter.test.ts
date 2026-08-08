@@ -28,6 +28,11 @@ import {
   type MissionFailureBoundary,
 } from "../src/runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const TEST_NOW_MS = Date.now();
 const NOW = new Date(TEST_NOW_MS).toISOString();
@@ -299,6 +304,7 @@ const temporaryRoots: string[] = [];
 const activeHarnesses = new Set<Harness>();
 
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const harness of [...activeHarnesses]) harness.close();
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
@@ -314,6 +320,7 @@ function createHarness(
     : mkdtempSync(path.join(os.tmpdir(), "chanter-phase2e-graph-"));
   if (!options.databasePath) temporaryRoots.push(root);
   const databasePath = options.databasePath ?? path.join(root, "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
   const database = createDatabase(databasePath);
   const ledger = new AgentRunLedgerService(database, []);
   const executor = createAutoPosterRuntimeMissionExecutor(
@@ -322,6 +329,7 @@ function createHarness(
       serviceToken: "phase2e-service-token",
       userId: OWNER_ID,
       timeoutValid: true,
+      approvalAuthority,
     },
     {
       port: boundary.port,
@@ -336,7 +344,7 @@ function createHarness(
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
       { port: loopPort() },
     ),
     { agentRunLedgerService: ledger, now: () => new Date(NOW) },
@@ -664,11 +672,39 @@ describe("Phase 2E-A AutoPoster graph authority", () => {
     const completedNode = first.nodes.find((node) => node.status === "completed");
     expect(completedNode?.resultSummary).toMatchObject({ approved: false });
 
+    // The YouTube dispatch left and returned nothing authoritative, so its
+    // child is durably reconciliation_required. Resuming the graph is refused
+    // while that is true — including for the healthy sibling node, because
+    // advancing a graph whose real state is partly unknown is the speculative
+    // act this contract exists to prevent.
+    const youtubeChildId = missionGraphChildMissionId(submitted.graphId, "youtube_node");
+    expect(harness.autoPoster.getMission(youtubeChildId).execution).toMatchObject({
+      state: "reconciliation_required",
+      recoveryClassification: "RECOVERY_DOWNSTREAM_UNAVAILABLE",
+    });
+    await expect(harness.graphs.resumeGraph(submitted.graphId))
+      .rejects.toMatchObject({ statusCode: 409, code: "RECOVERY_RECONCILIATION_REQUIRED" });
+    expect(boundary.jobs.size).toBe(1);
+    expect(boundary.reconciliationCalls).toHaveLength(0);
+
+    // One explicit reconciliation proves no YouTube draft exists and unlocks
+    // exactly one safe retry.
+    const reconciled = await harness.autoPoster.reconcileMission(youtubeChildId);
+    expect(reconciled.execution).toMatchObject({
+      reconciliationOutcome: "not_found",
+      recoveryClassification: "SAFE_RETRY_AVAILABLE",
+    });
+    expect(boundary.reconciliationCalls).toHaveLength(1);
+    expect(boundary.jobs.size).toBe(1);
+
     const resumed = await harness.graphs.resumeGraph(submitted.graphId);
     expect(resumed.status).toBe("completed");
     expect(boundary.jobs.size).toBe(2);
     expect(boundary.scheduleCalls.filter((call) => call.accountId === TIKTOK_ACCOUNT)).toHaveLength(1);
     expect(boundary.scheduleCalls.filter((call) => call.accountId === YOUTUBE_ACCOUNT)).toHaveLength(2);
+    // The resume executed the decision reconciliation already made; it never
+    // re-performed the investigation itself.
+    expect(boundary.reconciliationCalls).toHaveLength(1);
     harness.close();
   });
 

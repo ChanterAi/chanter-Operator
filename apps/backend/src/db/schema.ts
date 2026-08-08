@@ -873,6 +873,267 @@ CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_run_sequence
 CREATE INDEX IF NOT EXISTS idx_agent_run_ledger_ingest_events_pending
   ON agent_run_ledger_ingest_events(run_id, applied, sequence)
   WHERE ingest_outcome = 'accepted';
+
+-- ---------------------------------------------------------------------------
+-- Governed agentic execution fabric (additive; every table above is untouched).
+--
+-- One human mission compiles into one immutable intent contract, one admitted
+-- context bundle, and one deterministic plan whose id is a digest of both. The
+-- plan's nodes are the executable unit, and every consequential fact about a
+-- node -- its bounds, its lease, its one worker record, its evidence -- is a
+-- row here rather than process memory, so a restart re-reads reality instead of
+-- reconstructing it.
+--
+-- The Phase 2D mission-graph tables are deliberately not reused: their node is
+-- a child-mission dispatch bound to one (product, action), whereas an agentic
+-- node is a capability-bounded worker with a budget, a deadline, an output
+-- schema, and an evidence requirement. Overloading one table with both would
+-- have made every column optional for half its rows.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS operator_agentic_missions (
+  mission_id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  schema_version TEXT NOT NULL CHECK (schema_version = 'chanter.agentic-work.v1'),
+  workspace_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  intent_hash TEXT NOT NULL,
+  intent_json TEXT NOT NULL,
+  context_bundle_id TEXT NOT NULL,
+  context_bundle_json TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  plan_hash TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  routing_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'compiled', 'approval_required', 'approved', 'running', 'awaiting_authority',
+    'completed', 'failed_recoverable', 'reconciliation_required', 'failed_terminal', 'cancelled'
+  )),
+  approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required = 1),
+  execution_approved_by TEXT,
+  execution_approved_at TEXT,
+  execution_approved_plan_hash TEXT,
+  candidate_hash TEXT,
+  candidate_markdown TEXT,
+  candidate_approved_by TEXT,
+  candidate_approved_at TEXT,
+  approved_candidate_hash TEXT,
+  candidate_approval_expires_at TEXT,
+  candidate_authority_revision TEXT,
+  artifact_hash TEXT,
+  artifact_name TEXT,
+  -- ObservedState, DesiredState, and StateDelta for an operational-exception
+  -- mission, established once at intake. A column on the mission row rather
+  -- than a table of its own: these are properties *of this mission*, and a
+  -- separate store would be a second place the same fact could be edited.
+  -- NULL for every mission kind that resolves no operational exception.
+  exception_state_json TEXT,
+  value_observation_json TEXT,
+  typed_error_json TEXT,
+  requested_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_missions_created_at
+  ON operator_agentic_missions(created_at DESC, mission_id DESC);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_nodes (
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  node_type TEXT NOT NULL CHECK (node_type IN (
+    'context_collect', 'specialist', 'verifier', 'synthesis',
+    'authority_checkpoint', 'artifact_write', 'outcome_verify',
+    -- Operational-exception shapes. The checkpoint and the oracle are shared
+    -- with the artifact plan rather than duplicated under new names.
+    'state_observe', 'action_compile', 'connector_apply', 'shadow_authorize'
+  )),
+  capability_id TEXT,
+  worker_kind TEXT,
+  -- The reviewed provider binding this node executes against, or NULL when it
+  -- runs no model. Part of payload_hash, so it cannot change under an approval.
+  provider_binding_id TEXT,
+  depends_on_json TEXT NOT NULL,
+  input_refs_json TEXT NOT NULL,
+  authority_requirement TEXT NOT NULL CHECK (authority_requirement IN (
+    'none', 'human_approval_bound_to_candidate_hash'
+  )),
+  budget_json TEXT NOT NULL,
+  deadline_offset_ms INTEGER NOT NULL CHECK (deadline_offset_ms >= 0),
+  attempt_limit INTEGER NOT NULL CHECK (attempt_limit >= 1),
+  reconciliation_mode TEXT NOT NULL,
+  evidence_policy_json TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'blocked', 'ready', 'running', 'completed', 'failed_recoverable',
+    'reconciliation_required', 'failed_terminal', 'cancelled'
+  )),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  deadline_at TEXT,
+  idempotency_key TEXT NOT NULL,
+  output_json TEXT,
+  output_hash TEXT,
+  cost_json TEXT,
+  latency_ms INTEGER,
+  reconciliation_outcome TEXT CHECK (reconciliation_outcome IN (
+    'worker_result_found', 'no_worker_result', 'conflict'
+  )),
+  reconciled_at TEXT,
+  typed_error_json TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_plan_nodes_mission
+  ON operator_agentic_plan_nodes(mission_id, node_id);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_edges (
+  plan_id TEXT NOT NULL,
+  from_node_id TEXT NOT NULL,
+  to_node_id TEXT NOT NULL,
+  PRIMARY KEY (plan_id, from_node_id, to_node_id),
+  FOREIGN KEY (plan_id, from_node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT,
+  FOREIGN KEY (plan_id, to_node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_plan_events (
+  event_id TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  plan_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('mission', 'plan', 'node')),
+  node_id TEXT,
+  event_type TEXT NOT NULL,
+  previous_state TEXT,
+  new_state TEXT,
+  actor TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  evidence_refs_json TEXT NOT NULL,
+  typed_error_json TEXT,
+  UNIQUE (mission_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_plan_events_mission
+  ON operator_agentic_plan_events(mission_id, sequence);
+
+CREATE TABLE IF NOT EXISTS operator_agentic_node_evidence (
+  evidence_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'context_reference', 'tool_output', 'derived_claim', 'artifact'
+  )),
+  label TEXT NOT NULL,
+  source_reference TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (plan_id, node_id, evidence_id),
+  FOREIGN KEY (plan_id, node_id)
+    REFERENCES operator_agentic_plan_nodes(plan_id, node_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_node_evidence_mission
+  ON operator_agentic_node_evidence(mission_id, node_id);
+
+-- The Runtime's durable memory of worker invocations. One row per node
+-- execution identity: the claim is taken before the worker runs and the outcome
+-- is written after it returns, so the gap between them is exactly the window a
+-- node-level reconcile has to resolve.
+CREATE TABLE IF NOT EXISTS operator_agentic_worker_records (
+  idempotency_key TEXT PRIMARY KEY,
+  execution_hash TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  claim_owner TEXT,
+  claimed_at TEXT,
+  status TEXT,
+  structured_output_json TEXT,
+  output_hash TEXT,
+  evidence_json TEXT,
+  tool_calls_json TEXT,
+  cost_json TEXT,
+  latency_ms INTEGER,
+  typed_error_json TEXT,
+  recorded_at TEXT
+);
+
+-- The Runtime's durable memory of provider invocations, written the instant a
+-- provider's outcome is known and before the worker that requested it returns.
+-- That ordering is what makes a crash between the call and the node commit
+-- recoverable for free: the proof that the provider answered already exists.
+--
+-- One row per (node execution identity, binding), so re-running the same node
+-- against the same binding is recognized as the same call while a declared
+-- fallback to a different binding is correctly a different one. The primary key
+-- is the enforcement — a second charge under one identity is a constraint
+-- violation, not a silently doubled invoice.
+--
+-- No prompt, no completion, and no reasoning is stored. Only hashes, measured
+-- usage, cited references, and bounded diagnostic metadata.
+CREATE TABLE IF NOT EXISTS operator_agentic_provider_usage (
+  provider_call_key TEXT PRIMARY KEY,
+  mission_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  binding_id TEXT NOT NULL,
+  provider_name TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  provider_request_id TEXT,
+  request_hash TEXT NOT NULL,
+  raw_response_hash TEXT,
+  response_hash TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  total_tokens INTEGER,
+  monetary_cost_micros INTEGER,
+  monetary_cost_source TEXT NOT NULL,
+  monetary_cost_unavailable_reason TEXT,
+  pricing_revision TEXT,
+  latency_ms INTEGER NOT NULL,
+  finish_reason TEXT,
+  typed_error_json TEXT,
+  fallback_decision TEXT NOT NULL,
+  fallback_from_binding_id TEXT,
+  evidence_references_json TEXT NOT NULL,
+  -- Independent billing evidence for this exact charge, attached after the row
+  -- is already durable. Written by a second statement on purpose: the charge
+  -- must survive even when the evidence for it cannot be obtained.
+  reconciliation_json TEXT,
+  recorded_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_provider_usage_node
+  ON operator_agentic_provider_usage(idempotency_key, provider_call_key);
+
+CREATE INDEX IF NOT EXISTS idx_operator_agentic_provider_usage_mission
+  ON operator_agentic_provider_usage(mission_id, node_id);
+
+-- Exactly-one-write, enforced by the primary key rather than by a counter a
+-- caller could forget to increment. A second write under the same identity is a
+-- constraint violation, not a silently doubled artifact.
+CREATE TABLE IF NOT EXISTS operator_agentic_artifact_writes (
+  mission_id TEXT NOT NULL REFERENCES operator_agentic_missions(mission_id) ON DELETE RESTRICT,
+  artifact_name TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  approved_candidate_hash TEXT NOT NULL,
+  byte_length INTEGER NOT NULL CHECK (byte_length > 0),
+  artifact_path TEXT NOT NULL,
+  written_at TEXT NOT NULL,
+  PRIMARY KEY (mission_id, artifact_name)
+);
 `;
 
 const validLanes = new Set<string>([

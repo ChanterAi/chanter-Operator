@@ -1,0 +1,375 @@
+/**
+ * CHANTER OS — the fabric's entire tool surface.
+ *
+ * A closed set of named tools, all bounded to explicitly configured roots, and
+ * nothing beyond it. There is no shell, no network, no process spawn, and no
+ * general filesystem access, because a worker cannot be granted a capability
+ * that was never built: the strongest possible statement of "workers cannot
+ * reach outside their bounds" is that the reaching mechanism does not exist.
+ *
+ * The four `connector.*` tools reach an operational connector that stands in for
+ * an external system while owning only local state. They are individually named
+ * operations rather than one dispatcher, so a worker cannot compose a connector
+ * action the ActionContract did not bind.
+ *
+ * The Runtime enforces *which* of these a given node may call, from its
+ * capability's allowlist. This module enforces *what each one can touch*:
+ *
+ *   - repository reads resolve against a named, pre-registered root and refuse
+ *     any resolved path that escapes it, so `../../..` is a typed refusal rather
+ *     than a traversal;
+ *   - fixture and test-result reads are confined to one fixture directory;
+ *   - the single write tool refuses any name that is not a plain file name, and
+ *     writes only inside the one artifact directory.
+ *
+ * Git is invoked with an explicit argument vector and `shell: false`, so no part
+ * of a repository name or path is ever interpreted by a shell.
+ */
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, resolve, sep } from "node:path";
+import type { AgenticNodeToolInvoker, JsonValue } from "chanter-agent-runtime";
+import { OperatorError } from "../services/operatorService.js";
+
+export interface AgenticFabricPaths {
+  /** Logical repository name -> absolute root. Only these roots are readable. */
+  readonly repositories: Readonly<Record<string, string>>;
+  /** Absolute directory holding approved fixtures and recorded test results. */
+  readonly fixtureRoot: string;
+  /** Absolute directory the one approved artifact may be written into. */
+  readonly artifactRoot: string;
+}
+
+/** Reads one durable Operator mission state. Supplied by the fabric service. */
+export interface AgenticMissionStateReader {
+  read(missionId: string): JsonValue | null;
+}
+
+/**
+ * The connector seam.
+ *
+ * Three named operations, not a generic dispatcher. A worker cannot ask this
+ * surface to "run capability X with payload Y" of its own choosing: `apply`
+ * takes exactly the fields an ActionContract binds, and the connector itself
+ * re-checks the capability, the target, the pre-state, and the idempotency key
+ * before changing anything.
+ *
+ * Supplied by the fabric service rather than constructed here, because the
+ * connector owns durable state and this module owns none.
+ */
+export interface AgenticConnectorPort {
+  manifest(): JsonValue;
+  read(targetId: string): JsonValue | null;
+  /**
+   * Optional, and its absence is the guarantee.
+   *
+   * A read-only connector has no actions to look up and no way to perform one.
+   * Modelling these as optional means a caller cannot reach a write on a
+   * connector that has none — there is no method to call, rather than a method
+   * that declines.
+   */
+  readAction?(idempotencyKey: string, targetId?: string): JsonValue | null;
+  apply?(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedPreStateHash: string;
+    readonly writePayload: readonly { readonly field: string; readonly value: JsonValue }[];
+    readonly writePayloadHash: string;
+    readonly idempotencyKey: string;
+  }): JsonValue;
+  /**
+   * The undo, separately optional from `apply`.
+   *
+   * A connector that can write is not automatically one that can undo, and the
+   * readiness gate refuses the first without the second. Keeping them as two
+   * optional methods means "this connector can change the world but cannot put
+   * it back" is a representable — and therefore rejectable — state, rather than
+   * an assumption nobody checked.
+   */
+  compensate?(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedRevision: string;
+    readonly idempotencyKey: string;
+  }): JsonValue;
+}
+
+/** Largest source a single read may return. Bigger sources are refused, not truncated. */
+export const AGENTIC_MAX_SOURCE_BYTES = 256 * 1024;
+
+function refuse(code: string, message: string): never {
+  throw new OperatorError(message, 409, code);
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    refuse("AGENTIC_TOOL_REQUEST_INVALID", `${field} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function jsonObject(value: JsonValue): Record<string, JsonValue> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    refuse("AGENTIC_TOOL_REQUEST_INVALID", "Tool request must be an object.");
+  }
+  return value as Record<string, JsonValue>;
+}
+
+/**
+ * Resolves `relativePath` inside `root`, or refuses.
+ *
+ * The check is on the *resolved* path, not the input string: rejecting inputs
+ * that merely contain ".." would still admit a symlinked or encoded escape,
+ * whereas an escape is definitionally a resolved path that does not sit under
+ * the root.
+ */
+function resolveInside(root: string, relativePath: string, label: string): string {
+  const resolvedRoot = resolve(root);
+  const resolved = resolve(resolvedRoot, relativePath);
+  if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + sep)) {
+    refuse("AGENTIC_TOOL_PATH_OUT_OF_BOUNDS", `${label} resolves outside its permitted root.`);
+  }
+  return resolved;
+}
+
+function readBoundedFile(absolutePath: string, label: string): string {
+  if (!existsSync(absolutePath)) {
+    refuse("AGENTIC_TOOL_SOURCE_MISSING", `${label} does not exist.`);
+  }
+  const stats = statSync(absolutePath);
+  if (!stats.isFile()) {
+    refuse("AGENTIC_TOOL_SOURCE_MISSING", `${label} is not a regular file.`);
+  }
+  if (stats.size > AGENTIC_MAX_SOURCE_BYTES) {
+    refuse(
+      "AGENTIC_TOOL_SOURCE_TOO_LARGE",
+      `${label} is ${stats.size} bytes, exceeding the ${AGENTIC_MAX_SOURCE_BYTES}-byte read bound.`,
+    );
+  }
+  return readFileSync(absolutePath, "utf8");
+}
+
+function git(repositoryRoot: string, args: readonly string[]): string {
+  return execFileSync("git", ["-C", repositoryRoot, ...args], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+  }).trim();
+}
+
+export interface AgenticToolSurface extends AgenticNodeToolInvoker {
+  /** Tool calls this surface actually served, for measured cost reporting. */
+  readonly servedCalls: () => number;
+}
+
+export function createAgenticToolSurface(
+  paths: AgenticFabricPaths,
+  missionState: AgenticMissionStateReader,
+  connector?: AgenticConnectorPort,
+): AgenticToolSurface {
+  let served = 0;
+
+  function requireConnector(): AgenticConnectorPort {
+    if (!connector) {
+      // A deployment without a connector cannot reach one, and says so. The
+      // alternative — a stub that returns empty state — would let an
+      // operational-exception mission "verify" against a system that was never
+      // there.
+      refuse(
+        "AGENTIC_TOOL_CONNECTOR_UNAVAILABLE",
+        "No operational connector is registered for this fabric.",
+      );
+    }
+    return connector;
+  }
+
+  function repositoryRoot(name: string): string {
+    const root = paths.repositories[name];
+    if (!root || !isAbsolute(root)) {
+      refuse(
+        "AGENTIC_TOOL_REPOSITORY_UNREGISTERED",
+        `Repository "${name}" is not a registered readable root.`,
+      );
+    }
+    return root;
+  }
+
+  return {
+    servedCalls: () => served,
+    async invoke(tool: string, rawRequest: JsonValue): Promise<JsonValue> {
+      served += 1;
+      const request = jsonObject(rawRequest);
+      switch (tool) {
+        case "repo.metadata.read": {
+          const name = requireString(request.repository, "repository");
+          const root = repositoryRoot(name);
+          const status = git(root, ["status", "--porcelain"]);
+          return {
+            repository: name,
+            head: git(root, ["rev-parse", "HEAD"]),
+            branch: git(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+            clean: status.length === 0,
+            changedPathCount: status.length === 0 ? 0 : status.split(/\r?\n/).length,
+          };
+        }
+        case "repo.file.read": {
+          const name = requireString(request.repository, "repository");
+          const relativePath = requireString(request.path, "path");
+          const absolute = resolveInside(repositoryRoot(name), relativePath, `${name}/${relativePath}`);
+          const content = readBoundedFile(absolute, `${name}/${relativePath}`);
+          return { repository: name, path: relativePath, content, byteLength: content.length };
+        }
+        case "test.result.read": {
+          const name = requireString(request.name, "name");
+          const absolute = resolveInside(paths.fixtureRoot, name, `test result ${name}`);
+          return { name, content: readBoundedFile(absolute, `test result ${name}`) };
+        }
+        case "fixture.read": {
+          const name = requireString(request.name, "name");
+          const absolute = resolveInside(paths.fixtureRoot, name, `fixture ${name}`);
+          return { name, content: readBoundedFile(absolute, `fixture ${name}`) };
+        }
+        case "operator.mission.state.read": {
+          const missionId = requireString(request.missionId, "missionId");
+          const state = missionState.read(missionId);
+          if (state === null) {
+            refuse("AGENTIC_TOOL_SOURCE_MISSING", `No durable Operator mission state exists for ${missionId}.`);
+          }
+          return { missionId, state };
+        }
+        case "artifact.local.read": {
+          const artifactName = requireString(request.artifactName, "artifactName");
+          if (basename(artifactName) !== artifactName) {
+            refuse(
+              "AGENTIC_TOOL_PATH_OUT_OF_BOUNDS",
+              "artifactName must be a plain file name with no path segments.",
+            );
+          }
+          const target = resolveInside(paths.artifactRoot, artifactName, `artifact ${artifactName}`);
+          // Absence is an answer, not an error: outcome verification exists
+          // precisely to establish whether the artifact is there.
+          if (!existsSync(target)) return { artifactName, exists: false, content: "" };
+          return {
+            artifactName,
+            exists: true,
+            content: readBoundedFile(target, `artifact ${artifactName}`),
+          };
+        }
+        case "artifact.local.write": {
+          const artifactName = requireString(request.artifactName, "artifactName");
+          if (basename(artifactName) !== artifactName) {
+            refuse(
+              "AGENTIC_TOOL_PATH_OUT_OF_BOUNDS",
+              "artifactName must be a plain file name with no path segments.",
+            );
+          }
+          const contents = requireString(request.contents, "contents");
+          const target = resolveInside(paths.artifactRoot, artifactName, `artifact ${artifactName}`);
+          // Temp-write then rename: a reader never observes a partial artifact,
+          // and a crash mid-write leaves the target absent rather than corrupt.
+          const temporary = join(paths.artifactRoot, `.${artifactName}.${process.pid}.tmp`);
+          writeFileSync(temporary, contents, { encoding: "utf8" });
+          renameSync(temporary, target);
+          return {
+            artifactName,
+            path: target,
+            byteLength: Buffer.byteLength(contents, "utf8"),
+          };
+        }
+        case "connector.manifest.read": {
+          return requireConnector().manifest();
+        }
+        case "connector.state.read": {
+          const targetId = requireString(request.targetId, "targetId");
+          const record = requireConnector().read(targetId);
+          // Absence is an answer, not an error: an observation must be able to
+          // report that the record it was told about is not there.
+          return record === null ? { targetId, exists: false } : { targetId, exists: true, record };
+        }
+        case "connector.action.read": {
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const connectorPort = requireConnector();
+          if (typeof connectorPort.readAction !== "function") {
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_READ_ONLY",
+              "This connector performs no actions, so it has none to look up.",
+            );
+          }
+          // Optional: a connector that indexes its own actions ignores it, and
+          // one that cannot needs it to know which object is being asked about.
+          const reconcileTarget = typeof request.targetId === "string" && request.targetId.trim()
+            ? request.targetId
+            : undefined;
+          const action = connectorPort.readAction(idempotencyKey, reconcileTarget);
+          // The reconciliation read. `applied: false` is the finding that
+          // permits a retry; it is never inferred from a missing response.
+          return action === null
+            ? { idempotencyKey, applied: false }
+            : { idempotencyKey, applied: true, action };
+        }
+        case "connector.state.apply": {
+          const capability = requireString(request.capability, "capability");
+          const targetId = requireString(request.targetId, "targetId");
+          const expectedPreStateHash = requireString(request.expectedPreStateHash, "expectedPreStateHash");
+          const writePayloadHash = requireString(request.writePayloadHash, "writePayloadHash");
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const rawPayload = request.writePayload;
+          if (!Array.isArray(rawPayload) || rawPayload.length === 0) {
+            refuse("AGENTIC_TOOL_REQUEST_INVALID", "writePayload must be a non-empty array of fields.");
+          }
+          const writePayload = rawPayload.map((entry) => {
+            const field = jsonObject(entry as JsonValue);
+            return {
+              field: requireString(field.field, "writePayload[].field"),
+              value: (field.value ?? null) as JsonValue,
+            };
+          });
+          const writePort = requireConnector();
+          if (typeof writePort.apply !== "function") {
+            // The last line of a defence that should never be reached: a shadow
+            // plan compiles no node that could call this, and a read-only
+            // connector is refused at intake for a live mission. It refuses
+            // anyway, because "unreachable" is a claim worth making twice when
+            // the thing on the other side is a real external system.
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_READ_ONLY",
+              "This connector exposes no write method; the action is refused at the transport.",
+            );
+          }
+          return writePort.apply({
+            capability,
+            targetId,
+            expectedPreStateHash,
+            writePayload,
+            writePayloadHash,
+            idempotencyKey,
+          });
+        }
+        case "connector.state.compensate": {
+          const capability = requireString(request.capability, "capability");
+          const targetId = requireString(request.targetId, "targetId");
+          // Required, and required *here* as well as in the connector. A
+          // compensation that reached the transport without a revision would be
+          // a force-delete one layer from the wire.
+          const expectedRevision = requireString(request.expectedRevision, "expectedRevision");
+          const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
+          const compensatePort = requireConnector();
+          if (typeof compensatePort.compensate !== "function") {
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_NOT_COMPENSABLE",
+              "This connector exposes no compensation method; the undo is refused at the transport.",
+            );
+          }
+          return compensatePort.compensate({
+            capability,
+            targetId,
+            expectedRevision,
+            idempotencyKey,
+          });
+        }
+        default:
+          refuse("AGENTIC_TOOL_UNREGISTERED", `Tool "${tool}" is not part of this fabric's tool surface.`);
+      }
+    },
+  };
+}

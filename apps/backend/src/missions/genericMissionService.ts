@@ -27,6 +27,10 @@ import {
 } from "chanter-agent-runtime";
 import type { AgentRunLedgerService } from "../agentRunLedger/agentRunLedgerService.js";
 import { withTransaction } from "../db/database.js";
+import type {
+  OperatorApprovalAuthorityOutcome,
+  OperatorApprovalDecision,
+} from "../runtimeMissions/persistedApprovalAuthority.js";
 import { OperatorError } from "../services/operatorService.js";
 import {
   GenericMissionJournal,
@@ -970,6 +974,11 @@ export class GenericMissionService {
         }
         const retryStartedAt = this.now().toISOString();
         this.prepareMissionRowForRecovery(mission.missionId, retryStartedAt);
+        // Loop Governor durable truth proved no bound loop exists for this
+        // exact scope, so an unresolved Runtime claim left by an interrupted
+        // attempt is retired on that evidence before the single permitted
+        // retry. The approval authority guard still runs before adapter entry.
+        this.executor.retireUnresolvedClaim(mission.missionId);
         this.journal.transition(mission.missionId, "recovery_in_progress", {
           actor: ACTOR_ID,
           reason: "Operator claimed the single permitted safe retry after exact reconciliation.",
@@ -1065,6 +1074,51 @@ export class GenericMissionService {
     };
   }
 
+  /**
+   * The durable human decision this mission already carries, read back from
+   * Operator's own journal. Nothing here is synthesized from status or a flag.
+   */
+  private approvalDecisionFor(
+    mission: GenericRuntimeMission,
+  ): OperatorApprovalDecision | null {
+    const approverId = mission.approvedBy?.trim() ?? "";
+    if (!approverId) return null;
+    const approved = mission.executionJournal.find(
+      (transition) => transition.newState === "approved",
+    );
+    if (!approved) return null;
+    return {
+      approverId,
+      note: "Founder approval was durably persisted by Operator before execution.",
+      observedAt: approved.timestamp,
+    };
+  }
+
+  private approvalAuthorityFailure(
+    mission: GenericRuntimeMission,
+    outcome: { code: string; message: string },
+  ): RuntimeMissionResult {
+    const completedAt = this.now().toISOString();
+    return {
+      missionId: mission.missionId,
+      traceId: mission.traceId,
+      product: mission.product as RuntimeMissionResult["product"],
+      action: mission.action,
+      status: "failed",
+      output: null,
+      evidence: null,
+      warnings: [],
+      errors: [{ code: outcome.code, message: outcome.message }],
+      policyDecision: null,
+      // No persisted authority means the approval did not authorize execution.
+      approvalDecision: { required: true, approved: false, approvedBy: null },
+      idempotency: { key: mission.idempotencyKey, outcome: "not_applicable" },
+      startedAt: mission.updatedAt,
+      completedAt,
+      durationMs: 0,
+    };
+  }
+
   private async executePreparedMission(
     mission: GenericRuntimeMission,
     request: RuntimeMissionRequest,
@@ -1078,13 +1132,40 @@ export class GenericMissionService {
         "RECOVERY_SCOPE_MISMATCH",
       );
     }
+    // Operator requests and transports approval authority; the Agent Runtime
+    // decides whether it authorizes execution. A refusal fails closed here
+    // rather than downgrading to the legacy transient approval.
+    const decision = this.approvalDecisionFor(mission);
+    const authority: OperatorApprovalAuthorityOutcome = decision
+      ? await this.executor.prepareApproval(request, decision)
+      : {
+        ok: false,
+        code: "OPERATOR_APPROVAL_DECISION_MISSING",
+        message: "No durable human approval decision is recorded for this mission.",
+      };
+    if (!authority.ok) {
+      return this.persistRuntimeOutcome(
+        mission,
+        this.approvalAuthorityFailure(mission, authority),
+        recoveryClassification,
+      );
+    }
     let runtimeResult: RuntimeMissionResult;
     try {
-      runtimeResult = await this.executor.execute(request);
+      runtimeResult = await this.executor.execute(request, authority.authority);
     } catch {
       runtimeResult = this.executorFailure(mission, request.approval?.approvedBy ?? "unknown");
     }
     return this.persistRuntimeOutcome(mission, runtimeResult, recoveryClassification);
+  }
+
+  /**
+   * The exact Runtime request this mission is durably bound to. Read-only: it
+   * grants no authority and is the same tuple `approveAndExecute` would send.
+   */
+  runtimeRequestFor(missionId: string): RuntimeMissionRequest {
+    const mission = this.getMission(missionId);
+    return this.buildRuntimeRequest(mission, mission.approvedBy ?? "pending-approval");
   }
 
   private executorFailure(

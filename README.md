@@ -115,6 +115,291 @@ npm run release:report   # Release Operator: write evidence report
 npm run mission:compile -- --intent "..."   # Mission Compiler
 ```
 
+## Runbook — CHANTER OS end-to-end operational assembly
+
+One command proves the canonical CHANTER OS mission path end to end, locally,
+against disposable state:
+
+```powershell
+npm run os:assembly
+```
+
+It submits `tools/os-assembly/mission-envelope.example.json` to a real Operator
+server process (the production `createRuntime()` wiring), then proves:
+
+1. submission is durable and returns `approval_required` with no side effect;
+2. approval is refused without the independent control capability;
+3. a persisted, signed approval — bound to an exact repository revision —
+   executes through Agent Runtime into **exactly one** Loop Governor manual
+   (agent-frozen) task and relay loop;
+4. the Operator process is killed abruptly and restarted against the same
+   durable state;
+5. replaying the same mission returns the same task/loop and creates no
+   duplicate;
+6. the same mission ID carrying a different payload is refused with
+   `409 OPERATOR_MISSION_PAYLOAD_MISMATCH`.
+
+Prerequisites: an absolute `python` on `PATH` (override with
+`LOOP_GOVERNOR_PYTHON`) and `chanter-loop.governor` checked out beside this
+repository. Nothing publishes, deploys, or touches a live product checkout, and
+real coding-agent execution stays frozen throughout.
+
+Outputs (git-ignored under `var/os-assembly/`, override with `--out <dir>`):
+
+- `terminal-result.json` — machine-readable terminal result (verdict, observed
+  mission/task/loop IDs, payload hash, per-step observations);
+- `assembly-evidence.md` — the run's evidence artifact.
+
+Add `--keep` to retain the temporary working state for inspection. The command
+exits non-zero on any failed step.
+
+## Unified CHANTER OS mission control plane
+
+`/api/os/missions` is the one canonical surface over every registered execution
+lane. It introduces no new mission database and no second approval authority:
+submission routes to the lane that owns the supplied intake schema, and every
+control action delegates to the lane authority that already owns that decision,
+carrying the caller's exact body through unchanged.
+
+| Route | Capability | Delegates to |
+| --- | --- | --- |
+| `POST /api/os/missions` | submit | the lane owning the body's `schemaVersion` |
+| `GET /api/os/missions` | read | every lane's canonical store |
+| `GET /api/os/missions/:osMissionId` | read | the lane named in the identity |
+| `POST /api/os/missions/:osMissionId/approve` | control | lane approval authority |
+| `POST /api/os/missions/:osMissionId/reconcile` | control | lane reconciliation |
+| `POST /api/os/missions/:osMissionId/resume` | control | lane resume |
+| `POST /api/os/missions/:osMissionId/stop` | control | lane stop / graph cancel |
+| `GET /api/os/lanes` | read | the canonical lane/capability registry |
+
+Identity is derived, never minted: `os:<lane>:<lane-native id>`. The lane is
+part of the identity, so an id from one lane can never resolve inside another,
+and reads, lists, replays, and restarts all produce the same value without any
+correlation table.
+
+Three lanes are registered. Two are submittable:
+
+- `generic_governed_task` — `chanter.mission.v1` envelopes into the durable
+  `operator_missions` spine, executing into one Loop Governor manual loop;
+- `platform_autoposter_command` — `chanter.platform.autoposter.create-work.v1`
+  commands into the durable command + Phase 2D graph, executing into exactly
+  one **unapproved** AutoPoster draft, with approval bound to the exact graph
+  hash and publication left human-gated.
+
+The third, `autoposter_direct_mission`, is observed-only: it projects AutoPoster
+missions that entered through legacy lane-specific routes so the unified read
+model is complete, and it excludes any mission already owned by a Platform
+command so one downstream draft never appears under two OS identities.
+
+Every existing lane-specific route keeps working unchanged; no caller migration
+is required, and missions submitted through those routes still appear here
+because this layer projects from their canonical stores.
+
+### Runbook — unified mission control proof
+
+```powershell
+npm run os:unified
+```
+
+One real Operator child process, driven end to end through `/api/os/missions`
+alone, carrying both lanes: a real `python -m governor.mission_intake` child
+process on one side and a real AutoPoster runtime route plus application
+service on the other. It proves, per lane, that submission is durable with no
+side effect, that execution is refused without the independent control
+capability (and, for the Platform lane, without the exact graph hash), that
+approval creates exactly one downstream artifact, that an abrupt Operator kill
+and restart replays to the same downstream identity with no duplicate, and that
+the same identity carrying a changed payload is refused with a typed conflict.
+It then proves the unified observation: one canonical list containing exactly
+both missions, one identical contract shape, lane-typed downstream identity,
+authoritative evidence, deterministic filtering, and no cross-lane identity
+collision or temporary-path leakage.
+
+Prerequisites: an absolute `python` on `PATH` (override with
+`LOOP_GOVERNOR_PYTHON`), with `chanter-loop.governor` and `chanter-auto-poster`
+checked out beside this repository. No provider adapter is installed or
+invoked, nothing publishes or deploys, and real coding-agent execution stays
+frozen throughout.
+
+Outputs (git-ignored under `var/os-unified/`, override with `--out <dir>`):
+
+- `terminal-result.json` — verdict, observed identities, per-step observations;
+- `unified-evidence.md` — the run's evidence artifact.
+
+### Runbook — unified recovery and reconciliation proof
+
+```powershell
+npm run test:os-recovery
+```
+
+`os:unified` proves both lanes' happy paths, replay, and typed conflict. This
+proof covers what that one cannot: it interrupts real executions at real
+durable boundaries through the mission spine's injectable failure seam, then
+drives the whole recovery through `/api/os/missions/:osMissionId/{reconcile,
+resume,stop}` over real HTTP, asserting the projected OS state *and* the
+downstream side-effect count at every step. It proves that
+
+- a result observed but not yet journaled projects as
+  `downstream_result_observed`, never `completed`;
+- an ambiguous downstream outcome offers `reconcile` and `stop` but **not**
+  `resume`, so retry stays locked until downstream truth is known;
+- reconciliation reads downstream truth exactly once and creates nothing;
+- exactly one bounded safe retry is then permitted, and the whole recovery
+  leaves exactly one downstream artifact;
+- a human stop projects the canonical `stopped` state — not `failed_terminal` —
+  while the lane's own state is preserved verbatim.
+
+It runs fully in process against disposable state: no server process, no Loop
+Governor subprocess, no network, a few seconds end to end. It does not re-prove
+lane-level recovery, which the AutoPoster recovery suite and the generic
+mission spine suite already own.
+
+### Runbook — unified Platform-lane recovery proof
+
+```powershell
+npm run test:os-platform-recovery
+```
+
+The same shape as the proof above, for the Platform AutoPoster lane — whose
+recovery spans three durable authorities at once (the Platform command, the
+Phase 2D mission graph, and the child AutoPoster mission) and whose downstream
+side effect is a real product draft. Five scenarios interrupt a real execution
+at a real durable boundary, tear the Operator services down, **reconstruct them
+against the same SQLite file**, and then drive recovery through
+`/api/os/missions/:osMissionId/{reconcile,resume,stop}`.
+
+The core case interrupts *after* the child AutoPoster mission created the draft
+and its queue id was journaled, but before the child result, node completion,
+and graph completion were persisted. It proves that recovery converges on the
+**same `jobId`, child mission, graph, and command**, with
+`scheduleContractCalls = 1`, `durableCreateCalls = 1`, `drafts = 1`, and
+`providerPublishCalls = 0` held constant across reconcile, resume, repeated
+read, and replay — and that the draft stays unapproved throughout.
+
+Interruptions here are injected exceptions plus service reconstruction, not
+process kills; genuine process-kill durability is proven by `os:unified`.
+
+### Runbook — ambiguous-downstream reconciliation proof
+
+```powershell
+npm run test:os-ambiguous-reconciliation
+```
+
+Every recovery proof above shares one property: downstream truth was already
+knowable from durable state Operator itself held. This closes the remaining
+case — **the request left Operator, no authoritative response came back, and
+Operator cannot know whether the side effect happened.** That is the exact
+boundary at which unsafe systems duplicate real-world work.
+
+The ambiguity is injected at the AutoPoster HTTP transport, which the test
+process owns end to end. `drop_after_create` runs the real handler to
+completion — the draft is durably created — and then destroys the socket
+instead of flushing the response. `drop_before_create` destroys the socket on
+arrival, after the request provably reached the boundary and before any handler
+runs. Operator sees an unreachable peer in both cases and cannot tell them
+apart; only AutoPoster's durable store can. Reconciliation resolves them by
+selecting on `runtimeMissionId` and then requiring exact equality on the
+idempotency key, payload hash, action, workspace, provider, account, and
+scheduled time — no fuzzy matching and no inference.
+
+Such a dispatch is durably `reconciliation_required` in the child mission spine
+— a state of its own, not an ordinary recoverable failure — and investigation
+and execution are separate authorities from that point on:
+
+| Action | Authority |
+|---|---|
+| `reconcile` | investigates; never dispatches, creates a draft, or spends a retry |
+| `resume` | executes only what a durable reconciliation already permitted |
+| `stop` | escalates to a human, and stays available throughout |
+
+A `resume` issued before reconciliation returns `409
+RECOVERY_RECONCILIATION_REQUIRED` **having performed zero downstream lookups**.
+It does not quietly investigate on the operator's behalf, and the refusal names
+the mission, its lane, its current state, and the action that would unblock it.
+
+Both realities then converge on exactly one draft:
+
+- **Reality A** (draft exists) — one attempt, one durable create, the existing
+  `jobId` is bound, no redispatch;
+- **Reality B** (draft absent) — absence is proven, one safe retry is unlocked
+  and spent exactly once, two attempts, one durable create.
+
+A reconciliation lookup that itself fails is recorded as `unavailable`, never as
+absence: the state stays `reconciliation_required` and no retry is unlocked. A
+`conflict` — two durable records for one exact scope — is the one
+`reconciliation_required` no lookup can resolve, so it offers escalation only.
+
+### Canonical validation gate
+
+`npm run os:assembly` proves the generic mission path and `npm run os:unified`
+proves both lanes through the unified plane. `npm run validate:os` is the
+canonical gate that keeps them — and the static correctness of the tools that
+prove them — from drifting:
+
+```powershell
+npm run validate:os
+```
+
+It runs eleven stages in order, stopping at the first failure and exiting with
+that stage's real exit code:
+
+1. `typecheck` — repository typecheck (backend + frontend);
+2. `typecheck:tools` — static typecheck of the CHANTER OS tool surfaces via
+   `tsconfig.tools.json`: `tools/phase2c`, `tools/os-ambiguous-reconciliation`,
+   `tools/os-assembly`, `tools/os-platform-recovery`, `tools/os-recovery`,
+   `tools/os-unified`, `tools/validation`, `tools/persisted-approval-authority`,
+   `tools/platform-canonical`, and `tools/resilience-evidence`;
+3. `build` — production build;
+4. `test:os-recovery` — the unified recovery and reconciliation proof above.
+   It is the cheapest proof in the gate (fully in process, no server, no
+   subprocess, no network), so a broken recovery contract is reported in
+   seconds rather than after the multi-minute cross-repository proofs;
+5. `test:os-platform-recovery` — the Platform-lane recovery proof above; same
+   in-process shape, but spanning three durable authorities, so it runs second
+   of the three;
+6. `test:os-ambiguous-reconciliation` — the ambiguous-downstream reconciliation
+   proof above. Last of the in-process recovery proofs and still cheaper than
+   any cross-repository stage: it covers the hardest case, so a plainly broken
+   recovery contract is reported by the two deterministic stages first;
+7. `test:platform-canonical:e2e` — canonical Platform command authority proof:
+   one platform command becomes exactly one **unapproved** AutoPoster draft
+   under persisted human authority, replays across an Operator restart without
+   creating a second draft, refuses a conflicting payload with a typed error,
+   and never publishes;
+8. `test:phase2c:mission` — Phase 2C generic mission proof;
+9. `test:approval-migration:e2e` — signed approval migration proof;
+10. `os:assembly` — the end-to-end operational assembly proof above;
+11. `os:unified` — the unified mission control plane proof above.
+
+Stage 10 is last by cost and by diagnostic value: it drives both lanes, a real
+Loop Governor child process, and a real AutoPoster boundary, so the narrower
+single-lane stage 9 is the more useful first signal when something breaks.
+
+Stage 2 exists because these tool surfaces sit outside the backend program,
+which compiles only `src/`. Without it a proof harness can rot silently, which
+is exactly how the Phase 2C harness drifted previously. Run it alone for a fast
+static check:
+
+```powershell
+npm run typecheck:tools
+```
+
+Two surfaces are deliberately **not** covered, both for reasons that cannot be
+fixed inside this repository: `tools/safecommit-closeout` imports untyped
+`.mjs` modules from the SafeCommit product outside this repository, and
+`apps/backend/tests` needs a `@types/supertest` resolution that would require a
+dependency change. Both are recorded with evidence in
+`CHANTER_OPERATOR_CRITICAL_TEST_AND_AUTHORITY_TOOL_STATIC_COVERAGE_P0_RESULT_V1.md`.
+Production runtime behavior is unchanged by any of this coverage.
+
+Local process execution only: it does not push, merge, deploy, publish, or
+execute a real coding agent, and it leaves no tracked repository modifications.
+Expect roughly five to six minutes end to end, dominated by the
+cross-repository proofs. `npm run test:os-validation` covers the gate's own
+ordering and failure-propagation contract, including that a failing unified
+proof preserves its exact child exit code and that an earlier failure skips it
+entirely.
+
 ## Related in-repo docs
 
 - `tools/release-operator/README.md`

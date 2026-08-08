@@ -12,6 +12,7 @@ import type { AutoPosterResultProjectionService } from "../missions/autoPosterRe
 import type { AutoPosterObservationService } from "../missions/autoPosterObservationService.js";
 import type { SafeCommitCloseoutService } from "../safeCommit/safeCommitCloseoutService.js";
 import type { PlatformAutoPosterCommandService } from "../platform/platformAutoPosterCommandService.js";
+import type { OsMissionControlService } from "../os/osMissionControlService.js";
 import { resolveRegisteredMissionAction } from "../missions/missionActionRegistry.js";
 import {
   capabilityTokenIsDistinct,
@@ -42,6 +43,7 @@ export function createApiRouter(
   autoPosterGraphIntakeService?: AutoPosterGraphIntakeService,
   autoPosterMissionEvidenceService?: AutoPosterMissionEvidenceService,
   platformAutoPosterCommandService?: PlatformAutoPosterCommandService,
+  osMissionControlService?: OsMissionControlService,
 ): Router {
   const router = Router();
 
@@ -144,6 +146,17 @@ export function createApiRouter(
     return platformAutoPosterCommandService;
   };
 
+  const requireOsMissionControlService = (): OsMissionControlService => {
+    if (!osMissionControlService) {
+      throw new OperatorError(
+        "The CHANTER OS unified mission control plane is unavailable.",
+        503,
+        "OS_MISSION_CONTROL_UNAVAILABLE",
+      );
+    }
+    return osMissionControlService;
+  };
+
   const requireAutoPosterResultService = (): AutoPosterResultProjectionService => {
     if (!autoPosterResultService) {
       throw new OperatorError("AutoPoster result projections are unavailable.", 503);
@@ -225,6 +238,7 @@ export function createApiRouter(
         isolated: missionSubmitReady,
         ready: missionSubmitReady,
         endpoints: [
+          "/api/os/missions",
           "/api/runtime-missions",
           "/api/runtime-missions/autoposter/schedule",
           "/api/mission-graphs/autoposter-schedule",
@@ -237,6 +251,14 @@ export function createApiRouter(
         isolated: missionControlReady,
         ready: missionControlReady,
         endpoints: [
+          "/api/os/missions/:osMissionId/approve",
+          "/api/os/missions/:osMissionId/reconcile",
+          "/api/os/missions/:osMissionId/resume",
+          "/api/os/missions/:osMissionId/stop",
+          "/api/os/missions/:osMissionId/billing/reconcile",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/reconcile",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/resume",
+          "/api/os/missions/:osMissionId/nodes/:nodeId/stop",
           "/api/runtime-missions/:missionId/approve",
           "/api/runtime-missions/:missionId/reconcile",
           "/api/runtime-missions/:missionId/resume",
@@ -707,6 +729,237 @@ export function createApiRouter(
       next(error);
     }
   });
+
+  // ---------------------------------------------------------------------
+  // CHANTER OS unified mission control plane.
+  //
+  // One canonical surface over every registered execution lane. It introduces
+  // no new authority: submission routes to the lane that owns the supplied
+  // intake schema, and every control action delegates to the lane authority
+  // that already owns that decision, carrying the caller's exact body through
+  // unchanged. The capability tiers are therefore identical to the
+  // lane-specific routes these delegate to — the submit capability can never
+  // approve, and control actions require the independent control capability.
+  //
+  // Every lane-specific route above keeps working exactly as before; nothing
+  // is migrated, and missions submitted through those routes still appear in
+  // the unified read model because it projects from their canonical stores.
+  // ---------------------------------------------------------------------
+  router.post("/os/missions", missionSubmitTokenMiddleware, (request, response, next) => {
+    requireOsMissionControlService()
+      .submit(request.body)
+      .then((mission) => response.status(mission.replayed ? 200 : 201).json(mission))
+      .catch(next);
+  });
+
+  router.get("/os/missions", (request, response, next) => {
+    try {
+      response.json({
+        missions: requireOsMissionControlService().list({
+          lane: request.query.lane,
+          product: request.query.product,
+          action: request.query.action,
+          status: request.query.status,
+          workspaceId: request.query.workspaceId,
+          approvalState: request.query.approvalState,
+          from: request.query.from,
+          to: request.query.to,
+          limit: request.query.limit,
+        }),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Read-only projection of the canonical lane/capability registry.
+  router.get("/os/lanes", (_request, response, next) => {
+    try {
+      response.json({ lanes: requireOsMissionControlService().describeLanes() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().get(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post(
+    "/os/missions/:osMissionId/approve",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .approve(String(request.params.osMissionId), request.body ?? {})
+        .then((mission) => response.json(mission))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/reconcile",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .reconcile(String(request.params.osMissionId))
+        .then((mission) => response.json(mission))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/resume",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .resume(String(request.params.osMissionId), request.body ?? {})
+        .then((mission) => response.json(mission))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/stop",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireOsMissionControlService().stop(
+            String(request.params.osMissionId),
+            request.body ?? {},
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // Plan-governed surfaces.
+  //
+  // These extend the one canonical `/api/os/missions` identity rather than
+  // opening a second mission namespace: a mission whose execution is a
+  // compiled plan is still one CHANTER OS mission, addressed by the same
+  // `os:<lane>:<id>`. A lane that dispatches one downstream product action
+  // answers these with a typed 409 rather than a fabricated single-node plan.
+  // ---------------------------------------------------------------------
+  router.get("/os/missions/:osMissionId/plan", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().planOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/nodes", (request, response, next) => {
+    try {
+      response.json({
+        nodes: requireOsMissionControlService().nodesOf(String(request.params.osMissionId)),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/nodes/:nodeId", (request, response, next) => {
+    try {
+      response.json(
+        requireOsMissionControlService().nodeOf(
+          String(request.params.osMissionId),
+          String(request.params.nodeId),
+        ),
+      );
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Read-only projection of one operational-exception mission: what was
+  // observed, what was wanted, the exact delta, the connector's declared
+  // capabilities, the terminal outcome, and the measured value observation.
+  router.get("/os/missions/:osMissionId/exception", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().exceptionOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/os/missions/:osMissionId/evidence", (request, response, next) => {
+    try {
+      response.json(requireOsMissionControlService().evidenceOf(String(request.params.osMissionId)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Node-level control shares the mission-control capability: reconciling,
+  // resuming, or stopping one node is the same authority as doing it to the
+  // whole mission, only narrower in scope.
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/reconcile",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      try {
+        response.json(
+          requireOsMissionControlService().reconcileNode(
+            String(request.params.osMissionId),
+            String(request.params.nodeId),
+          ),
+        );
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+
+  // Billing reconciliation is mission-scoped, not node-scoped: a charge belongs
+  // to the account, and the question it answers — "did the counterparty's own
+  // record confirm what we recorded?" — is asked of every charge the mission
+  // incurred. It carries the mission-control capability because it is a
+  // financial read against a real billing account, and it is safe to repeat:
+  // the only provider surface it can reach is the billing-record endpoint.
+  router.post(
+    "/os/missions/:osMissionId/billing/reconcile",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .reconcileBilling(String(request.params.osMissionId))
+        .then((summary) => response.json(summary))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/resume",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .resumeNode(String(request.params.osMissionId), String(request.params.nodeId))
+        .then((node) => response.json(node))
+        .catch(next);
+    },
+  );
+
+  router.post(
+    "/os/missions/:osMissionId/nodes/:nodeId/stop",
+    missionControlTokenMiddleware,
+    (request, response, next) => {
+      requireOsMissionControlService()
+        .stopNode(
+          String(request.params.osMissionId),
+          String(request.params.nodeId),
+          request.body ?? {},
+        )
+        .then((node) => response.json(node))
+        .catch(next);
+    },
+  );
 
   // Phase 2D durable mission graph authority. Submission and control stay on
   // the same independent capability tokens as the mission spine: the submit

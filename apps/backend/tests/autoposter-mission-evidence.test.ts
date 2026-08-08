@@ -26,6 +26,11 @@ import { AutoPosterMissionEvidenceService } from "../src/missions/autoPosterMiss
 import { isExactPrivateProviderProof } from "../src/missions/autoPosterProviderPredicates.js";
 import { AutoPosterMissionService } from "../src/runtimeMissions/autoPosterMissionService.js";
 import { createAutoPosterRuntimeMissionExecutor } from "../src/runtimeMissions/autoPosterRuntime.js";
+import {
+  approvalAuthorityFixture,
+  approvalAuthorityFixtureFor,
+  cleanupApprovalAuthorityFixtures,
+} from "./helpers/approvalAuthorityFixture.js";
 
 const TEST_NOW_MS = Date.now();
 const NOW = new Date(TEST_NOW_MS).toISOString();
@@ -184,6 +189,7 @@ function makeAutoPosterBoundary() {
 const temporaryRoots: string[] = [];
 const activeDatabases = new Set<DatabaseSync>();
 afterEach(() => {
+  cleanupApprovalAuthorityFixtures();
   for (const database of [...activeDatabases]) database.close();
   activeDatabases.clear();
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -192,21 +198,24 @@ afterEach(() => {
 function realHarness() {
   const root = mkdtempSync(path.join(os.tmpdir(), "chanter-evidence-"));
   temporaryRoots.push(root);
-  const database = createDatabase(path.join(root, "operator.sqlite"));
+  const databasePath = path.join(root, "operator.sqlite");
+  const approvalAuthority = approvalAuthorityFixtureFor(databasePath);
+  const database = createDatabase(databasePath);
   activeDatabases.add(database);
   const { port, jobs } = makeAutoPosterBoundary();
   let clockMs = TEST_NOW_MS;
   const now = () => new Date(clockMs);
   const ledger = new AgentRunLedgerService(database, []);
   const executor = createAutoPosterRuntimeMissionExecutor(
-    { baseUrl: "https://autoposter.evidence.test", serviceToken: RUNTIME_TOKEN, userId: OWNER_ID, timeoutValid: true },
+    { baseUrl: "https://autoposter.evidence.test", serviceToken: RUNTIME_TOKEN, userId: OWNER_ID, timeoutValid: true,
+      approvalAuthority, },
     { port },
   );
   const autoPoster = new AutoPosterMissionService(database, executor, { agentRunLedgerService: ledger, now, protectedValues: [SECRET_TOKEN] });
   const generic = new GenericMissionService(
     database,
     createLoopGovernorMissionExecutor(
-      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true },
+      { pythonExecutable: "", governorRoot: "", dataDir: "", timeoutValid: true, approvalAuthority },
       { port: { async createManualLoop() { return { ok: true, created: true, taskId: "t", loopId: "l", realAgentExecution: false }; }, async lookupManualLoop() { return { ok: true, outcome: "not_found", binding: null }; } } },
     ),
     { agentRunLedgerService: ledger, now },

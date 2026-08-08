@@ -401,6 +401,12 @@ export class MissionGraphService {
       );
     }
 
+    // Investigation and execution are separate authorities: a resume must never
+    // silently perform the reconciliation it depends on. This runs before any
+    // durable mutation and before any child call, so the refusal costs zero
+    // downstream lookups and zero execution side effects.
+    this.assertNoChildAwaitingReconciliation(graph);
+
     if (graph.status === "failed_recoverable") {
       this.journal.transitionGraph(graph.graphId, "running", {
         actor: ACTOR_ID,
@@ -656,6 +662,31 @@ export class MissionGraphService {
   }
 
   /**
+   * Refuses the whole resume while any child mission holds an unresolved
+   * ambiguous downstream outcome.
+   *
+   * The child spine is the authority that decides this; the graph only asks it
+   * and reports the answer. The refusal is deliberately whole-graph rather than
+   * per-node: resuming the siblings of a node whose downstream reality is
+   * unknown would advance a mission whose true state nobody knows yet.
+   */
+  private assertNoChildAwaitingReconciliation(graph: MissionGraphRecord): void {
+    for (const node of this.journal.listNodes(graph.graphId)) {
+      const reference = this.childReference(node);
+      if (!this.children.hasMission(reference)) continue;
+      if (this.children.getMission(reference).executionState !== "reconciliation_required") {
+        continue;
+      }
+      throw new OperatorError(
+        `Node ${node.nodeId} dispatched a request whose downstream outcome was never observed. `
+        + "Reconcile it explicitly before any resume.",
+        409,
+        "RECOVERY_RECONCILIATION_REQUIRED",
+      );
+    }
+  }
+
+  /**
    * Bounded single-pass recovery of one running node from canonical child
    * mission truth, reusing the proven Phase 2C reconcile / resume machinery.
    * Anything still unresolved after one pass parks the node as
@@ -699,8 +730,14 @@ export class MissionGraphService {
         || state === "downstream_request_prepared"
         || state === "failed_recoverable"
       ) {
-        mission = await this.children.reconcileMission(reference);
-        state = mission.executionState;
+        // A child that already permits Resume safely carries a durable
+        // reconciliation decision behind it. Re-investigating here would make
+        // resume perform the reconcile authority a second time, which is
+        // exactly the conflation this separation exists to prevent.
+        if (!mission.nextPermittedActions.includes("Resume safely")) {
+          mission = await this.children.reconcileMission(reference);
+          state = mission.executionState;
+        }
         const canResume = mission.nextPermittedActions.includes("Resume safely");
         if (
           (state === "downstream_result_observed" || state === "failed_recoverable")

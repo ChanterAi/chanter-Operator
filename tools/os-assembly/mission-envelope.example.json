@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "chanter.mission.v1",
+  "missionId": "chanter-os-assembly-demo",
+  "traceId": "chanter-os-assembly-demo-trace",
+  "idempotencyKey": "chanter-os-assembly-demo-key",
+  "source": {
+    "system": "mission_compiler",
+    "requestedBy": "founder-cli"
+  },
+  "objective": "Create one governed manual review loop through the canonical CHANTER OS mission path.",
+  "target": {
+    "product": "loop_governor",
+    "action": "loop_governor.manual_loop.create"
+  },
+  "tenant": {
+    "userId": "founder"
+  },
+  "input": {
+    "appName": "chanter-operator",
+    "taskType": "review",
+    "goal": "Review the CHANTER OS end-to-end operational assembly path.",
+    "scope": "operational assembly proof only"
+  },
+  "constraints": [
+    "No real agent execution",
+    "Human approval required before any downstream side effect"
+  ],
+  "acceptanceCriteria": [
+    "Exactly one Loop Governor manual relay loop exists",
+    "Replay after restart creates no second task or loop"
+  ]
+}

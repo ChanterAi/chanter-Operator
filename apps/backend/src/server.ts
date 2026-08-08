@@ -15,6 +15,7 @@ const {
   autoPosterObservationWorker,
   autoPosterMissionEvidenceService,
   platformAutoPosterCommandService,
+  osMissionControlService,
   safeCommitCloseoutService,
 } = createRuntime();
 const app = createApp(
@@ -29,6 +30,7 @@ const app = createApp(
   autoPosterGraphIntakeService,
   autoPosterMissionEvidenceService,
   platformAutoPosterCommandService,
+  osMissionControlService,
 );
 const server = app.listen(config.port, config.host, () => {
   console.log("CHANTER Operator backend: http://" + config.host + ":" + config.port);

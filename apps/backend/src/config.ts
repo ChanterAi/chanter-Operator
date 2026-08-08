@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeSimulatorScenario } from "./agentic/agenticProviderAdapters.js";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 export const projectRoot = path.resolve(sourceDirectory, "../../..");
@@ -66,12 +67,115 @@ const observationWorkerPollIntervalMs =
 const observationWorkerBatchSize = parseBoundedInteger(process.env.OPERATOR_OBSERVATION_WORKER_BATCH_SIZE, 1, 16);
 
 const loopGovernorTimeoutRaw = process.env.LOOP_GOVERNOR_TIMEOUT_MS?.trim() ?? "";
+
+/**
+ * Parses `name=absolutePath` pairs into the agentic fabric's readable roots.
+ *
+ * A malformed or relative entry is dropped rather than guessed at: a readable
+ * root the operator did not clearly state is exactly the kind of ambient
+ * authority this fabric exists to remove.
+ */
+function parseAgenticRepositories(raw: string): Record<string, string> {
+  const repositories: Record<string, string> = {};
+  for (const entry of raw.split(",")) {
+    const separator = entry.indexOf("=");
+    if (separator <= 0) continue;
+    const name = entry.slice(0, separator).trim();
+    const root = entry.slice(separator + 1).trim();
+    if (!name || !root) continue;
+    repositories[name] = root;
+  }
+  return repositories;
+}
+
+const agenticRepositories = parseAgenticRepositories(
+  process.env.AGENTIC_FABRIC_REPOSITORIES?.trim() ?? "",
+);
+
+const agenticSimulatorEnabledRaw = (process.env.AGENTIC_FABRIC_SIMULATOR_ENABLED ?? "").trim().toLowerCase();
+const agenticSimulatorEnabled = agenticSimulatorEnabledRaw === "true" || agenticSimulatorEnabledRaw === "1";
+
+const agenticApprovalTtlRaw = Number(process.env.AGENTIC_FABRIC_APPROVAL_TTL_MS?.trim() ?? "");
+const agenticApprovalTtlMs = Number.isFinite(agenticApprovalTtlRaw) && agenticApprovalTtlRaw > 0
+  ? Math.trunc(agenticApprovalTtlRaw)
+  : 15 * 60 * 1000;
 const loopGovernorTimeoutParsed = Number(loopGovernorTimeoutRaw);
 const loopGovernorTimeoutValid =
   !loopGovernorTimeoutRaw ||
   (Number.isInteger(loopGovernorTimeoutParsed) &&
     loopGovernorTimeoutParsed >= 1_000 &&
     loopGovernorTimeoutParsed <= 120_000);
+
+/**
+ * Persisted approval checkpoint authority binding.
+ *
+ * Two mutually exclusive repository binding modes:
+ *
+ *  - **Managed (deployable).** `_SOURCE_REPOSITORY` names the live product
+ *    repository and `_CHECKOUT_ROOT` a durable cache. Operator derives an
+ *    isolated per-revision checkout containing only tracked content, so the
+ *    ordinary `node_modules/`, `dist/`, `.env`, and log files in a working
+ *    checkout never reach the Runtime's canonical clean-state decision.
+ *
+ *  - **Direct (explicit).** `_REPOSITORY_ROOT` binds one path that is already
+ *    clean under that policy. It is retained for controlled fixtures; pointing
+ *    it at a live product checkout keeps approvals permanently fail-closed,
+ *    which is exactly the deployment blocker managed mode removes.
+ *
+ * Configuring both is a configuration error, not a precedence rule: two
+ * answers to "which repository does this approval bind to" is the ambiguity
+ * this contract must not have. Configuring neither, or an incomplete managed
+ * pair, leaves approval-required execution fail-closed — Operator never falls
+ * back to a transient approval.
+ */
+const approvalAuthorityStateDir = process.env.OPERATOR_APPROVAL_AUTHORITY_STATE_DIR?.trim() ?? "";
+const approvalAuthorityRepositoryRoot =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "";
+const approvalAuthoritySourceRepository =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SOURCE_REPOSITORY?.trim() ?? "";
+const approvalAuthorityCheckoutRoot =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_CHECKOUT_ROOT?.trim() ?? "";
+
+/**
+ * Approval issuer authenticity. Operator signs; the Runtime verifies against an
+ * explicitly configured trust file. All four values are required together —
+ * a signing identity with nobody trusting it, or a trust file with nothing to
+ * sign, leaves approval-required execution fail-closed.
+ */
+const approvalIssuerAuthorityId =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_ISSUER_ID?.trim() ?? "";
+const approvalIssuerKeyId =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SIGNING_KEY_ID?.trim() ?? "";
+const approvalIssuerKeyFile =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_SIGNING_KEY_FILE?.trim() ?? "";
+const approvalTrustedIssuersFile =
+  process.env.OPERATOR_APPROVAL_AUTHORITY_TRUSTED_ISSUERS_FILE?.trim() ?? "";
+const approvalIssuerConfigured = Boolean(
+  approvalIssuerAuthorityId
+  && approvalIssuerKeyId
+  && approvalIssuerKeyFile
+  && approvalTrustedIssuersFile
+  && path.isAbsolute(approvalIssuerKeyFile)
+  && path.isAbsolute(approvalTrustedIssuersFile),
+);
+
+const managedBindingRequested = Boolean(
+  approvalAuthoritySourceRepository || approvalAuthorityCheckoutRoot,
+);
+const managedBindingValid = Boolean(
+  approvalAuthoritySourceRepository
+  && approvalAuthorityCheckoutRoot
+  && path.isAbsolute(approvalAuthoritySourceRepository)
+  && path.isAbsolute(approvalAuthorityCheckoutRoot),
+);
+const directBindingValid = Boolean(
+  approvalAuthorityRepositoryRoot && path.isAbsolute(approvalAuthorityRepositoryRoot),
+);
+const approvalAuthorityConfigured =
+  Boolean(approvalAuthorityStateDir)
+  && path.isAbsolute(approvalAuthorityStateDir)
+  // Exactly one binding mode, fully specified.
+  && (managedBindingValid ? !directBindingValid : directBindingValid && !managedBindingRequested);
 
 export const config = {
   host: "127.0.0.1",
@@ -89,6 +193,34 @@ export const config = {
   /** P1.0: Workspace where the real read-only runner executes commands (e.g. the git repo root). */
   runnerWorkspaceRoot:
     process.env.OPERATOR_RUNNER_WORKSPACE ?? undefined,
+  /** Shared by both mission executors; `undefined` keeps approvals fail-closed. */
+  approvalAuthority: approvalAuthorityConfigured
+    ? {
+      stateDir: approvalAuthorityStateDir,
+      ...(managedBindingValid
+        ? {
+          managedCheckout: {
+            sourceRepositoryRoot: approvalAuthoritySourceRepository,
+            checkoutRoot: approvalAuthorityCheckoutRoot,
+          },
+        }
+        : { repositoryRoot: approvalAuthorityRepositoryRoot }),
+      ...(approvalIssuerConfigured
+        ? {
+          issuer: {
+            authorityId: approvalIssuerAuthorityId,
+            keyId: approvalIssuerKeyId,
+            privateKeyFile: approvalIssuerKeyFile,
+          },
+          trustedIssuersFile: approvalTrustedIssuersFile,
+        }
+        : {}),
+      ownerId: "chanter-operator",
+      ...(process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID?.trim()
+        ? { policyId: process.env.OPERATOR_APPROVAL_AUTHORITY_POLICY_ID.trim() }
+        : {}),
+    }
+    : undefined,
   autoPosterRuntime: {
     baseUrl: process.env.AUTOPOSTER_BASE_URL?.trim() ?? "",
     serviceToken: process.env.AUTOPOSTER_RUNTIME_TOKEN?.trim() ?? "",
@@ -132,6 +264,53 @@ export const config = {
     enabled: observationWorkerEnabled,
     pollIntervalMs: observationWorkerPollIntervalMs,
     ...(observationWorkerBatchSize !== undefined ? { batchSize: observationWorkerBatchSize } : {}),
+  },
+  agenticFabric: {
+    /**
+     * Logical repository name -> absolute root, as `name=path` pairs. Only
+     * these roots are readable by any context read or worker tool, so an
+     * unconfigured deployment can compile no repository-backed context at all
+     * rather than falling back to the process working directory.
+     */
+    repositories: agenticRepositories,
+    fixtureRoot: process.env.AGENTIC_FABRIC_FIXTURE_DIR?.trim() ?? "",
+    artifactRoot: process.env.AGENTIC_FABRIC_ARTIFACT_DIR?.trim() ?? "",
+    approvalTtlMs: agenticApprovalTtlMs,
+    /**
+     * The committed revision a candidate approval binds to. Read once at
+     * startup from the same repository the persisted approval authority uses,
+     * so an approval records what the deployment looked like when it was given.
+     */
+    authorityRepositoryRoot:
+      process.env.OPERATOR_APPROVAL_AUTHORITY_REPOSITORY_ROOT?.trim() ?? "",
+    providers: {
+      /**
+       * Origin of the local inference server. Empty leaves every live provider
+       * binding disabled, so an unconfigured deployment reaches no model at all
+       * rather than guessing at an endpoint — and no provider URL is ever
+       * derived from mission input.
+       */
+      localModelBaseUrl: process.env.AGENTIC_FABRIC_LOCAL_MODEL_BASE_URL?.trim() ?? "",
+      /**
+       * Test-mode provider simulation. Both flags must be set deliberately: the
+       * scenario alone does nothing, and an unrecognized scenario normalizes to
+       * `disabled` rather than to something plausible.
+       */
+      simulatorEnabled: agenticSimulatorEnabled,
+      simulatorScenario: normalizeSimulatorScenario(
+        process.env.AGENTIC_FABRIC_SIMULATOR_SCENARIO ?? "",
+      ),
+      /**
+       * Credential for the one billed external provider, from the environment
+       * only. It is read here, passed to the adapter closure, and never written
+       * to a binding, a durable record, a log, or an artifact. Empty leaves the
+       * billed binding disabled and its adapter unregistered, so an
+       * unconfigured deployment cannot spend money at all.
+       */
+      openRouterApiKey: process.env.AGENTIC_FABRIC_OPENROUTER_API_KEY?.trim() ?? "",
+      openRouterBaseUrl:
+        process.env.AGENTIC_FABRIC_OPENROUTER_BASE_URL?.trim() || "https://openrouter.ai",
+    },
   },
   missionSubmit: {
     token: process.env.OPERATOR_MISSION_SUBMIT_TOKEN?.trim() ?? "",

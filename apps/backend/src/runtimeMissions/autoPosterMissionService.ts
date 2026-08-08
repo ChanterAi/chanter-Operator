@@ -21,6 +21,10 @@ import {
   type AutoPosterMissionLedgerContext,
 } from "./autoPosterMissionLedger.js";
 import type { AutoPosterRuntimeMissionExecutor } from "./autoPosterRuntime.js";
+import type {
+  OperatorApprovalAuthorityOutcome,
+  OperatorApprovalDecision,
+} from "./persistedApprovalAuthority.js";
 import {
   autoPosterScheduleInputFromEnvelope,
   validateAutoPosterScheduleInput,
@@ -354,7 +358,15 @@ export function permittedRecoveryActions(execution: MissionExecutionRecord): Aut
       ? ["Reconcile", "Resume safely", "Stop / escalate"]
       : ["Reconcile", "Stop / escalate"];
   }
-  if (execution.currentState === "reconciliation_required") return ["Stop / escalate"];
+  if (execution.currentState === "reconciliation_required") {
+    // A conflict is two durable records for one exact scope: no lookup can
+    // resolve that, so only a human can. Every other reconciliation_required
+    // is the ambiguous case an authoritative lookup still can resolve, so
+    // Reconcile is offered — and Resume safely never is, from either.
+    return execution.reconciliationOutcome === "conflict"
+      ? ["Stop / escalate"]
+      : ["Reconcile", "Stop / escalate"];
+  }
   if (execution.currentState === "recovery_in_progress") return ["Reconcile"];
   return [];
 }
@@ -1203,6 +1215,17 @@ export class AutoPosterMissionService {
     };
   }
 
+  /**
+   * The exact Runtime request this mission is durably bound to. Read-only: it
+   * grants no authority and is the same tuple `approveAndExecute` would send,
+   * which is what makes an out-of-band approval decision (such as a rejection)
+   * bindable to this mission's checkpoint.
+   */
+  runtimeRequestFor(missionId: string): RuntimeMissionRequest {
+    const mission = this.getMission(missionId);
+    return this.buildRuntimeRequest(mission, mission.approvedBy ?? "pending-approval");
+  }
+
   private executorFailure(
     mission: AutoPosterRuntimeMission,
     approvedBy: string,
@@ -1455,7 +1478,18 @@ export class AutoPosterMissionService {
     const recoverable = runtimeResult.status === "unavailable"
       || runtimeResult.status === "failed"
       || commercialDenial;
-    const failedState = recoverable ? "failed_recoverable" : "failed_terminal";
+    // An unreachable downstream is the one outcome Operator cannot interpret:
+    // the request left, nothing authoritative came back, and the side effect
+    // may or may not exist. That is not an ordinary recoverable failure and
+    // must not be resumable — it is durably reconciliation_required until an
+    // authoritative lookup establishes which world we are in. Every other
+    // failure here was actually observed, so it keeps its existing state.
+    const outcomeUnobserved = runtimeResult.status === "unavailable";
+    const failedState = outcomeUnobserved
+      ? "reconciliation_required"
+      : recoverable
+        ? "failed_recoverable"
+        : "failed_terminal";
     const failedAt = this.now().toISOString();
     withTransaction(this.database, () => {
       this.ensureLegacyMissionLedgerLineage(mission.missionId);
@@ -1471,7 +1505,9 @@ export class AutoPosterMissionService {
       const current = this.journal.requireExecution(mission.missionId);
       this.journal.transition(mission.missionId, failedState, {
         actor: "chanter-agent-runtime",
-        reason: commercialDenial
+        reason: outcomeUnobserved
+          ? "The request left Operator and no authoritative response returned; downstream presence is unknown until it is reconciled."
+          : commercialDenial
           ? "Runtime returned a typed commercial denial; explicit reconciliation is required before a governed retry."
           : recoverable
           ? "Runtime could not prove whether the downstream boundary completed; reconciliation is required before retry."
@@ -1505,6 +1541,74 @@ export class AutoPosterMissionService {
     return this.getMission(mission.missionId);
   }
 
+  /**
+   * The durable human decision this mission already carries. Approver identity
+   * and the instant it was persisted are read back from Operator's own journal;
+   * nothing here is synthesized from status, a UI flag, or a database boolean.
+   */
+  private approvalDecisionFor(
+    mission: AutoPosterRuntimeMission,
+  ): OperatorApprovalDecision | null {
+    const approverId = mission.approvedBy?.trim() ?? "";
+    if (!approverId) return null;
+    const approved = mission.executionJournal.find(
+      (transition) => transition.newState === "approved",
+    );
+    if (!approved) return null;
+    return {
+      approverId,
+      note: "Founder approval was durably persisted by Operator before execution.",
+      observedAt: approved.timestamp,
+    };
+  }
+
+  /**
+   * Operator requests and transports approval authority; the Agent Runtime
+   * decides whether it authorizes execution. A refusal here never downgrades to
+   * a transient approval — the mission fails closed with the typed reason.
+   */
+  private persistedApprovalAuthority(
+    mission: AutoPosterRuntimeMission,
+    request: RuntimeMissionRequest,
+    recovered: boolean,
+  ): Promise<OperatorApprovalAuthorityOutcome> {
+    if (recovered) return this.executor.prepareRecoveredApproval(request);
+    const decision = this.approvalDecisionFor(mission);
+    if (!decision) {
+      return Promise.resolve({
+        ok: false,
+        code: "OPERATOR_APPROVAL_DECISION_MISSING",
+        message: "No durable human approval decision is recorded for this mission.",
+      });
+    }
+    return this.executor.prepareApproval(request, decision);
+  }
+
+  private approvalAuthorityFailure(
+    mission: AutoPosterRuntimeMission,
+    outcome: { code: string; message: string },
+  ): RuntimeMissionResult {
+    const completedAt = this.now().toISOString();
+    return {
+      missionId: mission.missionId,
+      traceId: mission.traceId,
+      product: PRODUCT,
+      action: ACTION,
+      status: "failed",
+      output: null,
+      evidence: null,
+      warnings: [],
+      errors: [{ code: outcome.code, message: outcome.message }],
+      policyDecision: null,
+      // No persisted authority means the approval did not authorize execution.
+      approvalDecision: { required: true, approved: false, approvedBy: null },
+      idempotency: { key: mission.idempotencyKey, outcome: "not_applicable" },
+      startedAt: mission.updatedAt,
+      completedAt,
+      durationMs: 0,
+    };
+  }
+
   private async executePreparedMission(
     mission: AutoPosterRuntimeMission,
     request: RuntimeMissionRequest,
@@ -1519,11 +1623,19 @@ export class AutoPosterMissionService {
         "RECOVERY_SCOPE_MISMATCH",
       );
     }
+    const authority = await this.persistedApprovalAuthority(mission, request, Boolean(recovered));
+    if (!authority.ok) {
+      return this.persistRuntimeOutcome(
+        mission,
+        this.approvalAuthorityFailure(mission, authority),
+        recoveryClassification,
+      );
+    }
     let runtimeResult: RuntimeMissionResult;
     try {
       runtimeResult = recovered
-        ? await this.executor.executeRecovered(request, recovered)
-        : await this.executor.execute(request);
+        ? await this.executor.executeRecovered(request, recovered, authority.authority)
+        : await this.executor.execute(request, authority.authority);
     } catch {
       runtimeResult = this.executorFailure(mission, request.approval?.approvedBy ?? "unknown");
     }
@@ -1645,7 +1757,13 @@ export class AutoPosterMissionService {
     withTransaction(this.database, () => {
       this.ensureLegacyMissionLedgerLineage(mission.missionId);
       let currentExecution = this.journal.requireExecution(mission.missionId);
-      if (currentExecution.currentState !== "failed_recoverable") {
+      // reconciliation_required is already the durable "interrupted, outcome
+      // unknown" record, so it needs no synthetic interruption marker — it is
+      // exactly the state this claim exists to resolve.
+      if (
+        currentExecution.currentState !== "failed_recoverable"
+        && currentExecution.currentState !== "reconciliation_required"
+      ) {
         const interruptedAt = this.now().toISOString();
         const interruptedError = {
           code: "RECOVERY_INTERRUPTED_EXECUTION",
@@ -1705,7 +1823,11 @@ export class AutoPosterMissionService {
         const currentExecution = this.journal.requireExecution(mission.missionId);
         this.journal.transition(
           mission.missionId,
-          unavailable ? "failed_recoverable" : "failed_terminal",
+          // A lookup that could not reach AutoPoster establishes nothing, so
+          // the mission stays exactly as unknown as it was: still
+          // reconciliation_required, still no retry unlocked. Timeout is not
+          // absence, and a failed investigation is not a failed mission.
+          unavailable ? "reconciliation_required" : "failed_terminal",
           {
             actor: ACTOR_ID,
             reason: typedError.message,
@@ -1877,6 +1999,16 @@ export class AutoPosterMissionService {
   async resumeSafely(missionId: string): Promise<AutoPosterRuntimeMission> {
     const mission = this.getMission(missionId);
     const execution = this.journal.requireExecution(mission.missionId);
+    // Investigation and execution are separate authorities. While downstream
+    // truth is unknown, resume carries no permission to act and says so with
+    // the specific code, rather than the generic not-permitted refusal.
+    if (execution.currentState === "reconciliation_required") {
+      throw new OperatorError(
+        "Downstream truth is unknown; an explicit reconciliation must establish it before any resume.",
+        409,
+        "RECOVERY_RECONCILIATION_REQUIRED",
+      );
+    }
     this.assertRecoveryActionAllowed(execution, "Resume safely");
     if (!mission.approvedBy) {
       throw new OperatorError("Mission approval is missing; recovery cannot bypass approval.", 409);
@@ -2008,6 +2140,11 @@ export class AutoPosterMissionService {
         }
         const retryStartedAt = this.now().toISOString();
         this.prepareLegacyMissionRowForRecovery(mission.missionId, retryStartedAt);
+        // AutoPoster durable truth proved no queue job exists for this exact
+        // scope, so an unresolved Runtime claim left by an interrupted attempt
+        // is retired on that evidence before the single permitted retry. The
+        // approval authority guard still runs before any adapter entry.
+        this.executor.retireUnresolvedClaim(mission.missionId);
         this.journal.transition(mission.missionId, "recovery_in_progress", {
           actor: ACTOR_ID,
           reason: "Operator claimed the single permitted safe retry after exact not-found reconciliation.",
