@@ -91,6 +91,14 @@ export const OS_VALIDATION_STAGES: readonly OsValidationStage[] = Object.freeze(
     name: "OS operational exception mission",
     script: "os:operational-exception",
   }),
+  // The only stage that touches a system outside this machine. It is read-only
+  // — `git ls-remote` and nothing else — so it costs a few network round trips
+  // and no money, but it sits behind every offline stage because a network
+  // failure is the least informative way for a gate to go red.
+  Object.freeze({
+    name: "OS operational exception shadow connector binding",
+    script: "os:shadow-connector",
+  }),
   // Terminal, and the most expensive stage in the gate by a wide margin: it is
   // the only one that performs real model inference. Two live provider calls per
   // mission across two missions, plus six additional Operator processes for the

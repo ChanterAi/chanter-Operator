@@ -56,6 +56,7 @@ import {
   OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
   type ActionContract,
   type ExceptionFieldValue,
+  type OperationalExceptionExecutionMode,
 } from "./agenticExceptionContract.js";
 
 /** The approved candidate bytes, read at write time rather than carried around. */
@@ -92,6 +93,8 @@ export interface AgenticExceptionWorkerDependencies extends AgenticWorkerDepende
   readonly exceptionState: () => AgenticExceptionIntakeState | null;
   /** The instant the compiled action must be applied by. */
   readonly actionDeadline: () => string;
+  /** Whether this mission may change the source, or only observe and compile. */
+  readonly executionMode: OperationalExceptionExecutionMode;
 }
 
 /** Scope labels that mark which fixture a specialist reads. */
@@ -945,8 +948,17 @@ function exceptionActionCompileWorker(
       }
 
       const manifest = jsonRecord(await context.tools.invoke("connector.manifest.read", {}));
-      const capabilities = Array.isArray(manifest?.capabilities)
-        ? manifest.capabilities.map((entry) => String(entry))
+      // Which list names the action depends on whether this connector may
+      // perform one. A read-only connector performs no capability and declares
+      // none — but it does declare what the *system* would need, and that is
+      // what a shadow contract must bind. Reading `capabilities` for both would
+      // make a shadow action either impossible to compile or nameless.
+      const writesEnabled = manifest?.writeCapabilitiesEnabled === true;
+      const capabilitySource = writesEnabled
+        ? manifest?.capabilities
+        : manifest?.writeCapabilitiesDeclared;
+      const capabilities = Array.isArray(capabilitySource)
+        ? capabilitySource.map((entry) => String(entry))
         : [];
       const writable = Array.isArray(manifest?.writableFields)
         ? manifest.writableFields.map((entry) => String(entry))
@@ -1157,6 +1169,204 @@ function connectorApplyWorker(
 }
 
 // ---------------------------------------------------------------------------
+// X4 (shadow) — record what would happen, and do nothing
+// ---------------------------------------------------------------------------
+
+/**
+ * Records the exact action an approval authorized, and performs none of it.
+ *
+ * It runs the same three checks the applying worker runs — recompile the
+ * contract, re-hash it, compare against the approved candidate — because the
+ * point of a shadow proof is that *the authority chain is real*. A node that
+ * skipped those would prove only that nothing happened, which is easy and
+ * uninteresting.
+ *
+ * What it cannot do is write, and that is not enforced here. This worker holds
+ * no write tool in its capability allowlist, its plan contains no write node,
+ * and the connector it observes exposes no write method. Three independent
+ * structural facts, none of which is a check this code could get wrong.
+ */
+function shadowAuthorizeWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.shadow-authorize",
+    capabilityId: "exception.shadow.authorize",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const approvedHash = String(input.candidateHash ?? "");
+      const candidate = dependencies.candidate();
+      const intake = dependencies.exceptionState();
+      if (!candidate || !intake) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "No durable approved action contract exists to record.",
+          }],
+        };
+      }
+      const derived = createAgenticCandidateHash(candidate.markdown);
+      if (derived !== approvedHash) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "The action contract bytes do not hash to the approved candidate hash; the shadow "
+              + "authorization is refused.",
+          }],
+        };
+      }
+      const contract = parseActionContractCandidate(candidate.markdown);
+      if (!contract) {
+        return {
+          ok: false,
+          status: "failed",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "The approved candidate is not a readable action contract.",
+          }],
+        };
+      }
+      if (contract.actionContractHash !== String(input.actionContractHash ?? "")) {
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message: "The approved action contract is not the one this node was asked to record.",
+          }],
+        };
+      }
+
+      // The connector's declared write capability, read from its manifest, so
+      // the recorded intent names what a real remediation would actually use
+      // rather than a label this worker invented.
+      const manifest = jsonRecord(await context.tools.invoke("connector.manifest.read", {}));
+      const declared = Array.isArray(manifest?.writeCapabilitiesDeclared)
+        ? manifest.writeCapabilitiesDeclared.map((entry) => String(entry))
+        : [];
+      const wouldExecute = declared[0] ?? contract.capability;
+
+      if (manifest?.writeCapabilitiesEnabled === true) {
+        // A shadow mission bound to a write-enabled connector is a contradiction
+        // worth refusing rather than silently honouring: the operator asked for
+        // a proof that no write is reachable, against a connector that says one
+        // is.
+        return {
+          ok: false,
+          status: "denied",
+          errors: [{
+            code: "AGENTIC_NODE_WORKER_FAILED",
+            message:
+              "This connector declares write capabilities enabled; a shadow authorization must "
+              + "bind to a connector that cannot write.",
+          }],
+        };
+      }
+
+      return {
+        ok: true,
+        structuredOutput: {
+          wouldExecuteCapability: wouldExecute,
+          wouldTargetExternalObject: contract.targetId,
+          wouldUseIdempotencyKey: contract.idempotencyKey,
+          wouldExpectPreStateRevision: intake.observed.sourceRevision,
+          realExternalWrites: 0,
+        },
+        evidence: [{
+          kind: "derived_claim",
+          label: `recorded one ${wouldExecute} that was authorized and deliberately not performed`,
+          sourceReference: `action-contract:${contract.actionContractHash}`,
+          content: {
+            wouldTargetExternalObject: contract.targetId,
+            wouldExpectPreStateRevision: intake.observed.sourceRevision,
+            realExternalWrites: 0,
+          },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// X5 (shadow) — the independent read-only oracle
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-reads the real source and judges the *shadow* contract.
+ *
+ * It deliberately does not ask whether the desired state now holds. In shadow
+ * mode the answer is always no — nothing was written — so a verifier that asked
+ * it would either always fail or would have to be told to ignore its own answer,
+ * and both make the oracle meaningless.
+ *
+ * What it is entitled to conclude, and does:
+ *
+ *   - the source is still **readable**, so the read contract survived the run;
+ *   - its **identity is stable**, so the object we observed is the object we
+ *     re-read;
+ *   - its **revision is unchanged**, which is the strongest available evidence
+ *     that nothing CHANTER did altered it. A changed revision is not a failure
+ *     of this fabric — someone else may have pushed — but it *is* a reason to
+ *     re-observe rather than to claim shadow-readiness.
+ */
+function shadowVerifyWorker(
+  dependencies: AgenticExceptionWorkerDependencies,
+): AgenticNodeWorker {
+  return {
+    workerId: "operator.agentic.shadow-verify",
+    capabilityId: "exception.shadow.verify",
+    kind: "deterministic_tool",
+    async execute(context: AgenticNodeWorkerContext): Promise<AgenticNodeWorkerOutcome> {
+      const input = jsonRecord(context.input) ?? {};
+      const targetId = String(input.targetId ?? "");
+      const observedRevision = String(input.observedRevision ?? "");
+
+      const response = jsonRecord(
+        await context.tools.invoke("connector.state.read", { targetId }),
+      );
+      const readable = response?.exists === true;
+      const record = jsonRecord(response?.record ?? null);
+      const currentRevision = readable && record ? String(record.revision ?? "") : "";
+      const identityStable = readable && record
+        ? String(record.targetId ?? "") === targetId
+        : false;
+      const revisionUnchanged = readable && currentRevision === observedRevision;
+
+      const shadowVerified = readable && identityStable && revisionUnchanged;
+
+      return {
+        ok: true,
+        structuredOutput: {
+          sourceReadable: readable,
+          identityStable,
+          revisionUnchanged,
+          // Never blank: a revision the source did not give us is reported as
+          // the absence it is, not as an empty string that reads like a value.
+          observedRevision: currentRevision || "unreadable",
+          // The claim this oracle can actually support: this fabric issued no
+          // mutation, and the source's own revision is where it was.
+          noChanterInducedMutation: revisionUnchanged,
+          realExternalWrites: 0,
+          shadowVerified,
+        },
+        evidence: [{
+          kind: "tool_output",
+          label: `independently re-read ${targetId} read-only after shadow authorization`,
+          sourceReference: `connector-observation:${currentRevision || "unreadable"}`,
+          content: { shadowVerified, revisionUnchanged, realExternalWrites: 0 },
+        }],
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // X5 — the independent verification oracle
 // ---------------------------------------------------------------------------
 
@@ -1341,6 +1551,18 @@ function specialistFor(
 export function createAgenticExceptionWorkerSet(
   dependencies: AgenticExceptionWorkerDependencies,
 ): AgenticNodeWorkerRegistry {
+  // A shadow mission is built with no applying worker at all. That is the
+  // third independent structural guarantee, alongside a plan containing no
+  // write node and a connector exposing no write method: the strongest form of
+  // "it cannot write" is that nothing capable of writing was constructed.
+  if (dependencies.executionMode === "shadow") {
+    return createAgenticWorkerRegistry([
+      exceptionObserveWorker(dependencies),
+      exceptionActionCompileWorker(dependencies),
+      shadowAuthorizeWorker(dependencies),
+      shadowVerifyWorker(dependencies),
+    ]);
+  }
   return createAgenticWorkerRegistry([
     exceptionObserveWorker(dependencies),
     exceptionActionCompileWorker(dependencies),

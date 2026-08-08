@@ -700,6 +700,84 @@ const CAPABILITIES: readonly AgenticCapability[] = Object.freeze([
     evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
   }),
   capability({
+    capabilityId: "exception.shadow.authorize",
+    owner: "operator" as const,
+    description:
+      "Records what an approved action *would* do against the real source, and performs nothing.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        actionContractHash: { kind: "string", minLength: 64, maxLength: 64 },
+        candidateHash: { kind: "string", minLength: 64, maxLength: 64 },
+        approvalId: { kind: "string", minLength: 1, maxLength: 200 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        wouldExecuteCapability: { kind: "string", minLength: 1, maxLength: 120 },
+        wouldTargetExternalObject: { kind: "string", minLength: 1, maxLength: 400 },
+        wouldUseIdempotencyKey: { kind: "string", minLength: 1, maxLength: 200 },
+        wouldExpectPreStateRevision: { kind: "string", minLength: 1, maxLength: 120 },
+        // The whole point, asserted in the node's own output rather than left
+        // to a reader to infer from the absence of a write.
+        realExternalWrites: { kind: "number", minimum: 0, maximum: 0, integer: true },
+      },
+    },
+    riskClass: "read_only" as const,
+    // Still human-gated. The approval is the real thing being proven — a shadow
+    // action a human never saw would prove nothing about the authority chain.
+    authorityRequirement: "human_approval_bound_to_candidate_hash" as const,
+    defaultBudget: budget({ maxToolCalls: 1, maxDurationMs: 15_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    // Read-only tools only: the manifest, to record what the connector declares
+    // it *would* need. There is no write tool in this allowlist.
+    allowedTools: ["connector.manifest.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  capability({
+    capabilityId: "exception.shadow.verify",
+    owner: "operator" as const,
+    description:
+      "Independently re-reads the real source and judges the shadow contract, not the desired state.",
+    inputSchema: {
+      kind: "object",
+      fields: {
+        connectorId: { kind: "string", minLength: 1, maxLength: 120 },
+        targetId: { kind: "string", minLength: 1, maxLength: 400 },
+        observedRevision: { kind: "string", minLength: 1, maxLength: 120 },
+        observationHash: { kind: "string", minLength: 64, maxLength: 64 },
+      },
+    },
+    outputSchema: {
+      kind: "object",
+      fields: {
+        sourceReadable: { kind: "boolean" },
+        identityStable: { kind: "boolean" },
+        revisionUnchanged: { kind: "boolean" },
+        observedRevision: { kind: "string", minLength: 1, maxLength: 120 },
+        // The claim this oracle is actually entitled to make.
+        noChanterInducedMutation: { kind: "boolean" },
+        realExternalWrites: { kind: "number", minimum: 0, maximum: 0, integer: true },
+        shadowVerified: { kind: "boolean" },
+      },
+    },
+    riskClass: "read_only" as const,
+    authorityRequirement: "none" as const,
+    defaultBudget: budget({ maxToolCalls: 4, maxDurationMs: 30_000 }),
+    modelWorkerBudget: null,
+    verifiability: "deterministic" as const,
+    allowedTools: ["connector.state.read", "connector.manifest.read"] as const,
+    allowedWorkerKinds: ["deterministic_tool"] as const,
+    sideEffectClass: "none" as const,
+    reconciliationMode: "worker_record_lookup_before_retry" as const,
+    evidencePolicy: { minimumItems: 1, requireAcceptedContextReference: false },
+  }),
+  capability({
     capabilityId: "exception.outcome.verify",
     owner: "operator" as const,
     description:
@@ -870,6 +948,21 @@ export const AGENTIC_EXCEPTION_MISSION_CAPABILITIES: readonly string[] = Object.
   "exception.action.compile",
   "connector.state.apply",
   "exception.outcome.verify",
+]);
+
+/**
+ * The capabilities a *shadow* operational-exception mission must be permitted.
+ *
+ * `connector.state.apply` is deliberately absent. A shadow mission is not
+ * merely one that declines to write — it is one that was never granted the
+ * capability to, so the permission the plan would need does not exist in its
+ * allowed set.
+ */
+export const AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES: readonly string[] = Object.freeze([
+  "exception.state.observe",
+  "exception.action.compile",
+  "exception.shadow.authorize",
+  "exception.shadow.verify",
 ]);
 
 /**

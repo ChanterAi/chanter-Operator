@@ -66,12 +66,45 @@ export const SIMULATED_CONNECTOR_WRITE_CAPABILITY = "record.reconcile" as const;
 export interface ConnectorCapabilityManifest {
   readonly schemaVersion: typeof OPERATIONAL_EXCEPTION_SCHEMA_VERSION;
   readonly connectorId: string;
+  /** What kind of system this is. Read by humans, never branched on. */
+  readonly systemType: string;
+  /**
+   * Which world this connector touches.
+   *
+   * `simulated` means the connector owns a local store standing in for an
+   * external system; `real_read_only` means it observes a genuine external
+   * system and cannot change it. The distinction is declared rather than
+   * inferred because everything downstream — whether a write plan may compile
+   * at all — depends on it.
+   */
+  readonly environment: "simulated" | "real_read_only";
   readonly capabilities: readonly string[];
   readonly readOperations: readonly string[];
+  /**
+   * Writes this system *has*, whether or not this connector may perform them.
+   *
+   * Declared separately from `writeCapabilitiesEnabled` on purpose: "this system
+   * has no such operation" and "this connector is not permitted to perform it"
+   * are different facts, and collapsing them would make a read-only binding look
+   * like a system that cannot be changed by anyone.
+   */
+  readonly writeCapabilitiesDeclared: readonly string[];
+  /**
+   * Whether this connector may perform any write at all.
+   *
+   * `false` is enforced structurally, not by a check: a read-only connector
+   * exposes no `apply` method, so there is nothing to call. A configured
+   * credential does not imply write authority.
+   */
+  readonly writeCapabilitiesEnabled: boolean;
+  /** How the source states its own version, and what a changed one means. */
+  readonly revisionSemantics: string;
+  /** How freshness is established on a re-read. */
+  readonly freshnessSemantics: string;
   readonly writeOperations: readonly string[];
-  readonly idempotencySemantics: "idempotency_key_replay_returns_original_outcome";
-  readonly reconciliationSupport: "read_by_idempotency_key";
-  readonly verificationSupport: "independent_read_after_write";
+  readonly idempotencySemantics: string;
+  readonly reconciliationSupport: string;
+  readonly verificationSupport: string;
   readonly compensationSupport: "none";
   /** Fields the one write capability is permitted to change, and no others. */
   readonly writableFields: readonly string[];
@@ -82,8 +115,14 @@ export interface ConnectorCapabilityManifest {
 export const SIMULATED_CONNECTOR_MANIFEST: ConnectorCapabilityManifest = Object.freeze({
   schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
   connectorId: SIMULATED_CONNECTOR_ID,
+  systemType: "ledger",
+  environment: "simulated",
   capabilities: Object.freeze([SIMULATED_CONNECTOR_WRITE_CAPABILITY]),
   readOperations: Object.freeze(["record.read", "action.read_by_idempotency_key"]),
+  writeCapabilitiesDeclared: Object.freeze([SIMULATED_CONNECTOR_WRITE_CAPABILITY]),
+  writeCapabilitiesEnabled: true,
+  revisionSemantics: "monotonic integer revision the connector bumps on every applied action",
+  freshnessSemantics: "content hash over normalized record fields plus the connector's revision",
   writeOperations: Object.freeze([SIMULATED_CONNECTOR_WRITE_CAPABILITY]),
   idempotencySemantics: "idempotency_key_replay_returns_original_outcome",
   reconciliationSupport: "read_by_idempotency_key",
@@ -140,7 +179,30 @@ export interface SimulatedConnectorOptions {
   readonly applyInterrupt?: (action: ConnectorAppliedAction) => void;
 }
 
-export interface SimulatedConnector {
+/**
+ * What every operational connector must provide, and no more.
+ *
+ * Reading is the whole mandatory surface. `readAction` and `apply` are optional
+ * because a read-only connector has neither — and their *absence* is the
+ * guarantee, not a flag set to false. A connector that cannot write is one with
+ * no write method to call, which no configuration can change.
+ */
+export interface OperationalConnector {
+  readonly connectorId: string;
+  manifest(): ConnectorCapabilityManifest;
+  read(targetId: string): ConnectorRecord | null;
+  readAction?(idempotencyKey: string): ConnectorAppliedAction | null;
+  apply?(request: {
+    readonly capability: string;
+    readonly targetId: string;
+    readonly expectedPreStateHash: string;
+    readonly writePayload: readonly ExceptionField[];
+    readonly writePayloadHash: string;
+    readonly idempotencyKey: string;
+  }): ConnectorApplyResult;
+}
+
+export interface SimulatedConnector extends OperationalConnector {
   readonly connectorId: string;
   manifest(): ConnectorCapabilityManifest;
   /** Installs fixture state. Never reachable from a worker or a mission. */

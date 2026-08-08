@@ -60,8 +60,16 @@ export interface AgenticMissionStateReader {
 export interface AgenticConnectorPort {
   manifest(): JsonValue;
   read(targetId: string): JsonValue | null;
-  readAction(idempotencyKey: string): JsonValue | null;
-  apply(request: {
+  /**
+   * Optional, and its absence is the guarantee.
+   *
+   * A read-only connector has no actions to look up and no way to perform one.
+   * Modelling these as optional means a caller cannot reach a write on a
+   * connector that has none — there is no method to call, rather than a method
+   * that declines.
+   */
+  readAction?(idempotencyKey: string): JsonValue | null;
+  apply?(request: {
     readonly capability: string;
     readonly targetId: string;
     readonly expectedPreStateHash: string;
@@ -265,7 +273,14 @@ export function createAgenticToolSurface(
         }
         case "connector.action.read": {
           const idempotencyKey = requireString(request.idempotencyKey, "idempotencyKey");
-          const action = requireConnector().readAction(idempotencyKey);
+          const connectorPort = requireConnector();
+          if (typeof connectorPort.readAction !== "function") {
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_READ_ONLY",
+              "This connector performs no actions, so it has none to look up.",
+            );
+          }
+          const action = connectorPort.readAction(idempotencyKey);
           // The reconciliation read. `applied: false` is the finding that
           // permits a retry; it is never inferred from a missing response.
           return action === null
@@ -289,7 +304,19 @@ export function createAgenticToolSurface(
               value: (field.value ?? null) as JsonValue,
             };
           });
-          return requireConnector().apply({
+          const writePort = requireConnector();
+          if (typeof writePort.apply !== "function") {
+            // The last line of a defence that should never be reached: a shadow
+            // plan compiles no node that could call this, and a read-only
+            // connector is refused at intake for a live mission. It refuses
+            // anyway, because "unreachable" is a claim worth making twice when
+            // the thing on the other side is a real external system.
+            refuse(
+              "AGENTIC_TOOL_CONNECTOR_READ_ONLY",
+              "This connector exposes no write method; the action is refused at the transport.",
+            );
+          }
+          return writePort.apply({
             capability,
             targetId,
             expectedPreStateHash,

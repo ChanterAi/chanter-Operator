@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import type {
   ExceptionAcceptanceConstraint,
   ExceptionField,
+  OperationalExceptionExecutionMode,
 } from "./agenticExceptionContract.js";
 
 export const AGENTIC_WORK_SCHEMA_VERSION = "chanter.agentic-work.v1" as const;
@@ -227,6 +228,15 @@ export type AgenticMissionKind = (typeof AGENTIC_MISSION_KINDS)[number];
 export interface AgenticExceptionIntent {
   readonly connectorId: string;
   readonly targetId: string;
+  /**
+   * Whether this mission may change the source, or only observe and compile.
+   *
+   * Part of the intent, and therefore of the plan identity, because the two
+   * modes compile structurally different plans — a shadow plan contains no node
+   * with a side effect. A mission resubmitted in the other mode is a different
+   * mission, not an update to this one.
+   */
+  readonly executionMode: OperationalExceptionExecutionMode;
   readonly desiredFields: readonly ExceptionField[];
   readonly acceptanceConstraints: readonly ExceptionAcceptanceConstraint[];
 }
@@ -377,6 +387,7 @@ export function createAgenticIntentHash(
     exceptionContract: contract.exceptionContract === null ? null : {
       connectorId: contract.exceptionContract.connectorId,
       targetId: contract.exceptionContract.targetId,
+      executionMode: contract.exceptionContract.executionMode,
       desiredFields: contract.exceptionContract.desiredFields.map((entry) => ({ ...entry })),
       acceptanceConstraints: contract.exceptionContract.acceptanceConstraints
         .map((constraint) => ({ ...constraint })),
@@ -462,6 +473,10 @@ export const AGENTIC_NODE_TYPES = [
   "state_observe",
   "action_compile",
   "connector_apply",
+  // The shadow counterpart of `connector_apply`. A separate node type rather
+  // than a flag on the same one, so "this plan contains no write node" is
+  // answerable by reading the compiled plan.
+  "shadow_authorize",
 ] as const;
 
 export type AgenticNodeType = (typeof AGENTIC_NODE_TYPES)[number];

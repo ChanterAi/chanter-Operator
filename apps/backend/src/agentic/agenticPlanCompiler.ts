@@ -49,6 +49,19 @@ import {
   type AgenticPlanEdge,
   type AgenticPlanNode,
 } from "./agenticMissionContract.js";
+import type { OperationalExceptionExecutionMode } from "./agenticExceptionContract.js";
+
+/**
+ * The mode a compiled intent runs under.
+ *
+ * An artifact mission has no execution mode of its own; `live` is the honest
+ * reading for it, and the blueprint selector ignores the value for that kind.
+ */
+export function executionModeOf(
+  intent: Pick<AgenticIntentContract, "exceptionContract">,
+): OperationalExceptionExecutionMode {
+  return intent.exceptionContract?.executionMode ?? "live";
+}
 import { budgetForWorkerKind, requireAgenticCapability } from "./agenticCapabilityRegistry.js";
 import { routeAgenticNode, type AgenticRoutingDecision } from "./agenticCapabilityRouter.js";
 
@@ -198,9 +211,70 @@ const EXCEPTION_PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
   }),
 ]);
 
-/** The blueprint for one mission kind. The only place the two plans diverge. */
-function blueprintFor(missionKind: AgenticMissionKind): readonly NodeBlueprint[] {
-  return missionKind === "operational_exception" ? EXCEPTION_PLAN_BLUEPRINT : PLAN_BLUEPRINT;
+/**
+ * The shadow DAG: identical up to authority, and then it does not write.
+ *
+ *     X1 observe        exception.state.observe
+ *      └─ X2 compile    exception.action.compile
+ *          └─ X3 authority.approve_shadow_action (no worker)
+ *              └─ X4 record   exception.shadow.authorize   NO SIDE EFFECT
+ *                  └─ X5 verify  exception.outcome.verify  read-only
+ *
+ * X4 is where the two modes differ, and the difference is structural rather
+ * than conditional: this plan contains **no node with a side effect of any
+ * kind**. There is no write to disable at execution time because none was ever
+ * compiled — which is a far stronger statement than a guard that happened to
+ * return early, and it holds even if every check downstream were removed.
+ */
+const SHADOW_EXCEPTION_PLAN_BLUEPRINT: readonly NodeBlueprint[] = Object.freeze([
+  Object.freeze({
+    nodeId: "X1",
+    nodeType: "state_observe" as const,
+    capabilityId: "exception.state.observe",
+    dependencyIds: [] as readonly string[],
+    inputRefs: [] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X2",
+    nodeType: "action_compile" as const,
+    capabilityId: "exception.action.compile",
+    dependencyIds: ["X1"] as readonly string[],
+    inputRefs: ["X1"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X3",
+    nodeType: "authority_checkpoint" as const,
+    capabilityId: null,
+    dependencyIds: ["X2"] as readonly string[],
+    inputRefs: ["X2"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X4",
+    nodeType: "shadow_authorize" as const,
+    capabilityId: "exception.shadow.authorize",
+    dependencyIds: ["X3"] as readonly string[],
+    inputRefs: ["X2", "X3"] as readonly string[],
+  }),
+  Object.freeze({
+    nodeId: "X5",
+    nodeType: "outcome_verify" as const,
+    // A different oracle, because it judges a different thing: the live verifier
+    // asks "does the source now satisfy the desired state?", which in shadow
+    // mode is guaranteed to be no. This one asks whether the real-system
+    // observation and verification contract held.
+    capabilityId: "exception.shadow.verify",
+    dependencyIds: ["X4"] as readonly string[],
+    inputRefs: ["X1", "X4"] as readonly string[],
+  }),
+]);
+
+/** The blueprint for one mission shape. The only place the plans diverge. */
+function blueprintFor(
+  missionKind: AgenticMissionKind,
+  executionMode: OperationalExceptionExecutionMode,
+): readonly NodeBlueprint[] {
+  if (missionKind !== "operational_exception") return PLAN_BLUEPRINT;
+  return executionMode === "shadow" ? SHADOW_EXCEPTION_PLAN_BLUEPRINT : EXCEPTION_PLAN_BLUEPRINT;
 }
 
 /**
@@ -210,8 +284,11 @@ function blueprintFor(missionKind: AgenticMissionKind): readonly NodeBlueprint[]
  * rather than hardcoding `"N8"` downstream is what keeps "only an independent
  * oracle completes a mission" true for both plans instead of true for one.
  */
-export function terminalVerificationNodeId(missionKind: AgenticMissionKind): string {
-  return soleNodeOfType(missionKind, "outcome_verify");
+export function terminalVerificationNodeId(
+  missionKind: AgenticMissionKind,
+  executionMode: OperationalExceptionExecutionMode,
+): string {
+  return soleNodeOfType(missionKind, executionMode, "outcome_verify");
 }
 
 /**
@@ -221,12 +298,20 @@ export function terminalVerificationNodeId(missionKind: AgenticMissionKind): str
  * hardcoded id downstream would silently approve the wrong plan's checkpoint
  * the moment a second plan shape existed.
  */
-export function authorityCheckpointNodeId(missionKind: AgenticMissionKind): string {
-  return soleNodeOfType(missionKind, "authority_checkpoint");
+export function authorityCheckpointNodeId(
+  missionKind: AgenticMissionKind,
+  executionMode: OperationalExceptionExecutionMode,
+): string {
+  return soleNodeOfType(missionKind, executionMode, "authority_checkpoint");
 }
 
-function soleNodeOfType(missionKind: AgenticMissionKind, nodeType: AgenticNodeType): string {
-  const matching = blueprintFor(missionKind).filter((blueprint) => blueprint.nodeType === nodeType);
+function soleNodeOfType(
+  missionKind: AgenticMissionKind,
+  executionMode: OperationalExceptionExecutionMode,
+  nodeType: AgenticNodeType,
+): string {
+  const matching = blueprintFor(missionKind, executionMode)
+    .filter((blueprint) => blueprint.nodeType === nodeType);
   /* c8 ignore next 7 -- unreachable: both blueprints declare exactly one of each. */
   if (matching.length !== 1) {
     throw new OperatorError(
@@ -260,7 +345,7 @@ export function compileAgenticPlan(
   const routing: AgenticRoutingDecision[] = [];
   const offsetByNode = new Map<string, number>();
 
-  for (const blueprint of blueprintFor(intent.missionKind)) {
+  for (const blueprint of blueprintFor(intent.missionKind, executionModeOf(intent))) {
     const dependencyOffset = blueprint.dependencyIds.reduce(
       (deepest, dependencyId) => Math.max(deepest, offsetByNode.get(dependencyId) ?? 0),
       0,

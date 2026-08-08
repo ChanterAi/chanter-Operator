@@ -129,6 +129,7 @@ describe("CHANTER OS validation orchestration", () => {
         "os:unified",
         "os:agentic-fabric",
         "os:operational-exception",
+        "os:shadow-connector",
         "os:csi-model-workers",
       ],
     );
@@ -136,7 +137,7 @@ describe("CHANTER OS validation orchestration", () => {
 
   it("keeps every agentic proof present exactly once, with the model proof terminal", () => {
     const scripts = OS_VALIDATION_STAGES.map((stage) => stage.script);
-    for (const script of ["os:agentic-fabric", "os:operational-exception", "os:csi-model-workers"]) {
+    for (const script of ["os:agentic-fabric", "os:operational-exception", "os:shadow-connector", "os:csi-model-workers"]) {
       assert.equal(
         scripts.filter((entry) => entry === script).length,
         1,
@@ -232,6 +233,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
       "OS operational exception mission",
+      "OS operational exception shadow connector binding",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -299,6 +301,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
       "OS operational exception mission",
+      "OS operational exception shadow connector binding",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -333,6 +336,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
       "OS unified mission control plane",
       "OS governed agentic execution fabric",
       "OS operational exception mission",
+      "OS operational exception shadow connector binding",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -386,6 +390,7 @@ describe("CHANTER OS validation gate — unified proof fail-fast", () => {
     assert.deepEqual(outcome.skipped, [
       "OS governed agentic execution fabric",
       "OS operational exception mission",
+      "OS operational exception shadow connector binding",
       "OS collective synthetic intelligence model workers",
     ]);
   });
@@ -444,6 +449,7 @@ describe("CHANTER OS validation gate — agentic proof fail-fast", () => {
     );
     assert.deepEqual(outcome.skipped, [
       "OS operational exception mission",
+      "OS operational exception shadow connector binding",
       "OS collective synthetic intelligence model workers",
     ]);
   });

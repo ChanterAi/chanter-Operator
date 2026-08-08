@@ -49,14 +49,17 @@ import {
   type AgenticProviderBindingSelection,
   type AgenticTrustClass,
 } from "./agenticMissionContract.js";
-import type {
-  ExceptionAcceptanceConstraint,
-  ExceptionField,
-  ExceptionFieldValue,
+import {
+  OPERATIONAL_EXCEPTION_EXECUTION_MODES,
+  type ExceptionAcceptanceConstraint,
+  type ExceptionField,
+  type ExceptionFieldValue,
+  type OperationalExceptionExecutionMode,
 } from "./agenticExceptionContract.js";
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
   AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
+  AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES,
   minimumExecutablePlanDurationMs,
   resolveAgenticCapability,
 } from "./agenticCapabilityRegistry.js";
@@ -449,7 +452,25 @@ function compileExceptionContract(raw: unknown): AgenticExceptionIntent {
     );
   }
 
-  return { connectorId, targetId, desiredFields, acceptanceConstraints };
+  // Defaults to `shadow`, and deliberately so: the safe mode is the one you get
+  // when you did not say. A mission that changes a real system should have to
+  // ask for that in writing.
+  const rawMode = record.executionMode ?? "shadow";
+  if (typeof rawMode !== "string"
+    || !OPERATIONAL_EXCEPTION_EXECUTION_MODES.includes(rawMode as OperationalExceptionExecutionMode)) {
+    refuse(
+      "AGENTIC_INTENT_EXCEPTION_CONTRACT_AMBIGUOUS",
+      `exceptionContract.executionMode must be one of: ${OPERATIONAL_EXCEPTION_EXECUTION_MODES.join(", ")}.`,
+    );
+  }
+
+  return {
+    connectorId,
+    targetId,
+    executionMode: rawMode as OperationalExceptionExecutionMode,
+    desiredFields,
+    acceptanceConstraints,
+  };
 }
 
 /** One bounded operational value. Objects and arrays are refused, not coerced. */
@@ -753,9 +774,14 @@ export function compileAgenticIntent(rawBody: unknown): AgenticIntentContract {
   // was forbidden or simply not allowed is named in the refusal. The required
   // set follows the mission kind, so an exception mission is not asked to
   // permit artifact capabilities it will never route to.
-  const requiredCapabilities = isException
-    ? AGENTIC_EXCEPTION_MISSION_CAPABILITIES
-    : AGENTIC_ARTIFACT_MISSION_CAPABILITIES;
+  // The required set follows the *mode*, not just the kind: a shadow mission
+  // must be permitted the capabilities its own plan routes to, and must not be
+  // asked to permit the write capability it deliberately cannot reach.
+  const requiredCapabilities = !isException
+    ? AGENTIC_ARTIFACT_MISSION_CAPABILITIES
+    : exceptionContract?.executionMode === "shadow"
+      ? AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES
+      : AGENTIC_EXCEPTION_MISSION_CAPABILITIES;
   for (const required of requiredCapabilities) {
     if (forbiddenCapabilities.includes(required)) {
       refuse(

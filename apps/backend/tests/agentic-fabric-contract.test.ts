@@ -22,6 +22,7 @@ import {
 import {
   AGENTIC_ARTIFACT_MISSION_CAPABILITIES,
   AGENTIC_EXCEPTION_MISSION_CAPABILITIES,
+  AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES,
   AGENTIC_TOOLS,
   listAgenticCapabilities,
   minimumExecutablePlanDurationMs,
@@ -256,20 +257,32 @@ describe("agentic capability registry", () => {
    * pinning the *set* would turn adding a reviewed capability into a test
    * failure rather than the invariant check it deserves.
    */
-  it("gates every capability that has a side effect, and gates nothing else", () => {
+  it("gates every capability that has a side effect", () => {
     const effectful = listAgenticCapabilities()
       .filter((capability) => capability.sideEffectClass !== "none")
       .map((capability) => capability.capabilityId)
       .sort();
-    const gated = listAgenticCapabilities()
+    const gated = new Set(listAgenticCapabilities()
       .filter((capability) => capability.authorityRequirement !== "none")
-      .map((capability) => capability.capabilityId)
-      .sort();
+      .map((capability) => capability.capabilityId));
 
     expect(effectful).toEqual(["artifact.local.write", "connector.state.apply"]);
-    // Exactly the same set: nothing consequential is ungated, and nothing
-    // harmless demands a human decision it does not need.
-    expect(gated).toEqual(effectful);
+    // Every effectful capability is gated. The converse is deliberately *not*
+    // asserted: `exception.shadow.authorize` has no side effect and is gated
+    // anyway, because a shadow action a human never approved would prove
+    // nothing about the authority chain it exists to exercise.
+    for (const capabilityId of effectful) {
+      expect(gated.has(capabilityId)).toBe(true);
+    }
+  });
+
+  it("gives a shadow mission no capability that can write", () => {
+    const effectful = AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES
+      .filter((capabilityId) => requireAgenticCapability(capabilityId).sideEffectClass !== "none");
+
+    expect(effectful).toEqual([]);
+    // The write capability is absent from the allowed set, not merely unused.
+    expect(AGENTIC_SHADOW_EXCEPTION_MISSION_CAPABILITIES).not.toContain("connector.state.apply");
   });
 
   it("gives each mission kind exactly one consequential capability", () => {

@@ -369,11 +369,31 @@ export function renderActionContractCandidate(contract: ActionContract): string 
 // TerminalOutcome
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether a mission may change the source, or only observe and compile.
+ *
+ * Part of the intent hash, so a mission resubmitted in a different mode is a
+ * different mission rather than a silently re-planned one — which matters
+ * because the two modes compile *different plans*: a shadow plan contains no
+ * node with a side effect at all.
+ */
+export const OPERATIONAL_EXCEPTION_EXECUTION_MODES = ["live", "shadow"] as const;
+
+export type OperationalExceptionExecutionMode =
+  (typeof OPERATIONAL_EXCEPTION_EXECUTION_MODES)[number];
+
 export const OPERATIONAL_EXCEPTION_TERMINAL_STATES = [
   "completed_verified",
   "blocked",
   "failed",
   "unknown_requires_human",
+  // Shadow terminals. Deliberately distinct names rather than a boolean beside
+  // the live ones: `shadow_verified_ready` must never be readable as "the
+  // exception was resolved", because nothing was changed.
+  "shadow_verified_ready",
+  "shadow_stale_reobserve",
+  "shadow_blocked",
+  "shadow_unknown_requires_human",
 ] as const;
 
 export type OperationalExceptionTerminalState =
@@ -412,6 +432,7 @@ export interface TerminalOutcome {
 export interface ExceptionValueObservation {
   readonly schemaVersion: typeof OPERATIONAL_EXCEPTION_SCHEMA_VERSION;
   readonly missionId: string;
+  readonly executionMode: OperationalExceptionExecutionMode;
   readonly exceptionDetected: number;
   readonly stateChangingActions: number;
   readonly duplicateActions: number;
@@ -422,6 +443,25 @@ export interface ExceptionValueObservation {
   /** Provider spend for this mission, in micros. `0` when nothing was billed. */
   readonly providerCostMicros: number;
   readonly providerCalls: number;
+  // -- Shadow measures. Zero on a live mission, and reported rather than
+  // omitted so the two modes are read from the same shape.
+  /** Reads issued against the real source by the observe node. */
+  readonly sourceReads: number;
+  /** Distinct source revisions seen across this mission's reads. */
+  readonly sourceRevisionsObserved: number;
+  /** Re-reads that found the source had moved since intake. */
+  readonly staleObservations: number;
+  /** ActionContracts compiled. In shadow mode this is compiled-and-never-sent. */
+  readonly shadowActionsCompiled: number;
+  /** Reads issued by the independent verifier. */
+  readonly verificationReads: number;
+  /**
+   * Writes performed against the real external system.
+   *
+   * Typed as the literal `0`, so a non-zero value is a compile error rather
+   * than a number someone has to notice.
+   */
+  readonly realExternalWrites: 0;
 }
 
 // ---------------------------------------------------------------------------

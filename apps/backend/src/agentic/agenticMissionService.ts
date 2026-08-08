@@ -56,7 +56,7 @@ import {
   type AgenticValueObservation,
 } from "./agenticMissionContract.js";
 import type { AgenticExceptionIntakeState } from "./agenticPlanJournal.js";
-import type { SimulatedConnector } from "./agenticSimulatedConnector.js";
+import type { OperationalConnector } from "./agenticSimulatedConnector.js";
 import {
   compileActionContract,
   computeStateDelta,
@@ -83,6 +83,17 @@ const TERMINAL_OUTCOME_REASONS: Readonly<Record<OperationalExceptionTerminalStat
     failed: "The mission stopped without reaching a verified resolution.",
     unknown_requires_human:
       "An outcome is ambiguous and must be reconciled by a human before anything else happens.",
+    shadow_verified_ready:
+      "The real source was observed, an exact action was compiled and approved, no write was "
+      + "performed or reachable, and an independent read-only re-read confirmed the source is "
+      + "unchanged. The external exception is NOT resolved.",
+    shadow_stale_reobserve:
+      "The real source moved after it was observed, so the compiled action no longer applies and "
+      + "the mission must re-observe before anything is claimed.",
+    shadow_blocked:
+      "The shadow mission stopped before establishing readiness; no write was performed.",
+    shadow_unknown_requires_human:
+      "A shadow outcome is ambiguous and must be resolved by a human. No write was performed.",
   });
 import {
   assertAgenticIntentUnchanged,
@@ -92,6 +103,7 @@ import { compileVerifiedContext, type AgenticContextSourcePort } from "./agentic
 import {
   authorityCheckpointNodeId,
   compileAgenticPlan,
+  executionModeOf,
   terminalVerificationNodeId,
 } from "./agenticPlanCompiler.js";
 import { requireAgenticCapability } from "./agenticCapabilityRegistry.js";
@@ -174,7 +186,7 @@ export interface AgenticFabricDependencies {
    * an operational-exception submission is refused at intake rather than
    * compiled into a plan whose one consequential node could never execute.
    */
-  readonly connector?: SimulatedConnector;
+  readonly connector?: OperationalConnector;
 }
 
 export interface AgenticMissionView {
@@ -304,18 +316,37 @@ export class AgenticMissionService {
     }, dependencies.connector === undefined ? undefined : {
       manifest: () => dependencies.connector!.manifest() as unknown as JsonValue,
       read: (targetId) => (dependencies.connector!.read(targetId) ?? null) as unknown as JsonValue,
-      readAction: (key) => (dependencies.connector!.readAction(key) ?? null) as unknown as JsonValue,
-      apply: (request) => dependencies.connector!.apply({
-        capability: request.capability,
-        targetId: request.targetId,
-        expectedPreStateHash: request.expectedPreStateHash,
-        writePayload: request.writePayload.map((entry) => ({
-          field: entry.field,
-          value: entry.value as ExceptionFieldValue,
-        })),
-        writePayloadHash: request.writePayloadHash,
-        idempotencyKey: request.idempotencyKey,
-      }) as unknown as JsonValue,
+      // Forwarded only when the connector actually has them. A read-only
+      // connector produces a port with these properties absent, so the tool
+      // surface refuses at the boundary rather than calling into nothing.
+      ...(typeof dependencies.connector.readAction === "function"
+        ? {
+          readAction: (key: string) =>
+            (dependencies.connector!.readAction!(key) ?? null) as unknown as JsonValue,
+        }
+        : {}),
+      ...(typeof dependencies.connector.apply === "function"
+        ? {
+          apply: (request: {
+            readonly capability: string;
+            readonly targetId: string;
+            readonly expectedPreStateHash: string;
+            readonly writePayload: readonly { readonly field: string; readonly value: JsonValue }[];
+            readonly writePayloadHash: string;
+            readonly idempotencyKey: string;
+          }) => dependencies.connector!.apply!({
+            capability: request.capability,
+            targetId: request.targetId,
+            expectedPreStateHash: request.expectedPreStateHash,
+            writePayload: request.writePayload.map((entry) => ({
+              field: entry.field,
+              value: entry.value as ExceptionFieldValue,
+            })),
+            writePayloadHash: request.writePayloadHash,
+            idempotencyKey: request.idempotencyKey,
+          }) as unknown as JsonValue,
+        }
+        : {}),
     });
     this.contextPort = createAgenticContextSourcePort(this.tools, this.now);
   }
@@ -502,10 +533,18 @@ export class AgenticMissionService {
     const expiresAt = new Date(
       Date.parse(timestamp) + this.dependencies.configuration.approvalTtlMs,
     ).toISOString();
-    const checkpointNodeId = authorityCheckpointNodeId(mission.intent.missionKind);
-    const consequence = mission.intent.missionKind === "operational_exception"
-      ? "one bounded connector action"
-      : "one bounded local artifact write";
+    const checkpointNodeId = authorityCheckpointNodeId(
+      mission.intent.missionKind,
+      executionModeOf(mission.intent),
+    );
+    const consequence = mission.intent.missionKind !== "operational_exception"
+      ? "one bounded local artifact write"
+      : executionModeOf(mission.intent) === "shadow"
+        // Named for what it is. A human approving a shadow action is authorizing
+        // a record of intent, and telling them otherwise would be the one lie
+        // this whole slice exists to avoid.
+        ? "one bounded connector action that will be recorded and deliberately not performed"
+        : "one bounded connector action";
     this.journal.updateMission(missionId, {
       eventType: "candidate_approved",
       actor: approver,
@@ -670,6 +709,7 @@ export class AgenticMissionService {
         actionDeadline: () => new Date(
           Date.parse(mission.requestedAt) + mission.intent.timeBudgetMs,
         ).toISOString(),
+        executionMode: executionModeOf(mission.intent),
       });
     }
 
@@ -1072,7 +1112,7 @@ export class AgenticMissionService {
       });
     }
 
-    if (node.nodeId === terminalVerificationNodeId(mission.intent.missionKind)) {
+    if (node.nodeId === terminalVerificationNodeId(mission.intent.missionKind, executionModeOf(mission.intent))) {
       this.finishMission(mission.missionId, record, timestamp);
     }
   }
@@ -1124,7 +1164,12 @@ export class AgenticMissionService {
     outcome: Record<string, JsonValue>,
     timestamp: string,
   ): void {
-    const verified = outcome.outcomeVerified === true;
+    // Each oracle reports its own verdict under its own name, and the terminal
+    // check reads the one that belongs to this plan. A shadow oracle judges the
+    // shadow contract, so calling its answer `outcomeVerified` would have meant
+    // one word carrying two different claims — and the whole point of the shadow
+    // vocabulary is that those two claims never get confused.
+    const verified = outcome.outcomeVerified === true || outcome.shadowVerified === true;
     const observation = this.computeValueObservation(missionId, verified);
     this.journal.transitionMission(missionId, verified ? "completed" : "failed_terminal", {
       actor: this.journal.requireMission(missionId).actorId,
@@ -1138,7 +1183,7 @@ export class AgenticMissionService {
         : {
           typedError: {
             code: "AGENTIC_OUTCOME_VERIFICATION_FAILED",
-            message: "The written artifact did not satisfy independent outcome verification.",
+            message: "Independent verification did not confirm this mission's terminal condition.",
           },
         }),
       evidenceReferences: [`artifact-sha256:${String(outcome.artifactHash ?? "")}`],
@@ -1158,20 +1203,47 @@ export class AgenticMissionService {
    */
   terminalOutcome(missionId: string): TerminalOutcome {
     const mission = this.journal.requireMission(missionId);
-    const verificationNodeId = terminalVerificationNodeId(mission.intent.missionKind);
+    const verificationNodeId = terminalVerificationNodeId(mission.intent.missionKind, executionModeOf(mission.intent));
     const oracle = this.journal.getNode(mission.planId, verificationNodeId);
     const output = oracle?.output;
     const verified = output !== null && output !== undefined && typeof output === "object"
       && !Array.isArray(output)
       && (output as Record<string, JsonValue>).outcomeVerified === true;
 
-    const state: OperationalExceptionTerminalState = mission.status === "completed"
-      ? "completed_verified"
-      : mission.status === "reconciliation_required"
-        ? "unknown_requires_human"
-        : mission.status === "failed_terminal" || mission.status === "failed_recoverable"
-          ? "failed"
-          : "blocked";
+    // Shadow missions project into their own terminal vocabulary. Separate
+    // names rather than a flag beside the live ones, because
+    // `shadow_verified_ready` must never be readable as "the exception was
+    // resolved" — nothing was changed, and the whole slice is worthless if that
+    // distinction can be lost in a projection.
+    const shadow = executionModeOf(mission.intent) === "shadow";
+    const shadowVerified = verified
+      || (output !== null && output !== undefined && typeof output === "object"
+        && !Array.isArray(output)
+        && (output as Record<string, JsonValue>).shadowVerified === true);
+    const revisionMoved = output !== null && output !== undefined && typeof output === "object"
+      && !Array.isArray(output)
+      && (output as Record<string, JsonValue>).revisionUnchanged === false;
+
+    const state: OperationalExceptionTerminalState = shadow
+      ? mission.status === "completed"
+        ? "shadow_verified_ready"
+        : mission.status === "reconciliation_required"
+          ? "shadow_unknown_requires_human"
+          : revisionMoved
+            // The source moved under us. Not a failure of this fabric — someone
+            // else may have pushed — but a reason to re-observe rather than to
+            // claim readiness against a state that no longer exists.
+            ? "shadow_stale_reobserve"
+            : mission.status === "failed_terminal" || mission.status === "failed_recoverable"
+              ? "shadow_blocked"
+              : "shadow_blocked"
+      : mission.status === "completed"
+        ? "completed_verified"
+        : mission.status === "reconciliation_required"
+          ? "unknown_requires_human"
+          : mission.status === "failed_terminal" || mission.status === "failed_recoverable"
+            ? "failed"
+            : "blocked";
 
     return {
       schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
@@ -1180,7 +1252,7 @@ export class AgenticMissionService {
       // Read from the oracle's own durable output, not inferred from the plan
       // state. The two agree today; if they ever disagreed, the honest report is
       // the oracle's, and this makes that disagreement visible.
-      verified,
+      verified: shadow ? shadowVerified : verified,
       reason: TERMINAL_OUTCOME_REASONS[state],
       verificationReference: oracle?.outputHash === undefined || oracle.outputHash === null
         ? null
@@ -1215,9 +1287,39 @@ export class AgenticMissionService {
       (event) => event.scope === "plan" && event.newState === "completed",
     )?.timestamp ?? null;
 
+    const mode = executionModeOf(mission.intent);
+    const observeNode = nodes.find((node) => node.nodeType === "state_observe");
+    const compileNode = nodes.find((node) => node.nodeType === "action_compile");
+    const observeOutput = observeNode?.output;
+    const observeRecord = observeOutput !== null && observeOutput !== undefined
+      && typeof observeOutput === "object" && !Array.isArray(observeOutput)
+      ? (observeOutput as Record<string, JsonValue>)
+      : {};
+    // A re-read that disagreed with intake. Counted from the observe node's own
+    // report rather than inferred from a failure, so it is visible even when the
+    // mission went on to succeed.
+    const staleObservations = observeRecord.matchesIntakeObservation === false ? 1 : 0;
+    const revisions = new Set<string>();
+    if (mission.exceptionState) revisions.add(mission.exceptionState.observed.sourceRevision);
+    if (typeof observeRecord.sourceRevision === "string") {
+      revisions.add(observeRecord.sourceRevision);
+    }
+
     return {
       schemaVersion: OPERATIONAL_EXCEPTION_SCHEMA_VERSION,
       missionId,
+      executionMode: mode,
+      // One read at intake plus one per completed observe attempt. Counted, not
+      // assumed: a mission that never reached the observe node reports fewer.
+      sourceReads: (mission.exceptionState ? 1 : 0) + (observeNode?.attempts ?? 0),
+      sourceRevisionsObserved: revisions.size,
+      staleObservations,
+      shadowActionsCompiled: compileNode?.state === "completed" ? 1 : 0,
+      verificationReads: verifyNode?.attempts ?? 0,
+      // Typed as the literal `0`. In shadow mode nothing can write; in live mode
+      // the connector is simulated and owns only local state. Neither path
+      // touches a real external system.
+      realExternalWrites: 0,
       exceptionDetected: mission.exceptionState ? 1 : 0,
       stateChangingActions: connectorWrites,
       // Attempts beyond the first that still produced one action. Zero is the
@@ -1425,6 +1527,33 @@ export class AgenticMissionService {
       );
     }
 
+    // Two independent gates on the one consequential direction, and neither is
+    // a runtime check on the write itself.
+    //
+    // A live mission against a connector that declares it cannot write is
+    // refused here, at intake, before a plan exists — because such a plan would
+    // compile a write node whose capability the connector has no method for,
+    // and the failure would surface after a human had already approved it.
+    const manifest = connector.manifest();
+    if (exception.executionMode === "live" && !manifest.writeCapabilitiesEnabled) {
+      throw new OperatorError(
+        `Connector ${connector.connectorId} declares write capabilities disabled, so it can only be `
+        + "bound in shadow mode. A configured credential does not imply write authority.",
+        409,
+        "AGENTIC_CONNECTOR_WRITE_DISABLED",
+      );
+    }
+    // And the converse: `apply` genuinely absent from the object is the fact
+    // that matters, so a connector claiming to be write-enabled while exposing
+    // no write method is a contradiction rather than a usable binding.
+    if (exception.executionMode === "live" && typeof connector.apply !== "function") {
+      throw new OperatorError(
+        `Connector ${connector.connectorId} exposes no write method, so no live mission may bind it.`,
+        409,
+        "AGENTIC_CONNECTOR_WRITE_UNAVAILABLE",
+      );
+    }
+
     const desiredBase = {
       missionId: intent.missionId,
       targetId: exception.targetId,
@@ -1522,12 +1651,22 @@ export class AgenticMissionService {
           approvalId: `${mission.missionId}:X3`,
         };
       case "X5":
-        return {
-          connectorId: exception.connectorId,
-          targetId: exception.targetId,
-          desiredStateHash: intake.desired.desiredStateHash,
-          idempotencyKey: String(outputOf("X2").idempotencyKey ?? ""),
-        };
+        // The two oracles judge different things and therefore need different
+        // inputs. The live one needs the desired state it must confirm; the
+        // shadow one needs the revision it must find unmoved.
+        return exception.executionMode === "shadow"
+          ? {
+            connectorId: exception.connectorId,
+            targetId: exception.targetId,
+            observedRevision: String(outputOf("X1").sourceRevision ?? ""),
+            observationHash: String(outputOf("X1").observationHash ?? ""),
+          }
+          : {
+            connectorId: exception.connectorId,
+            targetId: exception.targetId,
+            desiredStateHash: intake.desired.desiredStateHash,
+            idempotencyKey: String(outputOf("X2").idempotencyKey ?? ""),
+          };
       /* c8 ignore next 2 -- unreachable: X3 is the checkpoint and runs no worker. */
       default:
         return {};
@@ -1572,7 +1711,7 @@ export class AgenticMissionService {
         // attempted under one. Absence here is a genuine finding.
         return this.recordStore.read(node.idempotencyKey) ? "conflict" : "no_worker_result";
       }
-      const applied = this.dependencies.connector?.readAction(idempotencyKey) ?? null;
+      const applied = this.dependencies.connector?.readAction?.(idempotencyKey) ?? null;
       if (applied) {
         // The action is on the connector's books. The node may resume from that
         // fact, and must never re-apply it.
@@ -1663,7 +1802,7 @@ export class AgenticMissionService {
       const idempotencyKey = this.exceptionIdempotencyKey(mission);
       const action = idempotencyKey === null
         ? null
-        : this.dependencies.connector?.readAction(idempotencyKey) ?? null;
+        : this.dependencies.connector?.readAction?.(idempotencyKey) ?? null;
       if (!action) {
         throw new OperatorError(
           `Node ${nodeId} reconciled to an applied connector action that can no longer be read.`,

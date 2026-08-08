@@ -211,6 +211,11 @@ function submission(overrides: Record<string, unknown> = {}): Record<string, unk
     exceptionContract: {
       connectorId: SIMULATED_CONNECTOR_ID,
       targetId: TARGET,
+      // Declared, not inherited. `shadow` is the default precisely so that a
+      // mission which changes something has to ask for it in writing, and this
+      // proof is the one that exercises a real write against the simulated
+      // connector.
+      executionMode: "live",
       desiredFields: [
         { field: "reconciledAmount", value: EXPECTED_PAYMENT },
         { field: "status", value: "payment_ready" },
@@ -440,6 +445,7 @@ try {
       traceId: "exception-no-delta-trace",
       exceptionContract: {
         connectorId: SIMULATED_CONNECTOR_ID,
+        executionMode: "live",
         targetId: TARGET,
         desiredFields: [{ field: "status", value: "discrepancy" }],
         acceptanceConstraints: [{
@@ -461,6 +467,7 @@ try {
       traceId: "exception-wrong-connector-trace",
       exceptionContract: {
         connectorId: "connector.simulated.other.v1",
+        executionMode: "live",
         targetId: TARGET,
         desiredFields: [{ field: "status", value: "payment_ready" }],
         acceptanceConstraints: [{
@@ -482,6 +489,7 @@ try {
       traceId: "exception-orphan-constraint-trace",
       exceptionContract: {
         connectorId: SIMULATED_CONNECTOR_ID,
+        executionMode: "live",
         targetId: TARGET,
         desiredFields: [{ field: "status", value: "payment_ready" }],
         acceptanceConstraints: [{
@@ -693,6 +701,7 @@ try {
         traceId: `${missionId}-trace`,
         exceptionContract: {
           connectorId: SIMULATED_CONNECTOR_ID,
+        executionMode: "live",
           targetId: secondTarget,
           desiredFields: [
             { field: "reconciledAmount", value: 900 },
@@ -822,6 +831,7 @@ try {
       traceId: `${missionId}-trace`,
       exceptionContract: {
         connectorId: SIMULATED_CONNECTOR_ID,
+        executionMode: "live",
         targetId: target,
         desiredFields: [{ field: "status", value: "payment_ready" }],
         acceptanceConstraints: [{
@@ -943,6 +953,7 @@ try {
       traceId: `${missionId}-trace`,
       exceptionContract: {
         connectorId: SIMULATED_CONNECTOR_ID,
+        executionMode: "live",
         targetId: target,
         desiredFields: [{ field: "reconciledAmount", value: 70 }],
         acceptanceConstraints: [{

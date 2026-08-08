@@ -947,7 +947,7 @@ CREATE TABLE IF NOT EXISTS operator_agentic_plan_nodes (
     'authority_checkpoint', 'artifact_write', 'outcome_verify',
     -- Operational-exception shapes. The checkpoint and the oracle are shared
     -- with the artifact plan rather than duplicated under new names.
-    'state_observe', 'action_compile', 'connector_apply'
+    'state_observe', 'action_compile', 'connector_apply', 'shadow_authorize'
   )),
   capability_id TEXT,
   worker_kind TEXT,
